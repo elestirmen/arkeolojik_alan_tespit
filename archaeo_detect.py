@@ -28,9 +28,9 @@ import math
 import os
 import sys
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Dict, Generator, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Generator, Iterable, List, Optional, Sequence, TextIO, Tuple, TypeVar
 
 import numpy as np
 import rasterio
@@ -83,35 +83,235 @@ try:
 except ImportError:
     fiona = None
 
+try:
+    from osgeo import gdal
+except ImportError:  # pragma: no cover - optional, used to tame GDAL warnings
+    gdal = None
+
 LOGGER = logging.getLogger("archaeo_detect")
+
+T = TypeVar("T")
+
+_GDAL_HANDLER_INSTALLED = False
+_SUPPRESSED_GDAL_MESSAGES = (
+    "TIFFReadDirectory:Sum of Photometric type-related color channels and ExtraSamples doesn't match SamplesPerPixel",
+)
+
+
+def install_gdal_warning_filter() -> None:
+    """Suppress noisy but harmless GDAL warnings about mis-declared TIFF extrasamples."""
+    global _GDAL_HANDLER_INSTALLED
+    if _GDAL_HANDLER_INSTALLED or gdal is None:
+        return
+
+    def _handler(err_class: int, err_num: int, err_msg: str) -> None:
+        if any(err_msg.startswith(prefix) for prefix in _SUPPRESSED_GDAL_MESSAGES):
+            LOGGER.debug("Suppressed GDAL warning: %s", err_msg)
+            return
+        try:
+            gdal.CPLDefaultErrorHandler(err_class, err_num, err_msg)
+        except AttributeError:  # pragma: no cover - safety for stripped bindings
+            LOGGER.warning("GDAL warning: %s", err_msg)
+
+    gdal.PushErrorHandler(_handler)
+    _GDAL_HANDLER_INSTALLED = True
+
+
+def progress_bar(iterable: Iterable[T], **tqdm_kwargs) -> tqdm:
+    """Wrapper around tqdm that prefers stdout so CLI runners can render progress."""
+    stream: Optional[TextIO]
+    if sys.stdout:
+        stream = sys.stdout
+    elif sys.stderr:
+        stream = sys.stderr
+    else:  # pragma: no cover - exceptionally rare in CLI usage
+        stream = None
+    if stream is not None:
+        tqdm_kwargs.setdefault("file", stream)
+    tqdm_kwargs.setdefault("dynamic_ncols", True)
+    tqdm_kwargs.setdefault("mininterval", 0.5)
+    tqdm_kwargs.setdefault("smoothing", 0.1)
+    tqdm_kwargs.setdefault("leave", False)
+    return tqdm(iterable, **tqdm_kwargs)
 
 # Turkce not: Bu arac, ayni jeokoordinata sahip RGB, DSM ve DTM bantlarini tek bir GeoTIFF icinde bekler;
 # DTM'den SVF/Openness/LRM/slope turetilip RGB ile birlikte 9 kanalli tensore donusturulur.
 # Pretrained U-Net modeliyle kaydirma penceresi cikarimi yapilir; olasilik ve ikili maske GeoTIFF olarak yazilir;
 # istenirse poligonlastirilir.
 
-# ==== User-editable defaults (edit these as needed) ====
-# Bu bloktaki degerleri kendi calismaniza gore degistirebilirsiniz.
-USER_DEFAULTS = {
-    "input": r"C:\\Users\\ertug\\Nextcloud\\arkeolojik_alan_tespit\\kesif_alani.tif",
-    "bands": "1,2,3,4,5",
-    "tile": 1024,
-    "overlap": 256,
-    "th": 0.6,
-    "min_area": 80.0,
-    "mask_talls": 2.5,
-    "vectorize": True,
-    "zero_shot_imagenet": True,
-    "verbose": 1,
-    # Pipeline defaults (can be tuned here)
-    "classic": True,                      # run classical pipeline by default
-    "classic_modes": "combo",            # rvtlog,hessian,morph averaged by default
-    "classic_save_intermediate": True,    # write per-mode rasters by default
-    "classic_th": None,                   # None -> Otsu on classic prob
-    "fuse": True,                         # DL–Classic fusion enabled by default
-    "alpha": 0.5,                         # fusion weight (if enabled)
-}
-# ======================================================
+# ==== Pipeline defaults (tum ayarlar burada) ====
+# Bu dataclass tum parametreleri tek merkezde toplar ve her alanin uzerindeki yorum parametrenin ne yaptigini aciklar.
+
+
+@dataclass
+class PipelineDefaults:
+    # Girdide kullanilacak cok bantli GeoTIFF dosyasinin tam yolu; RGB, DSM ve DTM bantlarini icermelidir.
+    input: str = field(
+        default=r"C:\Users\ertug\Nextcloud\arkeolojik_alan_tespit\kesif_alani.tif",
+        metadata={"help": "Full path to the multi-band GeoTIFF (RGB + DSM + DTM)."},
+    )
+    # Egitilmis .pth agirlik dosyasi; None ise zero-shot veya sablon agirlik akisi devreye girer.
+    weights: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to trained weights (*.pth); leave empty to rely on zero-shot/template logic."},
+    )
+    # R,G,B,DSM,DTM bantlarinin 1-indexli sirasi; bir bant yoksa 0 yazabilirsiniz.
+    bands: str = field(
+        default="1,2,3,4,5",
+        metadata={"help": "Comma separated band order (1-based) for R,G,B,DSM,DTM; use 0 if a band is absent."},
+    )
+    # Teker teker islenecek karo boyutu (piksel); daha buyuk deger GPU bellegini artirir, daha az karo anlamina gelir.
+    tile: int = field(
+        default=1024,
+        metadata={"help": "Tile size in pixels processed per forward pass; larger tiles need more memory."},
+    )
+    # Komsu karolarin bindirme miktari (piksel); dikis hatlarini azaltir fakat toplam karo sayisini artirir.
+    overlap: int = field(
+        default=256,
+        metadata={"help": "Overlap between tiles in pixels; balances seam quality vs. throughput."},
+    )
+    # DL olasilik haritasini maskeye cevirmek icin kullanilan esik (0-1 arasi); dusuk deger daha fazla aday uretir.
+    th: float = field(
+        default=0.6,
+        metadata={"help": "Probability threshold applied to the DL output when generating the binary mask."},
+    )
+    # CUDA mevcudiyetinde otomatik float16 (half precision) kullan; bellek ve hiz kazanci saglar.
+    half: bool = field(
+        default=True,
+        metadata={"help": "Use float16 autocast on CUDA devices (falls back to float32 when CUDA is unavailable)."},
+    )
+    # Tum karolar icin tek bir robust 2-98 yuzdelik normalizasyonu uygula; global kontrast tutarliligi saglar.
+    global_norm: bool = field(
+        default=True,
+        metadata={"help": "Estimate a global percentile normalisation and reuse it for every tile."},
+    )
+    # Global normalizasyon icin ornekleyecegimiz karo sayisi; daha yuksek deger istatistikleri saglamlastirir.
+    norm_sample_tiles: int = field(
+        default=32,
+        metadata={"help": "Number of tiles sampled to compute the global 2nd/98th percentiles."},
+    )
+    # Karo sinirlarinda kosinusu andiran agirliklarla yumusatma yaparak dikis izlerini azalt.
+    feather: bool = field(
+        default=True,
+        metadata={"help": "Feather tile borders with smooth weights; disable if you need raw tile edges."},
+    )
+    # Klasik kabartma tabanli (RVT, Hessian, morfoloji) pipeline'i calistir.
+    classic: bool = field(
+        default=True,
+        metadata={"help": "Run the classical relief pipeline (RVT log, Hessian, morphological filters)."},
+    )
+    # Klasik pipeline icin hangi modlar kullanilacak (rvtlog,hessian,morph,combo).
+    classic_modes: str = field(
+        default="combo",
+        metadata={"help": "Classic modes to compute (e.g. 'combo', 'rvtlog,hessian')."},
+    )
+    # Her klasik modu ayri dosya olarak kaydet; referans icin kullanisli.
+    classic_save_intermediate: bool = field(
+        default=True,
+        metadata={"help": "Write individual classic mode rasters besides the combined output."},
+    )
+    # Klasik pipeline icin sabit maske esigi (0-1); None ise otomatik Otsu kullanilir.
+    classic_th: Optional[float] = field(
+        default=None,
+        metadata={"help": "Manual threshold for classical mask; leave None to use automatic Otsu."},
+    )
+    # DL ve klasik olasiliklarini birlestiren ekstra ciktiyi etkinlestir.
+    fuse: bool = field(
+        default=True,
+        metadata={"help": "Blend DL and classical maps into a fused probability/mask pair."},
+    )
+    # Birlesimde DL olasiliginin agirligi (0-1); 1 yalniz DL, 0 yalniz klasik.
+    alpha: float = field(
+        default=0.5,
+        metadata={"help": "Fusion mixing factor; 1.0 keeps only DL scores, 0.0 keeps only classic."},
+    )
+    # nDSM yuksekliklerine gore yuksek objeleri maskele; bu esigi asan piksel tespit edilmez.
+    mask_talls: Optional[float] = field(
+        default=2.5,
+        metadata={"help": "Suppress detections where nDSM exceeds this height in metres."},
+    )
+    # Vektorelestirmede kabul edilecek minimum poligon alani (metrekare).
+    min_area: float = field(
+        default=80.0,
+        metadata={"help": "Minimum polygon area to keep during vectorisation (square metres)."},
+    )
+    # Poligonlar icin Douglas-Peucker basitlestirme toleransi (metre); None ise uygulanmaz.
+    simplify: Optional[float] = field(
+        default=None,
+        metadata={"help": "Polygon simplification tolerance in metres; set None to keep full detail."},
+    )
+    # Tespitleri GPKG poligon dosyasina aktar.
+    vectorize: bool = field(
+        default=True,
+        metadata={"help": "Export detection masks as polygons (GeoPackage)."},
+    )
+    # segmentation_models_pytorch icinden secilecek mimari adi.
+    arch: str = field(
+        default="Unet",
+        metadata={"help": "segmentation_models_pytorch architecture name (e.g. Unet, UnetPlusPlus)."},
+    )
+    # Tek model kosulurken kullanilacak varsayilan encoder.
+    encoder: str = field(
+        default="resnet34",
+        metadata={"help": "Default encoder backbone when running a single model."},
+    )
+    # Virgul ayrimli encoder listesi; 'all' hepsini, 'none' yalniz varsayilan encoderi kullanir.
+    encoders: str = field(
+        default="all",
+        metadata={"help": "Comma separated encoders to evaluate ('all', 'none', or explicit list)."},
+    )
+    # Encoder bazli agirlik dosya sablonu; {encoder} yer tutucusunu destekler.
+    weights_template: Optional[str] = field(
+        default=None,
+        metadata={"help": "Template for encoder-specific weights (e.g. models/unet_{encoder}_9ch_best.pth)."},
+    )
+    # Cikti dosyalari icin on-ek veya dizin; None ise girdi adindan otomatik uretilir.
+    out_prefix: Optional[str] = field(
+        default=None,
+        metadata={"help": "Output prefix or directory; defaults to using the input file stem."},
+    )
+    # Rastgelelik icin tohum degeri; numpy, torch ve random modullerine aktarilir.
+    seed: int = field(
+        default=42,
+        metadata={"help": "Random seed applied to numpy, torch, and Python random."},
+    )
+    # Trained weights olmadan ImageNet encoderini 9 kanala genisletip zero-shot calistir.
+    zero_shot_imagenet: bool = field(
+        default=True,
+        metadata={"help": "Enable zero-shot inference by inflating ImageNet encoders to 9 channels."},
+    )
+    # Log seviye kontrolu; 0 WARNING, 1 INFO, 2 DEBUG.
+    verbose: int = field(
+        default=1,
+        metadata={"help": "Verbosity level: 0=WARNING, 1=INFO, 2=DEBUG."},
+    )
+
+
+DEFAULTS = PipelineDefaults()
+
+
+def default_for(name: str):
+    return getattr(DEFAULTS, name)
+
+
+def help_for(name: str) -> str:
+    for f in fields(PipelineDefaults):
+        if f.name == name:
+            return f.metadata.get("help", "")
+    raise KeyError(name)
+
+
+def cli_help(name: str, extra: Optional[str] = None) -> str:
+    base = help_for(name)
+    if extra:
+        return f"{base} {extra}".strip()
+    return base
+
+
+def build_config_from_args(args: argparse.Namespace) -> PipelineDefaults:
+    values = {f.name: getattr(args, f.name) for f in fields(PipelineDefaults)}
+    return PipelineDefaults(**values)
+
 
 
 def configure_logging(verbosity: int) -> None:
@@ -251,7 +451,7 @@ def robust_norm(
 
 
 def robust_norm_fixed(arr: np.ndarray, lows: np.ndarray, highs: np.ndarray) -> np.ndarray:
-    """Normalize (C,H,W) with fixed per-channel lows/highs; NaNs→0."""
+    """Normalize (C,H,W) with fixed per-channel lows/highs; NaNsâ†’0."""
     assert arr.ndim == 3
     out = np.zeros_like(arr, dtype=np.float32)
     C = arr.shape[0]
@@ -622,18 +822,30 @@ def build_model(
     return model
 
 
-def inflate_conv1_to_n(conv_w_3: torch.Tensor, in_ch: int = 9, mode: str = "avg") -> torch.Tensor:
+def inflate_conv1_to_n(conv_w: torch.Tensor, in_ch: int = 9, mode: str = "avg") -> torch.Tensor:
     """
-    Inflate a 3-channel conv weight tensor (out,3,kH,kW) to (out,in_ch,kH,kW).
-    mode='avg' uses the mean of RGB filters for extra channels.
+    Inflate a first-conv weight tensor (out,c,kH,kW) to match the requested in_ch.
+    - If channels already match, the tensor is returned unchanged.
+    - If fewer channels are present, extra channels are filled using the average (or first) channel.
+    - If more channels exist than requested, the tensor is truncated.
     """
-    out_ch, c3, kH, kW = conv_w_3.shape
-    assert c3 == 3, "inflate_conv1_to_n expects 3-channel weights"
-    base = conv_w_3.mean(dim=1, keepdim=True) if mode == "avg" else conv_w_3[:, 1:2]  # G channel
-    if in_ch <= 3:
-        return conv_w_3[:, :in_ch]
-    extra = base.repeat(1, in_ch - 3, 1, 1)
-    return torch.cat([conv_w_3, extra], dim=1)
+    if conv_w.ndim != 4:
+        raise ValueError("inflate_conv1_to_n expects a 4D convolution weight tensor.")
+    out_ch, c_in, kH, kW = conv_w.shape
+    if c_in == in_ch:
+        return conv_w.clone()
+    if in_ch < c_in:
+        return conv_w[:, :in_ch].clone()
+
+    if mode == "avg":
+        base = conv_w.mean(dim=1, keepdim=True)
+    elif mode == "first":
+        base = conv_w[:, :1]
+    else:
+        raise ValueError(f"Unsupported inflate mode: {mode}")
+
+    extra = base.repeat(1, in_ch - c_in, 1, 1)
+    return torch.cat([conv_w, extra], dim=1).clone()
 
 
 def build_model_with_imagenet_inflated(
@@ -660,10 +872,47 @@ def build_model_with_imagenet_inflated(
         if k in state_9 and state_9[k].shape == v.shape:
             state_9[k] = v.clone()
 
-    conv1_key_src = next((k for k in state_3.keys() if k.endswith("conv1.weight")), None)
-    conv1_key_tgt = next((k for k in state_9.keys() if k.endswith("conv1.weight")), None)
+    def _first_conv_key(state_dict: dict) -> Optional[str]:
+        convs: List[Tuple[str, torch.Tensor]] = []
+        for key, val in state_dict.items():
+            if not key.endswith(".weight"):
+                continue
+            if getattr(val, "ndim", 0) != 4:
+                continue
+            convs.append((key, val))
+        if not convs:
+            return None
+
+        def priority(item: Tuple[str, torch.Tensor]) -> Tuple[int, str]:
+            key, tensor = item
+            score = 0
+            if "conv1" in key:
+                score -= 20
+            if "stem" in key:
+                score -= 10
+            if key.startswith("encoder."):
+                score -= 5
+            # prefer smaller input channel counts (likely RGB)
+            score += int(tensor.shape[1])
+            return (score, key)
+
+        # Prefer weights with exactly three input channels, then any other.
+        for target_channels in (3, 1, None):
+            filtered = [
+                item for item in convs if target_channels is None or item[1].shape[1] == target_channels
+            ]
+            if not filtered:
+                continue
+            filtered.sort(key=priority)
+            return filtered[0][0]
+
+        convs.sort(key=priority)
+        return convs[0][0]
+
+    conv1_key_src = _first_conv_key(state_3)
+    conv1_key_tgt = _first_conv_key(state_9)
     if conv1_key_src is None or conv1_key_tgt is None:
-        raise RuntimeError("Could not locate encoder conv1 weights to inflate.")
+        raise RuntimeError("Could not locate a 4D first-conv weight to inflate.")
 
     w3 = state_3[conv1_key_src]  # (out,3,kH,kW)
     state_9[conv1_key_tgt] = inflate_conv1_to_n(w3, in_ch=in_ch, mode="avg")
@@ -733,7 +982,7 @@ def make_feather_weights(h: int, w: int, tile: int, overlap: int) -> np.ndarray:
         win = np.ones(n, dtype=np.float32)
         # half-cosine ramps
         t = np.linspace(0, np.pi, ramp, endpoint=False, dtype=np.float32)
-        up = (1 - np.cos(t)) * 0.5  # 0→1
+        up = (1 - np.cos(t)) * 0.5  # 0â†’1
         win[:ramp] = up
         win[-ramp:] = up[::-1]
         return win
@@ -886,7 +1135,7 @@ def infer_tiled(
                 fixed_lows = np.median(np.stack(lows_list, axis=0), axis=0)
                 fixed_highs = np.median(np.stack(highs_list, axis=0), axis=0)
 
-        for window, row, col in tqdm(
+        for window, row, col in progress_bar(
             generate_windows(width, height, tile, overlap),
             total=total_tiles,
             desc="Inference",
@@ -1060,7 +1309,7 @@ def infer_classic_tiled(
             width / max(tile - overlap, 1)
         )
 
-        for window, row, col in tqdm(
+        for window, row, col in progress_bar(
             generate_windows(width, height, tile, overlap),
             total=total_tiles,
             desc="Classic",
@@ -1347,150 +1596,221 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     parser.add_argument(
         "--input",
-        required=False,
-        default=USER_DEFAULTS["input"],
-        help=("Path to multi-band GeoTIFF (default from USER_DEFAULTS at top of file)."),
+        default=default_for("input"),
+        help=cli_help("input", "(update PipelineDefaults.input to change the baked-in path)."),
     )
-    parser.add_argument("--weights", required=False, help="Path to model weights (.pth).")
+    parser.add_argument(
+        "--weights",
+        default=default_for("weights"),
+        help=cli_help("weights"),
+    )
     parser.add_argument(
         "--bands",
-        default="1,2,3,4,5",
-        help="Comma-separated band order for R,G,B,DSM,DTM (use 0 if band missing).",
+        default=default_for("bands"),
+        help=cli_help("bands"),
     )
-    parser.add_argument("--tile", type=int, default=USER_DEFAULTS["tile"], help="Tile size in pixels.")
-    parser.add_argument("--overlap", type=int, default=USER_DEFAULTS["overlap"], help="Overlap in pixels.")
-    parser.add_argument("--th", type=float, default=USER_DEFAULTS["th"], help="Threshold for mask.")
-    parser.add_argument("--half", action="store_true", default=True, help="Enable CUDA autocast (float16).")
-    # Global normalization across tiles
+    parser.add_argument(
+        "--tile",
+        type=int,
+        default=default_for("tile"),
+        help=cli_help("tile"),
+    )
+    parser.add_argument(
+        "--overlap",
+        type=int,
+        default=default_for("overlap"),
+        help=cli_help("overlap"),
+    )
+    parser.add_argument(
+        "--th",
+        type=float,
+        default=default_for("th"),
+        help=cli_help("th"),
+    )
+    parser.add_argument(
+        "--half",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("half"),
+        help=cli_help("half", "(use --no-half to force float32 even when CUDA is present)."),
+    )
     parser.add_argument(
         "--global-norm",
-        action="store_true",
-        default=True,
-        help="Use a single set of robust p2-p98 thresholds computed from sample tiles to normalize all tiles.",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("global_norm"),
+        help=cli_help("global_norm", "(toggle with --no-global-norm for per-tile scaling)."),
     )
     parser.add_argument(
         "--norm-sample-tiles",
         type=int,
-        default=32,
-        help="Number of tiles to sample when estimating global normalization thresholds (center 256x256 crop per tile).",
+        default=default_for("norm_sample_tiles"),
+        help=cli_help("norm_sample_tiles"),
     )
-    # Feather blending on tile edges
     parser.add_argument(
         "--feather",
-        dest="feather",
-        action="store_true",
-        help="Feather tile edges with cosine weights.",
-    )
-    parser.add_argument(
-        "--no-feather",
-        dest="feather",
-        action="store_false",
-        help="Disable feather blending.",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("feather"),
+        help=cli_help("feather", "(switch off with --no-feather for raw tile edges)."),
     )
     parser.add_argument(
         "--classic",
-        dest="classic",
-        action="store_true",
-        help="Run classical relief-based detection pipeline (default on).",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("classic"),
+        help=cli_help("classic", "(disable with --no-classic if you only need DL inference)."),
     )
-    parser.add_argument(
-        "--no-classic",
-        dest="classic",
-        action="store_false",
-        help="Disable classical relief-based detection pipeline.",
-    )
-    parser.set_defaults(feather=True, classic=USER_DEFAULTS["classic"])
     parser.add_argument(
         "--classic-modes",
-        default=USER_DEFAULTS["classic_modes"],
-        help="Comma-separated classic modes: rvtlog,hessian,morph,combo.",
+        default=default_for("classic_modes"),
+        help=cli_help("classic_modes"),
+    )
+    parser.add_argument(
+        "--classic-save-intermediate",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("classic_save_intermediate"),
+        help=cli_help("classic_save_intermediate", "(use --no-classic-save-intermediate to skip per-mode rasters)."),
     )
     parser.add_argument(
         "--classic-th",
         type=float,
-        default=USER_DEFAULTS["classic_th"],
-        help="Override classic threshold in [0,1]; defaults to Otsu.",
+        default=default_for("classic_th"),
+        help=cli_help("classic_th"),
     )
     parser.add_argument(
-        "--classic-save-intermediate",
-        action="store_true",
-        default=USER_DEFAULTS["classic_save_intermediate"],
-        help="Always write per-mode classic outputs when multiple modes run.",
+        "--fuse",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("fuse"),
+        help=cli_help("fuse", "(turn off with --no-fuse to keep DL and classic outputs separate)."),
     )
-    parser.add_argument("--fuse", action="store_true", default=USER_DEFAULTS["fuse"], help="Fuse DL and classical probabilities.")
     parser.add_argument(
         "--alpha",
         type=float,
-        default=USER_DEFAULTS["alpha"],
-        help="Blend weight for DL probability in fusion (0..1).",
+        default=default_for("alpha"),
+        help=cli_help("alpha"),
     )
     parser.add_argument(
         "--mask-talls",
         type=float,
-        default=USER_DEFAULTS["mask_talls"],
-        help="Zero-out detections where nDSM exceeds this height (meters).",
+        default=default_for("mask_talls"),
+        help=cli_help("mask_talls"),
     )
     parser.add_argument(
         "--min-area",
         type=float,
-        default=USER_DEFAULTS["min_area"],
-        help="Minimum polygon area in square meters.",
+        default=default_for("min_area"),
+        help=cli_help("min_area"),
     )
     parser.add_argument(
         "--simplify",
         type=float,
-        default=None,
-        help="Simplify polygons with this tolerance (meters).",
+        default=default_for("simplify"),
+        help=cli_help("simplify"),
     )
-    parser.add_argument("--vectorize", action="store_true", default=USER_DEFAULTS["vectorize"], help="Export polygons to GPKG.")
-    parser.add_argument("--arch", default="Unet", help="segmentation_models_pytorch architecture.")
-    parser.add_argument("--encoder", default="resnet34", help="Encoder backbone.")
-    parser.add_argument("--out-prefix", default=None, help="Output prefix or directory.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--vectorize",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("vectorize"),
+        help=cli_help("vectorize", "(set --no-vectorize to keep only raster outputs)."),
+    )
+    parser.add_argument(
+        "--arch",
+        default=default_for("arch"),
+        help=cli_help("arch"),
+    )
+    parser.add_argument(
+        "--encoder",
+        default=default_for("encoder"),
+        help=cli_help("encoder"),
+    )
+    parser.add_argument(
+        "--encoders",
+        default=default_for("encoders"),
+        help=cli_help(
+            "encoders",
+            "(examples: 'resnet34,resnet50', 'all', 'none').",
+        ),
+    )
+    parser.add_argument(
+        "--weights-template",
+        default=default_for("weights_template"),
+        help=cli_help(
+            "weights_template",
+            "(uses {encoder} placeholder; ignored if file missing).",
+        ),
+    )
+    parser.add_argument(
+        "--out-prefix",
+        default=default_for("out_prefix"),
+        help=cli_help("out_prefix"),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=default_for("seed"),
+        help=cli_help("seed"),
+    )
     parser.add_argument(
         "--zero-shot-imagenet",
-        action="store_true",
-        default=USER_DEFAULTS["zero_shot_imagenet"],
-        help="Run without trained weights by inflating an ImageNet 3-ch encoder to 9-ch (exploratory mode).",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("zero_shot_imagenet"),
+        help=cli_help("zero_shot_imagenet", "(toggle with --no-zero-shot-imagenet when supplying weights)."),
     )
     parser.add_argument(
         "-v",
         "--verbose",
         action="count",
-        default=USER_DEFAULTS["verbose"],
-        help="Increase verbosity (-v for INFO, -vv for DEBUG).",
+        default=default_for("verbose"),
+        help=cli_help("verbose"),
     )
 
     args = parser.parse_args(argv)
+    config = build_config_from_args(args)
 
-    if args.classic_th is not None and not (0.0 <= args.classic_th <= 1.0):
+    ENCODER_ALIASES = {
+        "efficientnet-b3": "timm-efficientnet-b3",
+        "effnet-b3": "timm-efficientnet-b3",
+        "resnet34": "resnet34",
+        "resnet50": "resnet50",
+    }
+
+    def normalize_encoder(name: str) -> Tuple[str, str]:
+        key = (name or "").strip().lower()
+        smp_name = ENCODER_ALIASES.get(key, key)
+        suffix = "efficientnet-b3" if smp_name == "timm-efficientnet-b3" else smp_name
+        return smp_name, suffix
+
+    def available_encoders_list() -> List[str]:
+        return ["resnet34", "resnet50", "efficientnet-b3"]
+
+    if config.classic_th is not None and not (0.0 <= config.classic_th <= 1.0):
         parser.error("--classic-th must be between 0 and 1.")
-    if not (0.0 <= args.alpha <= 1.0):
+    if not (0.0 <= config.alpha <= 1.0):
         parser.error("--alpha must be between 0 and 1.")
 
-    configure_logging(args.verbose)
-    set_random_seeds(args.seed)
+    configure_logging(config.verbose)
+    install_gdal_warning_filter()
+    set_random_seeds(config.seed)
 
-    input_path = Path(args.input)
+    input_path = Path(config.input)
     if not input_path.exists():
         parser.error(f"Input raster not found: {input_path}")
 
-    if not args.zero_shot_imagenet and not args.weights:
-        parser.error("Either provide --weights or use --zero-shot-imagenet for zero-shot inference.")
+    enc_mode = (config.encoders or "").strip().lower()
+    if enc_mode in ("", "none"):
+        if not config.zero_shot_imagenet and not config.weights:
+            parser.error("Either provide --weights or use --zero-shot-imagenet for zero-shot inference.")
 
     weights_path: Optional[Path] = None
-    if args.weights:
-        weights_path = Path(args.weights)
+    if config.weights:
+        weights_path = Path(config.weights)
         if not weights_path.exists():
             parser.error(f"Weights file not found: {weights_path}")
 
-    bands = parse_band_indexes(args.bands)
-    out_prefix = resolve_out_prefix(input_path, args.out_prefix)
+    bands = parse_band_indexes(config.bands)
+    out_prefix = resolve_out_prefix(input_path, config.out_prefix)
     classic_outputs: Optional[ClassicOutputs] = None
     fusion_outputs: Optional[FusionOutputs] = None
     resolved_classic_modes: Optional[Tuple[str, ...]] = None
-    if args.classic:
-        raw_modes = [mode.strip() for mode in args.classic_modes.split(",") if mode.strip()]
+    if config.classic:
+        raw_modes = [mode.strip() for mode in config.classic_modes.split(",") if mode.strip()]
         if not raw_modes:
             parser.error("--classic-modes must include at least one mode.")
         valid_modes = {"rvtlog", "hessian", "morph", "combo"}
@@ -1506,16 +1826,83 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     LOGGER.info("Using device: %s", device)
-    if args.half and device.type != "cuda":
+    if config.half and device.type != "cuda":
         LOGGER.warning("--half requested but CUDA not available; running in float32.")
 
-    if args.zero_shot_imagenet:
+    if enc_mode not in ("", "none"):
+        enc_list = (
+            available_encoders_list()
+            if enc_mode == "all"
+            else [enc.strip() for enc in config.encoders.split(",") if enc.strip()]
+        )
+        for enc in enc_list:
+            smp_name, suffix = normalize_encoder(enc)
+            try:
+                _ = smp.encoders.get_encoder(smp_name, in_channels=3)
+            except Exception:
+                avail = ", ".join(available_encoders_list())
+                LOGGER.error("Unknown encoder '%s'. Supported: %s", enc, avail)
+                continue
+
+            per_weights: Optional[Path] = None
+            if config.weights_template:
+                cand = Path(config.weights_template.format(encoder=suffix))
+                if cand.exists():
+                    per_weights = cand
+                else:
+                    LOGGER.info("[%s] No weights at %s; falling back to zero-shot.", suffix, cand)
+
+            if per_weights is not None:
+                LOGGER.info("Running %s with trained weights: %s", suffix, per_weights)
+                model = build_model(arch=config.arch, encoder=smp_name, in_ch=9)
+                load_weights(model, per_weights, map_location=device)
+            else:
+                LOGGER.info("Running %s in zero-shot (ImageNet 3->9) mode.", suffix)
+                model = build_model_with_imagenet_inflated(arch=config.arch, encoder=smp_name, in_ch=9)
+
+            enc_prefix = out_prefix.with_suffix("")
+            enc_prefix = enc_prefix.parent / f"{enc_prefix.name}_{suffix}"
+
+            outputs = infer_tiled(
+                model=model,
+                input_path=input_path,
+                band_idx=bands,
+                tile=config.tile,
+                overlap=config.overlap,
+                device=device,
+                use_half=config.half,
+                threshold=config.th,
+                mask_talls=config.mask_talls,
+                out_prefix=enc_prefix,
+                global_norm=config.global_norm,
+                norm_sample_tiles=config.norm_sample_tiles,
+                feather=config.feather,
+            )
+            LOGGER.info("[%s] Probability: %s", suffix, outputs.prob_path)
+            LOGGER.info("[%s] Mask: %s", suffix, outputs.mask_path)
+
+            if config.vectorize:
+                vector_base = outputs.mask_path.with_suffix("")
+                gpkg = vectorize_predictions(
+                    mask=outputs.mask,
+                    prob_map=outputs.prob_map,
+                    transform=outputs.transform,
+                    crs=outputs.crs,
+                    out_path=vector_base,
+                    min_area=config.min_area,
+                    simplify_tol=config.simplify,
+                )
+                if gpkg:
+                    LOGGER.info("[%s] Vector: %s", suffix, gpkg)
+        return
+
+    if config.zero_shot_imagenet:
         LOGGER.info("Zero-shot mode: using ImageNet-pretrained encoder inflated to 9 channels.")
         model = build_model_with_imagenet_inflated(
-            arch=args.arch, encoder=args.encoder, in_ch=9
+            arch=config.arch, encoder=config.encoder, in_ch=9
         )
     else:
-        model = build_model(arch=args.arch, encoder=args.encoder, in_ch=9)
+        model = build_model(arch=config.arch, encoder=config.encoder, in_ch=9)
         # weights_path is guaranteed to be set in this branch
         assert weights_path is not None
         load_weights(model, weights_path, map_location=device)
@@ -1529,38 +1916,38 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         model=model,
         input_path=input_path,
         band_idx=bands,
-        tile=args.tile,
-        overlap=args.overlap,
+        tile=config.tile,
+        overlap=config.overlap,
         device=device,
-        use_half=args.half,
-        threshold=args.th,
-        mask_talls=args.mask_talls,
+        use_half=config.half,
+        threshold=config.th,
+        mask_talls=config.mask_talls,
         out_prefix=out_prefix,
-        global_norm=args.global_norm,
-        norm_sample_tiles=args.norm_sample_tiles,
-        feather=args.feather,
+        global_norm=config.global_norm,
+        norm_sample_tiles=config.norm_sample_tiles,
+        feather=config.feather,
     )
 
     LOGGER.info("Probability map written to %s", outputs.prob_path)
     LOGGER.info("Binary mask written to %s", outputs.mask_path)
 
-    fuse_enabled = args.classic and args.fuse
-    if args.fuse and not args.classic:
+    fuse_enabled = config.classic and config.fuse
+    if config.fuse and not config.classic:
         LOGGER.warning("--fuse requested without --classic; ignoring fusion request.")
 
-    if args.classic and resolved_classic_modes is not None:
+    if config.classic and resolved_classic_modes is not None:
         classic_outputs = infer_classic_tiled(
             input_path=input_path,
             band_idx=bands,
-            tile=args.tile,
-            overlap=args.overlap,
+            tile=config.tile,
+            overlap=config.overlap,
             out_prefix=out_prefix,
-            classic_th=args.classic_th,
+            classic_th=config.classic_th,
             modes=resolved_classic_modes,
-            feather=args.feather,
-            save_intermediate=args.classic_save_intermediate,
+            feather=config.feather,
+            save_intermediate=config.classic_save_intermediate,
         )
-        LOGGER.info("Klasik(ler) yazıldı: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
+        LOGGER.info("Classic outputs written: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
         if classic_outputs.per_mode:
             for mode_name, mode_out in classic_outputs.per_mode.items():
                 LOGGER.info(
@@ -1571,7 +1958,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
 
     if fuse_enabled and classic_outputs is not None:
-        alpha = float(args.alpha)
+        alpha = float(config.alpha)
         dl_prob = outputs.prob_map.astype(np.float32)
         classic_prob = classic_outputs.prob_map.astype(np.float32)
         dl_filled = np.nan_to_num(dl_prob, nan=0.0)
@@ -1581,7 +1968,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         fused_valid = np.isfinite(dl_prob) | np.isfinite(classic_prob)
         fused_prob = np.clip(fused_prob, 0.0, 1.0, out=fused_prob)
         fused_prob[~fused_valid] = np.nan
-        fuse_threshold = args.th if args.th is not None else 0.5
+        fuse_threshold = config.th if config.th is not None else 0.5
         fused_mask = np.zeros_like(fused_prob, dtype=np.uint8)
         fused_mask[fused_valid & (fused_prob >= fuse_threshold)] = 1
 
@@ -1620,7 +2007,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         LOGGER.info("Fused outputs written to %s, %s", fused_prob_path, fused_mask_path)
 
-    if args.vectorize:
+    if config.vectorize:
         vector_jobs: List[Tuple[str, np.ndarray, np.ndarray, Affine, Optional[RasterioCRS], Path]] = [
             (
                 "dl",
@@ -1642,7 +2029,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     classic_outputs.mask_path.with_suffix(""),
                 )
             )
-            if args.classic_save_intermediate:
+            if config.classic_save_intermediate:
                 for mode_name, mode_out in classic_outputs.per_mode.items():
                     vector_jobs.append(
                         (
@@ -1673,8 +2060,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 transform=transform,
                 crs=crs_obj,
                 out_path=out_base,
-                min_area=args.min_area,
-                simplify_tol=args.simplify,
+                min_area=config.min_area,
+                simplify_tol=config.simplify,
             )
             if vector_file:
                 LOGGER.info("Vector output (%s) written to %s", label, vector_file)

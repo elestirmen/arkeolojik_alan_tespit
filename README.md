@@ -113,6 +113,26 @@ Quick Start
 - Turn classic off:
   - `--no-classic`
 
+Multi-Encoder Runs
+------------------
+- Default (no extra flags):  
+  ```bash
+  python archaeo_detect.py --input ... --bands 1,2,3,4,5 --zero-shot-imagenet -v
+  ```
+  Creates `_resnet34`, `_resnet50`, and `_efficientnet-b3` outputs under the chosen prefix.
+- Provide per-encoder checkpoints:  
+  ```bash
+  python archaeo_detect.py --input ... --bands 1,2,3,4,5 \
+    --weights-template "C:/.../models/unet_{encoder}_9ch_best.pth" --vectorize -v
+  ```
+  Each encoder loads its matching weights when available; others fall back to zero-shot.
+- Single encoder only:  
+  ```bash
+  python archaeo_detect.py --input ... --bands 1,2,3,4,5 \
+    --encoders none --encoder resnet50 --zero-shot-imagenet -v
+  ```
+  Disables the multi-run loop and uses the legacy single-encoder path.
+
 Command Reference (selected)
 ----------------------------
 - Core IO and model
