@@ -106,9 +106,9 @@ USER_DEFAULTS = {
     # Pipeline defaults (can be tuned here)
     "classic": True,                      # run classical pipeline by default
     "classic_modes": "combo",            # rvtlog,hessian,morph averaged by default
-    "classic_save_intermediate": False,   # per-mode rasters only when requested
+    "classic_save_intermediate": True,    # write per-mode rasters by default
     "classic_th": None,                   # None -> Otsu on classic prob
-    "fuse": False,                        # DL–Classic fusion disabled by default
+    "fuse": True,                         # DL–Classic fusion enabled by default
     "alpha": 0.5,                         # fusion weight (if enabled)
 }
 # ======================================================
@@ -1360,13 +1360,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--tile", type=int, default=USER_DEFAULTS["tile"], help="Tile size in pixels.")
     parser.add_argument("--overlap", type=int, default=USER_DEFAULTS["overlap"], help="Overlap in pixels.")
     parser.add_argument("--th", type=float, default=USER_DEFAULTS["th"], help="Threshold for mask.")
-    parser.add_argument("--half", action="store_true", help="Enable CUDA autocast (float16).")
+    parser.add_argument("--half", action="store_true", default=True, help="Enable CUDA autocast (float16).")
     # Global normalization across tiles
     parser.add_argument(
         "--global-norm",
         action="store_true",
-        default=False,
-        help="Use a single set of robust p2–p98 thresholds computed from sample tiles to normalize all tiles.",
+        default=True,
+        help="Use a single set of robust p2-p98 thresholds computed from sample tiles to normalize all tiles.",
     )
     parser.add_argument(
         "--norm-sample-tiles",
