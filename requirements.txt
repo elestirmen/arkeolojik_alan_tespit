@@ -3,10 +3,14 @@ rasterio==1.3.9
 torch==2.2.1
 segmentation-models-pytorch==0.3.3
 tqdm==4.66.4
-# rvt-py (Relief Visualization Toolbox) currently ships wheels only for Python < 3.11.
-rvt-py==2.2.1; python_version < "3.11"
 scipy==1.11.4
 shapely==2.0.4
 pyproj==3.6.1
 geopandas==0.14.3
 fiona==1.9.5
+
+# Relief Visualization Toolbox (import as `rvt`) for SVF/LRM/Openness derivation.
+# - On Python < 3.11 use the legacy rvt-py wheels.
+# - On Python >= 3.11 use the newer `rvt` package name when available.
+rvt-py==2.2.1; python_version < "3.11"
+rvt; python_version >= "3.11"

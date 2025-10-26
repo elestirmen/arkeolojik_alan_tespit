@@ -1380,8 +1380,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         action="store_false",
         help="Disable feather blending.",
     )
-    parser.set_defaults(feather=True)
-    parser.add_argument("--classic", action="store_true", help="Run classical relief-based detection pipeline.")
+    parser.add_argument(
+        "--classic",
+        dest="classic",
+        action="store_true",
+        help="Run classical relief-based detection pipeline (default on).",
+    )
+    parser.add_argument(
+        "--no-classic",
+        dest="classic",
+        action="store_false",
+        help="Disable classical relief-based detection pipeline.",
+    )
+    parser.set_defaults(feather=True, classic=True)
     parser.add_argument(
         "--classic-modes",
         default="rvtlog",
