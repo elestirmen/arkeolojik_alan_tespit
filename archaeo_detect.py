@@ -30,7 +30,7 @@ import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Generator, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import rasterio
@@ -39,7 +39,14 @@ from rasterio.crs import CRS as RasterioCRS
 from rasterio.transform import Affine
 from rasterio.windows import Window
 from scipy import ndimage
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import (
+    gaussian_filter,
+    gaussian_gradient_magnitude,
+    gaussian_laplace,
+    grey_closing,
+    grey_opening,
+    uniform_filter,
+)
 import torch
 from tqdm import tqdm
 
@@ -86,7 +93,7 @@ LOGGER = logging.getLogger("archaeo_detect")
 # ==== User-editable defaults (edit these as needed) ====
 # Bu bloktaki degerleri kendi calismaniza gore degistirebilirsiniz.
 USER_DEFAULTS = {
-    "input": r"C:\\Users\\ertug\\Nextcloud\\arkeolojik_alan_tespiti\\kesif_alani.tif",
+    "input": r"C:\\Users\\ertug\\Nextcloud\\arkeolojik_alan_tespit\\kesif_alani.tif",
     "bands": "1,2,3,4,5",
     "tile": 1024,
     "overlap": 256,
@@ -167,6 +174,60 @@ def percentile_clip(
         clipped = np.clip((arr - lower) / (upper - lower), 0.0, 1.0)
     clipped[~valid] = 0.0
     return clipped.astype(np.float32)
+
+
+def _norm01(arr: np.ndarray) -> np.ndarray:
+    """Convenience wrapper for percentile-based 0-1 scaling."""
+    return percentile_clip(arr, low=2.0, high=98.0)
+
+
+def _otsu_threshold_0to1(arr: np.ndarray, valid: np.ndarray) -> float:
+    """Compute Otsu threshold on 0..1 data respecting validity mask."""
+    data = arr[valid]
+    if data.size == 0:
+        return 0.5
+    clipped = np.clip(data, 0.0, 1.0)
+    hist, bin_edges = np.histogram(clipped, bins=256, range=(0.0, 1.0))
+    if not np.any(hist):
+        return float(np.nanmean(clipped)) if np.any(np.isfinite(clipped)) else 0.5
+    hist = hist.astype(np.float64)
+    prob = hist / hist.sum()
+    cumulative = np.cumsum(prob)
+    cumulative_mean = np.cumsum(prob * (bin_edges[:-1] + bin_edges[1:]) * 0.5)
+    global_mean = cumulative_mean[-1]
+    numerator = (global_mean * cumulative - cumulative_mean) ** 2
+    denominator = cumulative * (1.0 - cumulative)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sigma_b = numerator / np.maximum(denominator, 1e-12)
+    sigma_b[cumulative == 0.0] = 0.0
+    sigma_b[cumulative == 1.0] = 0.0
+    best = np.argmax(sigma_b)
+    threshold = (bin_edges[best] + bin_edges[best + 1]) * 0.5
+    return float(np.clip(threshold, 0.0, 1.0))
+
+
+def _local_variance(arr: np.ndarray, size: int = 7) -> np.ndarray:
+    """Estimate local variance using uniform filtering."""
+    if size <= 1:
+        return np.zeros_like(arr, dtype=np.float32)
+    arr_f = arr.astype(np.float32, copy=False)
+    mean = uniform_filter(arr_f, size=size, mode="nearest")
+    mean_sq = uniform_filter(arr_f * arr_f, size=size, mode="nearest")
+    var = np.maximum(mean_sq - mean * mean, 0.0)
+    return var.astype(np.float32)
+
+
+def _hessian_response(im: np.ndarray, sigma: float) -> np.ndarray:
+    """Compute normalised second eigenvalue magnitude from Hessian."""
+    im_f = im.astype(np.float32, copy=False)
+    Hxx = gaussian_filter(im_f, sigma=sigma, order=(2, 0), mode="nearest")
+    Hxy = gaussian_filter(im_f, sigma=sigma, order=(1, 1), mode="nearest")
+    Hyy = gaussian_filter(im_f, sigma=sigma, order=(0, 2), mode="nearest")
+    tr = Hxx + Hyy
+    det = Hxx * Hyy - Hxy * Hxy
+    tmp = np.sqrt(np.maximum((tr * tr) / 4.0 - det, 0.0))
+    l2 = tr / 2.0 - tmp
+    return _norm01(np.abs(l2))
 
 
 def robust_norm(
@@ -451,6 +512,64 @@ def compute_derivatives_with_rvt(
     return svf_avg, pos_open, neg_open, lrm, slope
 
 
+def _score_rvtlog(dtm: np.ndarray, pixel_size: float) -> np.ndarray:
+    """Composite RVT + LoG + gradient classical score."""
+    dtm_filled, valid = fill_nodata(dtm)
+    svf, _, neg, lrm, _ = compute_derivatives_with_rvt(dtm, pixel_size=pixel_size)
+    sigmas = (1.0, 2.0, 4.0, 8.0)
+    log_responses = [
+        np.abs(gaussian_laplace(dtm_filled, sigma=s, mode="nearest"))
+        for s in sigmas
+    ]
+    blob = np.maximum.reduce(log_responses)
+    grad = gaussian_gradient_magnitude(dtm_filled, sigma=1.5, mode="nearest")
+    svf_c = 1.0 - _norm01(svf)
+    neg_n = _norm01(neg)
+    lrm_n = _norm01(lrm)
+    var_n = _norm01(_local_variance(dtm_filled, size=7))
+    score = (
+        0.30 * _norm01(blob)
+        + 0.20 * lrm_n
+        + 0.15 * _norm01(svf_c)
+        + 0.15 * _norm01(grad)
+        + 0.10 * neg_n
+        + 0.10 * var_n
+    )
+    score[~valid] = np.nan
+    return score.astype(np.float32)
+
+
+def _score_hessian(dtm: np.ndarray) -> np.ndarray:
+    """Multi-scale Hessian ridge/valley response."""
+    dtm_filled, valid = fill_nodata(dtm)
+    sigmas = (1.0, 2.0, 4.0, 8.0)
+    responses = [_hessian_response(dtm_filled, sigma=s) for s in sigmas]
+    score = np.maximum.reduce(responses)
+    score[~valid] = np.nan
+    return score.astype(np.float32)
+
+
+def _score_morph(dtm: np.ndarray) -> np.ndarray:
+    """Morphological white/black top-hat prominence score."""
+    dtm_filled, valid = fill_nodata(dtm)
+    radii = (3, 5, 9, 15)
+    wth_list = []
+    bth_list = []
+    for r in radii:
+        size = (int(r), int(r))
+        opening = grey_opening(dtm_filled, size=size, mode="nearest")
+        closing = grey_closing(dtm_filled, size=size, mode="nearest")
+        wth = dtm_filled - opening
+        bth = closing - dtm_filled
+        wth_list.append(_norm01(wth))
+        bth_list.append(_norm01(bth))
+    hill = np.maximum.reduce(wth_list)
+    moat = np.maximum.reduce(bth_list)
+    score = np.maximum(hill, moat)
+    score[~valid] = np.nan
+    return score.astype(np.float32)
+
+
 def stack_channels(
     rgb: np.ndarray,
     svf: np.ndarray,
@@ -625,6 +744,38 @@ class InferenceOutputs:
     mask: np.ndarray
     transform: Affine
     crs: Optional[RasterioCRS]
+
+
+@dataclass
+class ClassicModeOutput:
+    prob_path: Path
+    mask_path: Path
+    prob_map: np.ndarray
+    mask: np.ndarray
+    threshold: float
+
+
+@dataclass
+class ClassicOutputs:
+    prob_path: Path
+    mask_path: Path
+    prob_map: np.ndarray
+    mask: np.ndarray
+    transform: Affine
+    crs: Optional[RasterioCRS]
+    threshold: float
+    per_mode: Dict[str, ClassicModeOutput]
+
+
+@dataclass
+class FusionOutputs:
+    prob_path: Path
+    mask_path: Path
+    prob_map: np.ndarray
+    mask: np.ndarray
+    transform: Affine
+    crs: Optional[RasterioCRS]
+    threshold: float
 
 
 def infer_tiled(
@@ -854,6 +1005,189 @@ def infer_tiled(
     )
 
 
+def infer_classic_tiled(
+    input_path: Path,
+    band_idx: Sequence[int],
+    tile: int,
+    overlap: int,
+    out_prefix: Path,
+    classic_th: Optional[float] = None,
+    modes: Sequence[str] = ("rvtlog",),
+    feather: bool = True,
+    save_intermediate: bool = False,
+) -> ClassicOutputs:
+    """Run classical raster scoring methods in a tiled fashion."""
+    if len(band_idx) < 5 or band_idx[4] <= 0:
+        raise ValueError("DTM band index must be provided for classic inference.")
+    base_modes = []
+    for mode in modes:
+        key = mode.strip().lower()
+        if key not in base_modes:
+            base_modes.append(key)
+    if not base_modes:
+        raise ValueError("At least one classic mode must be specified.")
+    allowed = {"rvtlog", "hessian", "morph"}
+    unknown = [m for m in base_modes if m not in allowed]
+    if unknown:
+        raise ValueError(f"Unsupported classic mode(s): {', '.join(unknown)}")
+    base_prefix = out_prefix.with_suffix("")
+    base_prefix.parent.mkdir(parents=True, exist_ok=True)
+
+    with rasterio.open(input_path) as src:
+        meta = src.meta.copy()
+        height, width = src.height, src.width
+        transform = src.transform
+        crs = src.crs
+        pixel_size = float((abs(transform.a) + abs(transform.e)) / 2.0)
+
+        prob_acc: Dict[str, np.ndarray] = {
+            mode: np.zeros((height, width), dtype=np.float32) for mode in base_modes
+        }
+        weight_acc: Dict[str, np.ndarray] = {
+            mode: np.zeros((height, width), dtype=np.float32) for mode in base_modes
+        }
+        valid_global = np.zeros((height, width), dtype=bool)
+        dtm_idx = band_idx[4]
+
+        total_tiles = math.ceil(height / max(tile - overlap, 1)) * math.ceil(
+            width / max(tile - overlap, 1)
+        )
+
+        for window, row, col in tqdm(
+            generate_windows(width, height, tile, overlap),
+            total=total_tiles,
+            desc="Classic",
+            unit="tile",
+        ):
+            dtm_window = src.read(dtm_idx, window=window, boundless=True, masked=True)
+            dtm_tile = np.ma.filled(dtm_window.astype(np.float32), np.nan)
+
+            win_height = int(window.height)
+            win_width = int(window.width)
+            row_slice = slice(row, row + win_height)
+            col_slice = slice(col, col + win_width)
+            valid_tile = np.isfinite(dtm_tile)
+            valid_global[row_slice, col_slice] |= valid_tile
+            if not np.any(valid_tile):
+                continue
+
+            if feather:
+                weights = make_feather_weights(win_height, win_width, tile, overlap)
+            else:
+                weights = np.ones((win_height, win_width), dtype=np.float32)
+
+            for mode in base_modes:
+                if mode == "rvtlog":
+                    score_tile = _score_rvtlog(dtm_tile, pixel_size=pixel_size)
+                elif mode == "hessian":
+                    score_tile = _score_hessian(dtm_tile)
+                elif mode == "morph":
+                    score_tile = _score_morph(dtm_tile)
+                else:  # pragma: no cover - guarded above
+                    continue
+
+                valid_mode = valid_tile & np.isfinite(score_tile)
+                if not np.any(valid_mode):
+                    continue
+                score_tile_masked = np.where(valid_mode, score_tile, np.nan).astype(np.float32)
+                prob_tile = _norm01(score_tile_masked)
+                prob_tile[~valid_mode] = np.nan
+                weight_tile = weights * valid_mode.astype(np.float32)
+                prob_fill = np.nan_to_num(prob_tile, nan=0.0)
+
+                prob_acc[mode][row_slice, col_slice] += prob_fill * weight_tile
+                weight_acc[mode][row_slice, col_slice] += weight_tile
+
+    per_mode_prob: Dict[str, np.ndarray] = {}
+    per_mode_mask: Dict[str, np.ndarray] = {}
+    per_mode_thresholds: Dict[str, float] = {}
+
+    for mode in base_modes:
+        acc = prob_acc[mode]
+        weights = weight_acc[mode]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            prob_map = np.divide(acc, weights, out=np.zeros_like(acc), where=weights > 0)
+        prob_map = prob_map.astype(np.float32)
+        prob_map[weights <= 0] = np.nan
+        prob_map[~valid_global] = np.nan
+        valid_mode = np.isfinite(prob_map)
+        if np.any(valid_mode):
+            prob_norm = _norm01(np.where(valid_mode, prob_map, np.nan))
+            prob_norm[~valid_mode] = np.nan
+        else:
+            prob_norm = np.full_like(prob_map, np.nan, dtype=np.float32)
+        if classic_th is not None:
+            threshold = float(classic_th)
+        else:
+            threshold = _otsu_threshold_0to1(prob_norm, valid_mode)
+        mask = np.zeros_like(prob_norm, dtype=np.uint8)
+        mask[valid_mode & (prob_norm >= threshold)] = 1
+        per_mode_prob[mode] = prob_norm.astype(np.float32)
+        per_mode_mask[mode] = mask
+        per_mode_thresholds[mode] = threshold
+
+    if per_mode_prob:
+        stack = np.stack([per_mode_prob[m] for m in base_modes], axis=0)
+        combined_prob = np.nanmean(stack, axis=0).astype(np.float32)
+    else:
+        combined_prob = np.full((height, width), np.nan, dtype=np.float32)
+    combined_prob[~valid_global] = np.nan
+    combined_valid = np.isfinite(combined_prob)
+    combined_prob = np.clip(combined_prob, 0.0, 1.0, out=combined_prob)
+
+    if classic_th is not None:
+        combined_threshold = float(classic_th)
+    else:
+        combined_threshold = _otsu_threshold_0to1(combined_prob, combined_valid)
+    combined_mask = np.zeros_like(combined_prob, dtype=np.uint8)
+    combined_mask[combined_valid & (combined_prob >= combined_threshold)] = 1
+
+    float_meta = meta.copy()
+    float_meta.update(count=1, dtype="float32", nodata=np.nan, compress="deflate")
+    mask_meta = float_meta.copy()
+    mask_meta.update(dtype="uint8", nodata=0)
+
+    classic_prob_path = base_prefix.parent / f"{base_prefix.name}_classic_prob.tif"
+    classic_mask_path = base_prefix.parent / f"{base_prefix.name}_classic_mask.tif"
+    with rasterio.open(classic_prob_path, "w", **float_meta) as dst:
+        dst.write(combined_prob[np.newaxis, :, :])
+    with rasterio.open(classic_mask_path, "w", **mask_meta) as dst:
+        dst.write(combined_mask[np.newaxis, :, :])
+
+    per_mode_outputs: Dict[str, ClassicModeOutput] = {}
+    write_individual = save_intermediate or len(base_modes) == 1
+    if write_individual:
+        for mode in base_modes:
+            prob_map = per_mode_prob.get(mode)
+            mask_map = per_mode_mask.get(mode)
+            if prob_map is None or mask_map is None:
+                continue
+            mode_prob_path = base_prefix.parent / f"{base_prefix.name}_classic_{mode}_prob.tif"
+            mode_mask_path = base_prefix.parent / f"{base_prefix.name}_classic_{mode}_mask.tif"
+            with rasterio.open(mode_prob_path, "w", **float_meta) as dst:
+                dst.write(prob_map[np.newaxis, :, :])
+            with rasterio.open(mode_mask_path, "w", **mask_meta) as dst:
+                dst.write(mask_map[np.newaxis, :, :])
+            per_mode_outputs[mode] = ClassicModeOutput(
+                prob_path=mode_prob_path,
+                mask_path=mode_mask_path,
+                prob_map=prob_map,
+                mask=mask_map,
+                threshold=per_mode_thresholds.get(mode, combined_threshold),
+            )
+
+    return ClassicOutputs(
+        prob_path=classic_prob_path,
+        mask_path=classic_mask_path,
+        prob_map=combined_prob,
+        mask=combined_mask,
+        transform=transform,
+        crs=crs,
+        threshold=combined_threshold,
+        per_mode=per_mode_outputs,
+    )
+
+
 def vectorize_predictions(
     mask: np.ndarray,
     prob_map: np.ndarray,
@@ -1047,6 +1381,30 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help="Disable feather blending.",
     )
     parser.set_defaults(feather=True)
+    parser.add_argument("--classic", action="store_true", help="Run classical relief-based detection pipeline.")
+    parser.add_argument(
+        "--classic-modes",
+        default="rvtlog",
+        help="Comma-separated classic modes: rvtlog,hessian,morph,combo.",
+    )
+    parser.add_argument(
+        "--classic-th",
+        type=float,
+        default=None,
+        help="Override classic threshold in [0,1]; defaults to Otsu.",
+    )
+    parser.add_argument(
+        "--classic-save-intermediate",
+        action="store_true",
+        help="Always write per-mode classic outputs when multiple modes run.",
+    )
+    parser.add_argument("--fuse", action="store_true", help="Fuse DL and classical probabilities.")
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.5,
+        help="Blend weight for DL probability in fusion (0..1).",
+    )
     parser.add_argument(
         "--mask-talls",
         type=float,
@@ -1086,6 +1444,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     args = parser.parse_args(argv)
 
+    if args.classic_th is not None and not (0.0 <= args.classic_th <= 1.0):
+        parser.error("--classic-th must be between 0 and 1.")
+    if not (0.0 <= args.alpha <= 1.0):
+        parser.error("--alpha must be between 0 and 1.")
+
     configure_logging(args.verbose)
     set_random_seeds(args.seed)
 
@@ -1104,6 +1467,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     bands = parse_band_indexes(args.bands)
     out_prefix = resolve_out_prefix(input_path, args.out_prefix)
+    classic_outputs: Optional[ClassicOutputs] = None
+    fusion_outputs: Optional[FusionOutputs] = None
+    resolved_classic_modes: Optional[Tuple[str, ...]] = None
+    if args.classic:
+        raw_modes = [mode.strip() for mode in args.classic_modes.split(",") if mode.strip()]
+        if not raw_modes:
+            parser.error("--classic-modes must include at least one mode.")
+        valid_modes = {"rvtlog", "hessian", "morph", "combo"}
+        invalid = [m for m in raw_modes if m.lower() not in valid_modes]
+        if invalid:
+            parser.error(f"Unsupported classic mode(s): {', '.join(invalid)}")
+        if len(raw_modes) == 1 and raw_modes[0].lower() == "combo":
+            resolved_classic_modes = ("rvtlog", "hessian", "morph")
+        elif any(m.lower() == "combo" for m in raw_modes):
+            parser.error("'combo' cannot be combined with other classic modes.")
+        else:
+            resolved_classic_modes = tuple(m.lower() for m in raw_modes)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     LOGGER.info("Using device: %s", device)
@@ -1145,19 +1525,140 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     LOGGER.info("Probability map written to %s", outputs.prob_path)
     LOGGER.info("Binary mask written to %s", outputs.mask_path)
 
-    if args.vectorize:
-        vector_base = outputs.mask_path.with_suffix("")
-        vector_file = vectorize_predictions(
-            mask=outputs.mask,
-            prob_map=outputs.prob_map,
+    fuse_enabled = args.classic and args.fuse
+    if args.fuse and not args.classic:
+        LOGGER.warning("--fuse requested without --classic; ignoring fusion request.")
+
+    if args.classic and resolved_classic_modes is not None:
+        classic_outputs = infer_classic_tiled(
+            input_path=input_path,
+            band_idx=bands,
+            tile=args.tile,
+            overlap=args.overlap,
+            out_prefix=out_prefix,
+            classic_th=args.classic_th,
+            modes=resolved_classic_modes,
+            feather=args.feather,
+            save_intermediate=args.classic_save_intermediate,
+        )
+        LOGGER.info("Klasik(ler) yazıldı: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
+        if classic_outputs.per_mode:
+            for mode_name, mode_out in classic_outputs.per_mode.items():
+                LOGGER.info(
+                    "Classic mode '%s' outputs: %s, %s",
+                    mode_name,
+                    mode_out.prob_path,
+                    mode_out.mask_path,
+                )
+
+    if fuse_enabled and classic_outputs is not None:
+        alpha = float(args.alpha)
+        dl_prob = outputs.prob_map.astype(np.float32)
+        classic_prob = classic_outputs.prob_map.astype(np.float32)
+        dl_filled = np.nan_to_num(dl_prob, nan=0.0)
+        classic_filled = np.nan_to_num(classic_prob, nan=0.0)
+        fused_prob = alpha * dl_filled + (1.0 - alpha) * classic_filled
+        fused_prob = fused_prob.astype(np.float32)
+        fused_valid = np.isfinite(dl_prob) | np.isfinite(classic_prob)
+        fused_prob = np.clip(fused_prob, 0.0, 1.0, out=fused_prob)
+        fused_prob[~fused_valid] = np.nan
+        fuse_threshold = args.th if args.th is not None else 0.5
+        fused_mask = np.zeros_like(fused_prob, dtype=np.uint8)
+        fused_mask[fused_valid & (fused_prob >= fuse_threshold)] = 1
+
+        base_prefix = out_prefix.with_suffix("")
+        base_prefix.parent.mkdir(parents=True, exist_ok=True)
+        fused_prob_path = base_prefix.parent / f"{base_prefix.name}_fused_prob.tif"
+        fused_mask_path = base_prefix.parent / f"{base_prefix.name}_fused_mask.tif"
+
+        common_meta = {
+            "driver": "GTiff",
+            "height": fused_prob.shape[0],
+            "width": fused_prob.shape[1],
+            "count": 1,
+            "transform": outputs.transform,
+            "crs": outputs.crs,
+            "compress": "deflate",
+        }
+        float_meta = common_meta.copy()
+        float_meta.update(dtype="float32", nodata=np.nan)
+        mask_meta = common_meta.copy()
+        mask_meta.update(dtype="uint8", nodata=0)
+
+        with rasterio.open(fused_prob_path, "w", **float_meta) as dst:
+            dst.write(fused_prob[np.newaxis, :, :])
+        with rasterio.open(fused_mask_path, "w", **mask_meta) as dst:
+            dst.write(fused_mask[np.newaxis, :, :])
+
+        fusion_outputs = FusionOutputs(
+            prob_path=fused_prob_path,
+            mask_path=fused_mask_path,
+            prob_map=fused_prob,
+            mask=fused_mask,
             transform=outputs.transform,
             crs=outputs.crs,
-            out_path=vector_base,
-            min_area=args.min_area,
-            simplify_tol=args.simplify,
+            threshold=fuse_threshold,
         )
-        if vector_file:
-            LOGGER.info("Vector output written to %s", vector_file)
+        LOGGER.info("Fused outputs written to %s, %s", fused_prob_path, fused_mask_path)
+
+    if args.vectorize:
+        vector_jobs: List[Tuple[str, np.ndarray, np.ndarray, Affine, Optional[RasterioCRS], Path]] = [
+            (
+                "dl",
+                outputs.mask,
+                outputs.prob_map,
+                outputs.transform,
+                outputs.crs,
+                outputs.mask_path.with_suffix(""),
+            )
+        ]
+        if classic_outputs is not None:
+            vector_jobs.append(
+                (
+                    "classic",
+                    classic_outputs.mask,
+                    classic_outputs.prob_map,
+                    classic_outputs.transform,
+                    classic_outputs.crs,
+                    classic_outputs.mask_path.with_suffix(""),
+                )
+            )
+            if args.classic_save_intermediate:
+                for mode_name, mode_out in classic_outputs.per_mode.items():
+                    vector_jobs.append(
+                        (
+                            f"classic_{mode_name}",
+                            mode_out.mask,
+                            mode_out.prob_map,
+                            classic_outputs.transform,
+                            classic_outputs.crs,
+                            mode_out.mask_path.with_suffix(""),
+                        )
+                    )
+        if fusion_outputs is not None:
+            vector_jobs.append(
+                (
+                    "fused",
+                    fusion_outputs.mask,
+                    fusion_outputs.prob_map,
+                    fusion_outputs.transform,
+                    fusion_outputs.crs,
+                    fusion_outputs.mask_path.with_suffix(""),
+                )
+            )
+
+        for label, mask_arr, prob_arr, transform, crs_obj, out_base in vector_jobs:
+            vector_file = vectorize_predictions(
+                mask=mask_arr,
+                prob_map=prob_arr,
+                transform=transform,
+                crs=crs_obj,
+                out_path=out_base,
+                min_area=args.min_area,
+                simplify_tol=args.simplify,
+            )
+            if vector_file:
+                LOGGER.info("Vector output (%s) written to %s", label, vector_file)
 
 
 if __name__ == "__main__":
