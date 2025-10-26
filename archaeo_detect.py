@@ -1,4 +1,4 @@
-"""
+﻿"""
 Command-line tool for archaeological feature detection from multi-band GeoTIFFs.
 
 The pipeline performs the following steps:
@@ -7,7 +7,7 @@ The pipeline performs the following steps:
    slope) from the DTM via the Relief Visualization Toolbox (rvt-py).
 3. Builds a 9-channel tensor stack [R, G, B, SVF, PosOpen, NegOpen, LRM, Slope, nDSM],
    normalises channels with robust 2-98 percentile scaling, and handles nodata safely.
-4. Runs tiled iInference with a pretrained U-Net style model (segmentation_models_pytorch),
+4. Runs tiled inference with a pretrained U-Net style model (segmentation_models_pytorch),
    blending overlapping tiles to construct a seamless probability map.
 5. Applies optional tall-object masking, thresholds to a binary mask, and writes both
    probability and mask GeoTIFF outputs with compression, preserving georeferencing.
@@ -30,7 +30,7 @@ import sys
 from contextlib import nullcontext
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Dict, Generator, Iterable, List, Optional, Sequence, TextIO, Tuple, TypeVar
+from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence, TextIO, Tuple, TypeVar
 
 import numpy as np
 import rasterio
@@ -91,6 +91,29 @@ except ImportError:  # pragma: no cover - optional, used to tame GDAL warnings
 LOGGER = logging.getLogger("archaeo_detect")
 
 T = TypeVar("T")
+
+# ==== Constants ====
+# Normalization percentiles
+PERCENTILE_LOW = 2.0
+PERCENTILE_HIGH = 98.0
+
+# Multi-scale filter parameters
+SIGMA_SCALES = (1.0, 2.0, 4.0, 8.0)
+MORPHOLOGY_RADII = (3, 5, 9, 15)
+RVT_RADII = (5.0, 10.0, 20.0, 30.0, 50.0)
+
+# Histogram and threshold parameters
+HISTOGRAM_BINS = 256
+HISTOGRAM_RANGE = (0.0, 1.0)
+
+# Default filter sizes
+LOCAL_VARIANCE_WINDOW = 7
+GAUSSIAN_GRADIENT_SIGMA = 1.5
+GAUSSIAN_LRM_SIGMA = 6.0
+
+# Tile processing defaults
+TILE_SAMPLE_CROP_SIZE = 256
+LABEL_CONNECTIVITY_STRUCTURE = (3, 3)
 
 _GDAL_HANDLER_INSTALLED = False
 _SUPPRESSED_GDAL_MESSAGES = (
@@ -365,7 +388,7 @@ def compute_ndsm(dsm: Optional[np.ndarray], dtm: np.ndarray) -> np.ndarray:
 
 
 def percentile_clip(
-    arr: np.ndarray, low: float = 2.0, high: float = 98.0
+    arr: np.ndarray, low: float = PERCENTILE_LOW, high: float = PERCENTILE_HIGH
 ) -> np.ndarray:
     """Clip array values between given percentiles while respecting NaNs."""
     if arr.size == 0:
@@ -385,7 +408,7 @@ def percentile_clip(
 
 def _norm01(arr: np.ndarray) -> np.ndarray:
     """Convenience wrapper for percentile-based 0-1 scaling."""
-    return percentile_clip(arr, low=2.0, high=98.0)
+    return percentile_clip(arr, low=PERCENTILE_LOW, high=PERCENTILE_HIGH)
 
 
 def _otsu_threshold_0to1(arr: np.ndarray, valid: np.ndarray) -> float:
@@ -394,7 +417,7 @@ def _otsu_threshold_0to1(arr: np.ndarray, valid: np.ndarray) -> float:
     if data.size == 0:
         return 0.5
     clipped = np.clip(data, 0.0, 1.0)
-    hist, bin_edges = np.histogram(clipped, bins=256, range=(0.0, 1.0))
+    hist, bin_edges = np.histogram(clipped, bins=HISTOGRAM_BINS, range=HISTOGRAM_RANGE)
     if not np.any(hist):
         return float(np.nanmean(clipped)) if np.any(np.isfinite(clipped)) else 0.5
     hist = hist.astype(np.float64)
@@ -413,7 +436,7 @@ def _otsu_threshold_0to1(arr: np.ndarray, valid: np.ndarray) -> float:
     return float(np.clip(threshold, 0.0, 1.0))
 
 
-def _local_variance(arr: np.ndarray, size: int = 7) -> np.ndarray:
+def _local_variance(arr: np.ndarray, size: int = LOCAL_VARIANCE_WINDOW) -> np.ndarray:
     """Estimate local variance using uniform filtering."""
     if size <= 1:
         return np.zeros_like(arr, dtype=np.float32)
@@ -438,7 +461,7 @@ def _hessian_response(im: np.ndarray, sigma: float) -> np.ndarray:
 
 
 def robust_norm(
-    arr: np.ndarray, p_low: float = 2.0, p_high: float = 98.0
+    arr: np.ndarray, p_low: float = PERCENTILE_LOW, p_high: float = PERCENTILE_HIGH
 ) -> np.ndarray:
     """Robust per-channel min-max normalisation with percentile clipping."""
     if arr.ndim != 3:
@@ -486,7 +509,7 @@ def fill_nodata(
 def compute_derivatives_with_rvt(
     dtm: np.ndarray,
     pixel_size: float,
-    radii: Sequence[float] = (5.0, 10.0, 20.0, 30.0, 50.0),
+    radii: Sequence[float] = RVT_RADII,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute SVF, openness, LRM, and slope using RVT routines."""
     dtm_filled, valid_mask = fill_nodata(dtm)
@@ -684,7 +707,7 @@ def compute_derivatives_with_rvt(
         lrm = _as_float32_array(_call_lrm(), "local_relief_model")
     except AttributeError:
         LOGGER.warning("rvt.vis.local_relief_model missing; using Gaussian fallback.")
-        low_pass = gaussian_filter(dtm_filled, sigma=6.0)
+        low_pass = gaussian_filter(dtm_filled, sigma=GAUSSIAN_LRM_SIGMA)
         lrm = (dtm_filled - low_pass).astype(np.float32)
 
     # slope signature also varies across versions; try with/without keywords.
@@ -723,17 +746,17 @@ def _score_rvtlog(dtm: np.ndarray, pixel_size: float) -> np.ndarray:
     """Composite RVT + LoG + gradient classical score."""
     dtm_filled, valid = fill_nodata(dtm)
     svf, _, neg, lrm, _ = compute_derivatives_with_rvt(dtm, pixel_size=pixel_size)
-    sigmas = (1.0, 2.0, 4.0, 8.0)
+    sigmas = SIGMA_SCALES
     log_responses = [
         np.abs(gaussian_laplace(dtm_filled, sigma=s, mode="nearest"))
         for s in sigmas
     ]
     blob = np.maximum.reduce(log_responses)
-    grad = gaussian_gradient_magnitude(dtm_filled, sigma=1.5, mode="nearest")
+    grad = gaussian_gradient_magnitude(dtm_filled, sigma=GAUSSIAN_GRADIENT_SIGMA, mode="nearest")
     svf_c = 1.0 - _norm01(svf)
     neg_n = _norm01(neg)
     lrm_n = _norm01(lrm)
-    var_n = _norm01(_local_variance(dtm_filled, size=7))
+    var_n = _norm01(_local_variance(dtm_filled, size=LOCAL_VARIANCE_WINDOW))
     score = (
         0.30 * _norm01(blob)
         + 0.20 * lrm_n
@@ -749,7 +772,7 @@ def _score_rvtlog(dtm: np.ndarray, pixel_size: float) -> np.ndarray:
 def _score_hessian(dtm: np.ndarray) -> np.ndarray:
     """Multi-scale Hessian ridge/valley response."""
     dtm_filled, valid = fill_nodata(dtm)
-    sigmas = (1.0, 2.0, 4.0, 8.0)
+    sigmas = SIGMA_SCALES
     responses = [_hessian_response(dtm_filled, sigma=s) for s in sigmas]
     score = np.maximum.reduce(responses)
     score[~valid] = np.nan
@@ -759,7 +782,7 @@ def _score_hessian(dtm: np.ndarray) -> np.ndarray:
 def _score_morph(dtm: np.ndarray) -> np.ndarray:
     """Morphological white/black top-hat prominence score."""
     dtm_filled, valid = fill_nodata(dtm)
-    radii = (3, 5, 9, 15)
+    radii = MORPHOLOGY_RADII
     wth_list = []
     bth_list = []
     for r in radii:
@@ -809,7 +832,7 @@ def build_model(
     encoder: str = "resnet34",
     in_ch: int = 9,
 ) -> torch.nn.Module:
-    """nstantiate a segmentation model from segmentation_models_pytorch."""
+    """Instantiate a segmentation model from segmentation_models_pytorch."""
     if not hasattr(smp, arch):
         raise ValueError(f"Architecture '{arch}' not found in segmentation_models_pytorch.")
     model_cls = getattr(smp, arch)
@@ -1049,7 +1072,7 @@ def infer_tiled(
     norm_sample_tiles: int,
     feather: bool,
 ) -> InferenceOutputs:
-    """Run tiled iInference and save outputs."""
+    """Run tiled inference and save outputs."""
     model.eval()
     model.to(device)
 
@@ -1106,8 +1129,8 @@ def infer_tiled(
                 stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
 
                 Hs, Ws = stack_s.shape[1], stack_s.shape[2]
-                ch = min(256, Hs)
-                cw = min(256, Ws)
+                ch = min(TILE_SAMPLE_CROP_SIZE, Hs)
+                cw = min(TILE_SAMPLE_CROP_SIZE, Ws)
                 r0 = max(0, (Hs - ch) // 2)
                 c0 = max(0, (Ws - cw) // 2)
                 crop = stack_s[:, r0 : r0 + ch, c0 : c0 + cw]
@@ -1242,14 +1265,14 @@ def infer_tiled(
         prob_path = base_prefix.parent / f"{base_prefix.name}_prob.tif"
         mask_path = base_prefix.parent / f"{base_prefix.name}_mask.tif"
 
-        meta.update(count=1, dtype="float32", nodata=np.nan, compress="deflate")
-        with rasterio.open(prob_path, "w", **meta) as dst:
-            dst.write(prob_map[np.newaxis, :, :])
-
-        mask_meta = meta.copy()
-        mask_meta.update(dtype="uint8", nodata=0)
-        with rasterio.open(mask_path, "w", **mask_meta) as dst:
-            dst.write(binary_mask[np.newaxis, :, :])
+        write_prob_and_mask_rasters(
+            prob_map=prob_map,
+            mask=binary_mask,
+            transform=transform,
+            crs=crs,
+            prob_path=prob_path,
+            mask_path=mask_path,
+        )
 
     return InferenceOutputs(
         prob_path=prob_path,
@@ -1398,17 +1421,17 @@ def infer_classic_tiled(
     combined_mask = np.zeros_like(combined_prob, dtype=np.uint8)
     combined_mask[combined_valid & (combined_prob >= combined_threshold)] = 1
 
-    float_meta = meta.copy()
-    float_meta.update(count=1, dtype="float32", nodata=np.nan, compress="deflate")
-    mask_meta = float_meta.copy()
-    mask_meta.update(dtype="uint8", nodata=0)
-
     classic_prob_path = base_prefix.parent / f"{base_prefix.name}_classic_prob.tif"
     classic_mask_path = base_prefix.parent / f"{base_prefix.name}_classic_mask.tif"
-    with rasterio.open(classic_prob_path, "w", **float_meta) as dst:
-        dst.write(combined_prob[np.newaxis, :, :])
-    with rasterio.open(classic_mask_path, "w", **mask_meta) as dst:
-        dst.write(combined_mask[np.newaxis, :, :])
+    
+    write_prob_and_mask_rasters(
+        prob_map=combined_prob,
+        mask=combined_mask,
+        transform=transform,
+        crs=crs,
+        prob_path=classic_prob_path,
+        mask_path=classic_mask_path,
+    )
 
     per_mode_outputs: Dict[str, ClassicModeOutput] = {}
     write_individual = save_intermediate or len(base_modes) == 1
@@ -1420,10 +1443,16 @@ def infer_classic_tiled(
                 continue
             mode_prob_path = base_prefix.parent / f"{base_prefix.name}_classic_{mode}_prob.tif"
             mode_mask_path = base_prefix.parent / f"{base_prefix.name}_classic_{mode}_mask.tif"
-            with rasterio.open(mode_prob_path, "w", **float_meta) as dst:
-                dst.write(prob_map[np.newaxis, :, :])
-            with rasterio.open(mode_mask_path, "w", **mask_meta) as dst:
-                dst.write(mask_map[np.newaxis, :, :])
+            
+            write_prob_and_mask_rasters(
+                prob_map=prob_map,
+                mask=mask_map,
+                transform=transform,
+                crs=crs,
+                prob_path=mode_prob_path,
+                mask_path=mode_mask_path,
+            )
+            
             per_mode_outputs[mode] = ClassicModeOutput(
                 prob_path=mode_prob_path,
                 mask_path=mode_mask_path,
@@ -1458,7 +1487,7 @@ def vectorize_predictions(
         LOGGER.warning("Vector output skipped; install geopandas or fiona for vectorisation.")
         return None
 
-    structure = np.ones((3, 3), dtype=int)
+    structure = np.ones(LABEL_CONNECTIVITY_STRUCTURE, dtype=int)
     labels, num_features = ndimage.label(mask.astype(bool), structure=structure)
     if num_features == 0:
         LOGGER.info("No features above threshold; skipping vectorisation.")
@@ -1577,6 +1606,96 @@ def parse_band_indexes(band_string: str) -> Tuple[int, int, int, int, int]:
     if parts[4] <= 0:
         raise argparse.ArgumentTypeError("DTM band index must be provided (>=1).")
     return tuple(parts)  # type: ignore[return-value]
+
+
+def create_raster_metadata(
+    height: int,
+    width: int,
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    dtype: str,
+    nodata: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Create standardized raster metadata dictionary."""
+    meta = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "transform": transform,
+        "crs": crs,
+        "dtype": dtype,
+        "compress": "deflate",
+    }
+    if nodata is not None:
+        meta["nodata"] = nodata
+    return meta
+
+
+def write_prob_and_mask_rasters(
+    prob_map: np.ndarray,
+    mask: np.ndarray,
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    prob_path: Path,
+    mask_path: Path,
+) -> None:
+    """Write probability and mask rasters with standard metadata."""
+    height, width = prob_map.shape
+    
+    # Write probability raster
+    prob_meta = create_raster_metadata(
+        height=height,
+        width=width,
+        transform=transform,
+        crs=crs,
+        dtype="float32",
+        nodata=np.nan,
+    )
+    with rasterio.open(prob_path, "w", **prob_meta) as dst:
+        dst.write(prob_map[np.newaxis, :, :])
+    
+    # Write mask raster
+    mask_meta = create_raster_metadata(
+        height=height,
+        width=width,
+        transform=transform,
+        crs=crs,
+        dtype="uint8",
+        nodata=0,
+    )
+    with rasterio.open(mask_path, "w", **mask_meta) as dst:
+        dst.write(mask[np.newaxis, :, :])
+
+
+def compute_fused_probability(
+    dl_prob: np.ndarray,
+    classic_prob: np.ndarray,
+    alpha: float,
+    threshold: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute fused probability map and mask from DL and classic outputs.
+    
+    Args:
+        dl_prob: Deep learning probability map
+        classic_prob: Classical method probability map
+        alpha: Mixing weight (1.0 = pure DL, 0.0 = pure classical)
+        threshold: Probability threshold for binary mask
+    
+    Returns:
+        Tuple of (fused_prob, fused_mask)
+    """
+    dl_filled = np.nan_to_num(dl_prob, nan=0.0)
+    classic_filled = np.nan_to_num(classic_prob, nan=0.0)
+    fused_prob = alpha * dl_filled + (1.0 - alpha) * classic_filled
+    fused_prob = fused_prob.astype(np.float32)
+    fused_valid = np.isfinite(dl_prob) | np.isfinite(classic_prob)
+    fused_prob = np.clip(fused_prob, 0.0, 1.0, out=fused_prob)
+    fused_prob[~fused_valid] = np.nan
+    fused_mask = np.zeros_like(fused_prob, dtype=np.uint8)
+    fused_mask[fused_valid & (fused_prob >= threshold)] = 1
+    return fused_prob, fused_mask
 
 
 def resolve_out_prefix(input_path: Path, prefix: Optional[str]) -> Path:
@@ -1959,42 +2078,28 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     if fuse_enabled and classic_outputs is not None:
         alpha = float(config.alpha)
-        dl_prob = outputs.prob_map.astype(np.float32)
-        classic_prob = classic_outputs.prob_map.astype(np.float32)
-        dl_filled = np.nan_to_num(dl_prob, nan=0.0)
-        classic_filled = np.nan_to_num(classic_prob, nan=0.0)
-        fused_prob = alpha * dl_filled + (1.0 - alpha) * classic_filled
-        fused_prob = fused_prob.astype(np.float32)
-        fused_valid = np.isfinite(dl_prob) | np.isfinite(classic_prob)
-        fused_prob = np.clip(fused_prob, 0.0, 1.0, out=fused_prob)
-        fused_prob[~fused_valid] = np.nan
         fuse_threshold = config.th if config.th is not None else 0.5
-        fused_mask = np.zeros_like(fused_prob, dtype=np.uint8)
-        fused_mask[fused_valid & (fused_prob >= fuse_threshold)] = 1
+        
+        fused_prob, fused_mask = compute_fused_probability(
+            dl_prob=outputs.prob_map.astype(np.float32),
+            classic_prob=classic_outputs.prob_map.astype(np.float32),
+            alpha=alpha,
+            threshold=fuse_threshold,
+        )
 
         base_prefix = out_prefix.with_suffix("")
         base_prefix.parent.mkdir(parents=True, exist_ok=True)
         fused_prob_path = base_prefix.parent / f"{base_prefix.name}_fused_prob.tif"
         fused_mask_path = base_prefix.parent / f"{base_prefix.name}_fused_mask.tif"
 
-        common_meta = {
-            "driver": "GTiff",
-            "height": fused_prob.shape[0],
-            "width": fused_prob.shape[1],
-            "count": 1,
-            "transform": outputs.transform,
-            "crs": outputs.crs,
-            "compress": "deflate",
-        }
-        float_meta = common_meta.copy()
-        float_meta.update(dtype="float32", nodata=np.nan)
-        mask_meta = common_meta.copy()
-        mask_meta.update(dtype="uint8", nodata=0)
-
-        with rasterio.open(fused_prob_path, "w", **float_meta) as dst:
-            dst.write(fused_prob[np.newaxis, :, :])
-        with rasterio.open(fused_mask_path, "w", **mask_meta) as dst:
-            dst.write(fused_mask[np.newaxis, :, :])
+        write_prob_and_mask_rasters(
+            prob_map=fused_prob,
+            mask=fused_mask,
+            transform=outputs.transform,
+            crs=outputs.crs,
+            prob_path=fused_prob_path,
+            mask_path=fused_mask_path,
+        )
 
         fusion_outputs = FusionOutputs(
             prob_path=fused_prob_path,
