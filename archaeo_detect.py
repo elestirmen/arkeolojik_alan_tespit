@@ -103,6 +103,13 @@ USER_DEFAULTS = {
     "vectorize": True,
     "zero_shot_imagenet": True,
     "verbose": 1,
+    # Pipeline defaults (can be tuned here)
+    "classic": True,                      # run classical pipeline by default
+    "classic_modes": "combo",            # rvtlog,hessian,morph averaged by default
+    "classic_save_intermediate": False,   # per-mode rasters only when requested
+    "classic_th": None,                   # None -> Otsu on classic prob
+    "fuse": False,                        # DL–Classic fusion disabled by default
+    "alpha": 0.5,                         # fusion weight (if enabled)
 }
 # ======================================================
 
@@ -1392,28 +1399,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         action="store_false",
         help="Disable classical relief-based detection pipeline.",
     )
-    parser.set_defaults(feather=True, classic=True)
+    parser.set_defaults(feather=True, classic=USER_DEFAULTS["classic"])
     parser.add_argument(
         "--classic-modes",
-        default="rvtlog",
+        default=USER_DEFAULTS["classic_modes"],
         help="Comma-separated classic modes: rvtlog,hessian,morph,combo.",
     )
     parser.add_argument(
         "--classic-th",
         type=float,
-        default=None,
+        default=USER_DEFAULTS["classic_th"],
         help="Override classic threshold in [0,1]; defaults to Otsu.",
     )
     parser.add_argument(
         "--classic-save-intermediate",
         action="store_true",
+        default=USER_DEFAULTS["classic_save_intermediate"],
         help="Always write per-mode classic outputs when multiple modes run.",
     )
-    parser.add_argument("--fuse", action="store_true", help="Fuse DL and classical probabilities.")
+    parser.add_argument("--fuse", action="store_true", default=USER_DEFAULTS["fuse"], help="Fuse DL and classical probabilities.")
     parser.add_argument(
         "--alpha",
         type=float,
-        default=0.5,
+        default=USER_DEFAULTS["alpha"],
         help="Blend weight for DL probability in fusion (0..1).",
     )
     parser.add_argument(

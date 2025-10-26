@@ -16,6 +16,7 @@ Key Features
 - Three classical scorers (rvtlog, hessian, morph) and a combo averaging them.
 - Optional DL–Classic fusion with α‑blend.
 - GeoTIFF outputs (probability + mask) and optional vectorization to GeoPackage with attributes.
+ - Default behavior: both DL and all classic modes (combo) run out‑of‑the‑box; override via CLI or edit defaults in `archaeo_detect.py`.
 
 Data Requirements
 -----------------
@@ -98,6 +99,7 @@ Quick Start
 -----------
 - Minimal (DL + Classic enabled):
   - `python archaeo_detect.py --input your_multiband.tif --bands 1,2,3,4,5`
+  - By default, classic modes use `combo` (rvtlog+hessian+morph).
 - Specify output prefix:
   - `python archaeo_detect.py --input site.tif --out-prefix outputs/siteA`
 - Zero‑shot DL (no weights):
@@ -105,7 +107,7 @@ Quick Start
 - Classic modes:
   - Single: `--classic-modes rvtlog`
   - Multiple: `--classic-modes rvtlog,hessian,morph --classic-save-intermediate`
-  - Combo shortcut: `--classic-modes combo` (equivalent to rvtlog+hessian+morph)
+  - Combo shortcut: `--classic-modes combo` (default; equivalent to rvtlog+hessian+morph)
 - Fusion:
   - `--fuse --alpha 0.5`
 - Turn classic off:
