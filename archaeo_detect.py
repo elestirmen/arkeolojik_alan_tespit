@@ -1175,6 +1175,8 @@ def infer_tiled(
     norm_sample_tiles: int,
     feather: bool,
     precomputed_deriv: Optional[PrecomputedDerivatives] = None,
+    encoder: Optional[str] = None,
+    min_area: Optional[float] = None,
 ) -> InferenceOutputs:
     """
     Run tiled inference and save outputs.
@@ -1406,8 +1408,18 @@ def infer_tiled(
 
         base_prefix = out_prefix.with_suffix("")
         base_prefix.parent.mkdir(parents=True, exist_ok=True)
-        prob_path = base_prefix.parent / f"{base_prefix.name}_prob.tif"
-        mask_path = base_prefix.parent / f"{base_prefix.name}_mask.tif"
+        
+        # Parametreli dosya adı oluştur
+        filename = build_filename_with_params(
+            base_name=base_prefix.name,
+            encoder=encoder,
+            threshold=threshold,
+            tile=tile,
+            min_area=min_area,
+        )
+        
+        prob_path = base_prefix.parent / f"{filename}_prob.tif"
+        mask_path = base_prefix.parent / f"{filename}_mask.tif"
 
         write_prob_and_mask_rasters(
             prob_map=prob_map,
@@ -1438,6 +1450,7 @@ def infer_classic_tiled(
     modes: Sequence[str] = ("rvtlog",),
     feather: bool = True,
     save_intermediate: bool = False,
+    min_area: Optional[float] = None,
 ) -> ClassicOutputs:
     """Run classical raster scoring methods in a tiled fashion."""
     if len(band_idx) < 5 or band_idx[4] <= 0:
@@ -1565,8 +1578,17 @@ def infer_classic_tiled(
     combined_mask = np.zeros_like(combined_prob, dtype=np.uint8)
     combined_mask[combined_valid & (combined_prob >= combined_threshold)] = 1
 
-    classic_prob_path = base_prefix.parent / f"{base_prefix.name}_classic_prob.tif"
-    classic_mask_path = base_prefix.parent / f"{base_prefix.name}_classic_mask.tif"
+    # Parametreli dosya adı oluştur (classic için)
+    classic_filename = build_filename_with_params(
+        base_name=base_prefix.name,
+        mode_suffix="classic",
+        threshold=combined_threshold,
+        tile=tile,
+        min_area=min_area,
+    )
+    
+    classic_prob_path = base_prefix.parent / f"{classic_filename}_prob.tif"
+    classic_mask_path = base_prefix.parent / f"{classic_filename}_mask.tif"
     
     write_prob_and_mask_rasters(
         prob_map=combined_prob,
@@ -1585,8 +1607,18 @@ def infer_classic_tiled(
             mask_map = per_mode_mask.get(mode)
             if prob_map is None or mask_map is None:
                 continue
-            mode_prob_path = base_prefix.parent / f"{base_prefix.name}_classic_{mode}_prob.tif"
-            mode_mask_path = base_prefix.parent / f"{base_prefix.name}_classic_{mode}_mask.tif"
+            
+            # Her mode için ayrı parametreli dosya adı
+            mode_filename = build_filename_with_params(
+                base_name=base_prefix.name,
+                mode_suffix=f"classic_{mode}",
+                threshold=combined_threshold,
+                tile=tile,
+                min_area=min_area,
+            )
+            
+            mode_prob_path = base_prefix.parent / f"{mode_filename}_prob.tif"
+            mode_mask_path = base_prefix.parent / f"{mode_filename}_mask.tif"
             
             write_prob_and_mask_rasters(
                 prob_map=prob_map,
@@ -1862,6 +1894,46 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str]) -> Path:
             out_path = out_path / input_path.stem
         return out_path
     return input_path.with_suffix("")
+
+
+def build_filename_with_params(
+    base_name: str,
+    encoder: Optional[str] = None,
+    threshold: Optional[float] = None,
+    tile: Optional[int] = None,
+    alpha: Optional[float] = None,
+    min_area: Optional[float] = None,
+    mode_suffix: Optional[str] = None,
+) -> str:
+    """
+    Parametreleri içeren dosya adı oluştur.
+    
+    Örnek: kesif_alani_resnet34_th0.5_tile1024_minarea80
+    """
+    parts = [base_name]
+    
+    if mode_suffix:
+        parts.append(mode_suffix)
+    
+    if encoder:
+        parts.append(encoder)
+    
+    if threshold is not None:
+        # Threshold'u kısa formatta (0.5 -> th0.5)
+        parts.append(f"th{threshold:.2f}".rstrip('0').rstrip('.'))
+    
+    if tile is not None:
+        parts.append(f"tile{tile}")
+    
+    if alpha is not None:
+        # Alpha değeri (fusion için)
+        parts.append(f"alpha{alpha:.2f}".rstrip('0').rstrip('.'))
+    
+    if min_area is not None and min_area > 0:
+        # Min area (80.0 -> minarea80)
+        parts.append(f"minarea{int(min_area)}")
+    
+    return "_".join(parts)
 
 
 def get_cache_path(input_path: Path, cache_dir: Optional[str] = None) -> Path:
@@ -2454,6 +2526,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 norm_sample_tiles=config.norm_sample_tiles,
                 feather=config.feather,
                 precomputed_deriv=precomputed_deriv,  # Cache kullanımı
+                encoder=suffix,
+                min_area=config.min_area,
             )
             LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
             LOGGER.info("[%s] ✓ İkili maske: %s", suffix, outputs.mask_path)
@@ -2520,6 +2594,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             global_norm=config.global_norm,
             norm_sample_tiles=config.norm_sample_tiles,
             feather=config.feather,
+            encoder=config.encoder,
+            min_area=config.min_area,
         )
 
         LOGGER.info("Olasılık haritası yazıldı: %s", outputs.prob_path)
@@ -2547,6 +2623,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             modes=resolved_classic_modes,
             feather=config.feather,
             save_intermediate=config.classic_save_intermediate,
+            min_area=config.min_area,
         )
         LOGGER.info("✓ Klasik yöntem birleşik çıktı: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
         if classic_outputs.per_mode:
@@ -2576,8 +2653,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
         base_prefix = out_prefix.with_suffix("")
         base_prefix.parent.mkdir(parents=True, exist_ok=True)
-        fused_prob_path = base_prefix.parent / f"{base_prefix.name}_fused_prob.tif"
-        fused_mask_path = base_prefix.parent / f"{base_prefix.name}_fused_mask.tif"
+        
+        # Parametreli dosya adı oluştur (fusion için)
+        fused_filename = build_filename_with_params(
+            base_name=base_prefix.name,
+            mode_suffix="fused",
+            threshold=fuse_threshold,
+            tile=config.tile,
+            alpha=alpha,
+            min_area=config.min_area,
+        )
+        
+        fused_prob_path = base_prefix.parent / f"{fused_filename}_prob.tif"
+        fused_mask_path = base_prefix.parent / f"{fused_filename}_mask.tif"
 
         write_prob_and_mask_rasters(
             prob_map=fused_prob,
