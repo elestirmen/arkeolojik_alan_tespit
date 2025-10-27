@@ -2450,7 +2450,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
                 if gpkg:
                     LOGGER.info("[%s] Vector: %s", suffix, gpkg)
-        return
+        
+        # Multi-encoder loop tamamlandı
+        # Klasik yöntemler kapalıysa burada çık, açıksa devam et
+        if not config.enable_classic:
+            return
     
     # Tek model çalıştır (enable_deep_learning aktifse ve enc_mode none ise)
     if config.enable_deep_learning and config.zero_shot_imagenet:
