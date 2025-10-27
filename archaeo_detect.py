@@ -1631,12 +1631,14 @@ def vectorize_predictions(
         LOGGER.warning("Vector output skipped; install geopandas or fiona for vectorisation.")
         return None
 
+    LOGGER.info("Etiketleme yapılıyor...")
     structure = np.ones(LABEL_CONNECTIVITY_STRUCTURE, dtype=int)
     labels, num_features = ndimage.label(mask.astype(bool), structure=structure)
     if num_features == 0:
         LOGGER.info("No features above threshold; skipping vectorisation.")
         return None
 
+    LOGGER.info("Tespit edilen özellik sayısı: %d", num_features)
     label_ids = np.arange(1, num_features + 1)
     pixel_counts = ndimage.sum(mask.astype(np.uint8), labels, index=label_ids)
     prob_sums = ndimage.sum(prob_map.astype(np.float32), labels, index=label_ids)
@@ -1660,7 +1662,16 @@ def vectorize_predictions(
         )
 
     records = []
-    for geom, value in shapes(labels.astype(np.int32), mask=None, transform=transform):
+    LOGGER.info("Poligonlar oluşturuluyor...")
+    shape_generator = shapes(labels.astype(np.int32), mask=None, transform=transform)
+    
+    # Progress bar ile poligon işleme
+    for geom, value in progress_bar(
+        shape_generator,
+        total=num_features + 1,  # +1 for background (0)
+        desc="Vektörleştirme",
+        unit="poligon"
+    ):
         label_id = int(value)
         if label_id == 0:
             continue
@@ -1700,6 +1711,7 @@ def vectorize_predictions(
 
     out_path = out_path.with_suffix(".gpkg")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("GeoPackage dosyası yazılıyor (%d poligon)...", len(records))
     if gpd is not None:
         gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
         gdf.to_file(out_path, driver="GPKG")
