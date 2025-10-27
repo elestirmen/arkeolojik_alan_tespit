@@ -355,6 +355,21 @@ class PipelineDefaults:
 
 DEFAULTS = PipelineDefaults()
 
+# Adjust default input to CWD if it points to the old absolute path
+try:
+    _in = DEFAULTS.input if isinstance(DEFAULTS.input, str) else str(DEFAULTS.input)
+    if (
+        isinstance(_in, str)
+        and (
+            "\\Nextcloud\\arkeolojik_alan_tespit\\kesif_alani.tif" in _in
+            or "/Nextcloud/arkeolojik_alan_tespit/kesif_alani.tif" in _in
+        )
+    ):
+        DEFAULTS.input = str(Path.cwd() / "kesif_alani.tif")
+except Exception:
+    # Best effort; do not fail if any issue occurs here
+    pass
+
 
 def default_for(name: str):
     return getattr(DEFAULTS, name)
