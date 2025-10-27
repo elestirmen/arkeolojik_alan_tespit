@@ -18,6 +18,7 @@ Varsayımlar:
 - Girdi mozaiği RGB, DSM ve DTM bantlarını aynı CRS/kapsam/piksel-ızgarada içerir.
 - Önceden eğitilmiş model belirtilen sırada dokuz kanal bekler.
 - rvt-py ve torch uyumlu hesaplama ortamı önceden kurulmuştur.
+
 """
 
 from __future__ import annotations
