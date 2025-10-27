@@ -700,7 +700,13 @@ def compute_derivatives_with_rvt(
             raise e
 
     svf_layers: List[np.ndarray] = []
-    for radius in radii:
+    LOGGER.info("  → SVF (Sky View Factor) hesaplanıyor...")
+    for radius in progress_bar(
+        radii,
+        desc="SVF hesaplama",
+        unit="yarıçap",
+        total=len(radii)
+    ):
         svf_res = _call_with_radius(rvt_vis.sky_view_factor, float(radius))
         svf = _as_float32_array(svf_res, "sky_view_factor")
         svf_layers.append(svf)
@@ -771,8 +777,10 @@ def compute_derivatives_with_rvt(
         zeros = np.zeros_like(dtm_filled, dtype=np.float32)
         return zeros, zeros
 
+    LOGGER.info("  → Openness (pozitif/negatif) hesaplanıyor...")
     pos_open, neg_open = _compute_openness(float(max(radii)))
 
+    LOGGER.info("  → LRM (Local Relief Model) hesaplanıyor...")
     try:
         # LRM may also have different radius/nodata keywords
         def _call_lrm() -> np.ndarray:
@@ -815,6 +823,7 @@ def compute_derivatives_with_rvt(
 
     # slope signature also varies across versions; try with/without keywords.
     # If slope is unavailable in rvt.vis, fall back to numpy gradient.
+    LOGGER.info("  → Slope (eğim) hesaplanıyor...")
     slope: np.ndarray
     if hasattr(rvt_vis, "slope"):
         try:
@@ -1690,12 +1699,6 @@ def vectorize_predictions(
     min_pixels = max(1, int(min_area / pixel_area * 0.5))  # Güvenli marj ile
     valid_labels = pixel_counts >= min_pixels
     
-    # Sadece geçerli label'ları tut - maskeyi filtrele
-    filtered_labels = labels.copy()
-    for idx, is_valid in enumerate(valid_labels, start=1):
-        if not is_valid:
-            filtered_labels[labels == idx] = 0
-    
     if not valid_labels.any():
         LOGGER.info("Tüm poligonlar minimum piksel sayısının altında; vektörleştirme atlanıyor.")
         return None
@@ -1703,6 +1706,27 @@ def vectorize_predictions(
     filtered_count = valid_labels.sum()
     LOGGER.info("Piksel filtresinden sonra kalan poligon sayısı: %d (elenen: %d)", 
                 filtered_count, num_features - filtered_count)
+    
+    # YENİ ETİKETLEME: Geçerli label'ları ardışık numaralarla yeniden etiketle
+    # Bu, shapes() fonksiyonunun çok daha hızlı çalışmasını sağlar
+    LOGGER.info("Label'lar yeniden numaralandırılıyor...")
+    filtered_labels = np.zeros_like(labels)
+    new_label_mapping = {}  # eski_id -> yeni_id
+    new_id = 1
+    filtered_pixel_counts = []
+    filtered_prob_sums = []
+    
+    for old_id in range(1, num_features + 1):
+        if valid_labels[old_id - 1]:
+            filtered_labels[labels == old_id] = new_id
+            new_label_mapping[new_id] = old_id
+            filtered_pixel_counts.append(pixel_counts[old_id - 1])
+            filtered_prob_sums.append(prob_sums[old_id - 1])
+            new_id += 1
+    
+    # Dizileri numpy array'e çevir
+    pixel_counts = np.array(filtered_pixel_counts)
+    prob_sums = np.array(filtered_prob_sums)
 
     crs_obj: Optional[CRS] = None
     if crs:
@@ -1724,7 +1748,7 @@ def vectorize_predictions(
 
     records = []
     LOGGER.info("Poligonlar oluşturuluyor...")
-    # Filtrelenmiş label'lardan poligon oluştur
+    # Filtrelenmiş label'lardan poligon oluştur (artık ardışık numaralı)
     shape_generator = shapes(filtered_labels.astype(np.int32), mask=None, transform=transform)
     
     # Progress bar ile poligon işleme
@@ -1734,8 +1758,8 @@ def vectorize_predictions(
         desc="Vektörleştirme",
         unit="poligon"
     ):
-        label_id = int(value)
-        if label_id == 0:
+        new_label_id = int(value)
+        if new_label_id == 0:
             continue
         geom_shape = shape(geom)
         if to_area:
@@ -1746,10 +1770,10 @@ def vectorize_predictions(
             area_m2 = geom_shape.area
         if area_m2 < float(min_area):
             continue
-        pixels = float(pixel_counts[label_id - 1])
+        pixels = float(pixel_counts[new_label_id - 1])
         if pixels <= 0:
             continue
-        mean_score = float(prob_sums[label_id - 1]) / pixels
+        mean_score = float(prob_sums[new_label_id - 1]) / pixels
         if simplify_tol and simplify_tol > 0:
             if to_area and to_native:
                 simplified_area_geom = geom_area_space.simplify(
@@ -1760,7 +1784,7 @@ def vectorize_predictions(
                 geom_shape = geom_shape.simplify(simplify_tol, preserve_topology=True)
         records.append(
             {
-                "id": int(label_id),
+                "id": int(new_label_id),
                 "area_m2": float(area_m2),
                 "score_mean": float(mean_score),
                 "geometry": geom_shape,
@@ -2001,21 +2025,31 @@ def load_derivatives_cache(cache_path: Path) -> Optional[Tuple[Dict[str, Any], D
         return None
     
     try:
-        LOGGER.info(f"Cache yükleniyor: {cache_path}")
-        data = np.load(cache_path, allow_pickle=True)
-        
-        # Metadata'yı ayır
-        if "_metadata" not in data:
-            LOGGER.warning("Cache dosyası geçersiz (metadata eksik)")
-            return None
-        
-        metadata = data["_metadata"].item()
-        
-        # Diğer verileri al
-        derivatives_data = {key: data[key] for key in data.files if key != "_metadata"}
-        
         size_mb = cache_path.stat().st_size / (1024 * 1024)
-        LOGGER.info(f"Cache yüklendi: {size_mb:.1f} MB, {len(derivatives_data)} layer")
+        LOGGER.info(f"Cache yükleniyor: {cache_path} ({size_mb:.1f} MB)")
+        
+        # Dosyayı aç
+        with np.load(cache_path, allow_pickle=True) as data:
+            # Metadata'yı ayır
+            if "_metadata" not in data:
+                LOGGER.warning("Cache dosyası geçersiz (metadata eksik)")
+                return None
+            
+            metadata = data["_metadata"].item()
+            
+            # Diğer verileri progress bar ile yükle
+            derivatives_data = {}
+            layer_names = [key for key in data.files if key != "_metadata"]
+            
+            for key in progress_bar(
+                layer_names,
+                desc="Cache katmanları yükleniyor",
+                unit="katman",
+                total=len(layer_names)
+            ):
+                derivatives_data[key] = data[key].copy()
+        
+        LOGGER.info(f"✓ Cache yüklendi: {len(derivatives_data)} katman")
         
         return derivatives_data, metadata
         
@@ -2128,15 +2162,29 @@ def precompute_derivatives(
         LOGGER.info("Bu işlem birkaç dakika sürebilir...")
         
         # Tüm raster'ı oku
+        LOGGER.info("Raster bandları okunuyor...")
         def read_band(idx: int) -> Optional[np.ndarray]:
             if idx <= 0:
                 return None
             data = src.read(idx, masked=True)
             return np.ma.filled(data.astype(np.float32), np.nan)
         
-        rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-        dsm = read_band(band_idx[3])
-        dtm = read_band(band_idx[4])
+        # Progress bar ile bandları oku
+        bands_to_read = [("RGB-R", band_idx[0]), ("RGB-G", band_idx[1]), ("RGB-B", band_idx[2]), 
+                        ("DSM", band_idx[3]), ("DTM", band_idx[4])]
+        band_data = {}
+        for band_name, band_id in progress_bar(
+            bands_to_read,
+            desc="Band okuma",
+            unit="band",
+            total=len(bands_to_read)
+        ):
+            if band_id > 0:
+                band_data[band_name] = read_band(band_id)
+        
+        rgb = np.stack([band_data["RGB-R"], band_data["RGB-G"], band_data["RGB-B"]], axis=0)
+        dsm = band_data.get("DSM")
+        dtm = band_data["DTM"]
         
         if dtm is None:
             raise ValueError("DTM band gerekli")
