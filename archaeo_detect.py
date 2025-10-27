@@ -1663,17 +1663,46 @@ def vectorize_predictions(
         LOGGER.warning("Vector output skipped; install geopandas or fiona for vectorisation.")
         return None
 
+    # Küçük gürültüleri temizlemek için binary opening (hızlı!)
+    LOGGER.info("Küçük gürültüler temizleniyor...")
+    cleaned_mask = grey_opening(mask.astype(np.uint8), size=(3, 3))
+    
     LOGGER.info("Etiketleme yapılıyor...")
     structure = np.ones(LABEL_CONNECTIVITY_STRUCTURE, dtype=int)
-    labels, num_features = ndimage.label(mask.astype(bool), structure=structure)
+    labels, num_features = ndimage.label(cleaned_mask.astype(bool), structure=structure)
     if num_features == 0:
         LOGGER.info("No features above threshold; skipping vectorisation.")
         return None
 
     LOGGER.info("Tespit edilen özellik sayısı: %d", num_features)
+    
+    # Performans optimizasyonu: Çok küçük poligonları erken filtrelemek için piksel sayılarını hesapla
     label_ids = np.arange(1, num_features + 1)
     pixel_counts = ndimage.sum(mask.astype(np.uint8), labels, index=label_ids)
     prob_sums = ndimage.sum(prob_map.astype(np.float32), labels, index=label_ids)
+    
+    # Piksel tabanlı ön filtreleme: min_area'yı yaklaşık piksel sayısına çevir
+    # Transform'dan piksel boyutunu hesapla (m²)
+    pixel_width = abs(transform[0])  # x yönünde piksel boyutu
+    pixel_height = abs(transform[4])  # y yönünde piksel boyutu
+    pixel_area = pixel_width * pixel_height  # piksel alanı (m²)
+    
+    min_pixels = max(1, int(min_area / pixel_area * 0.5))  # Güvenli marj ile
+    valid_labels = pixel_counts >= min_pixels
+    
+    # Sadece geçerli label'ları tut - maskeyi filtrele
+    filtered_labels = labels.copy()
+    for idx, is_valid in enumerate(valid_labels, start=1):
+        if not is_valid:
+            filtered_labels[labels == idx] = 0
+    
+    if not valid_labels.any():
+        LOGGER.info("Tüm poligonlar minimum piksel sayısının altında; vektörleştirme atlanıyor.")
+        return None
+    
+    filtered_count = valid_labels.sum()
+    LOGGER.info("Piksel filtresinden sonra kalan poligon sayısı: %d (elenen: %d)", 
+                filtered_count, num_features - filtered_count)
 
     crs_obj: Optional[CRS] = None
     if crs:
@@ -1695,12 +1724,13 @@ def vectorize_predictions(
 
     records = []
     LOGGER.info("Poligonlar oluşturuluyor...")
-    shape_generator = shapes(labels.astype(np.int32), mask=None, transform=transform)
+    # Filtrelenmiş label'lardan poligon oluştur
+    shape_generator = shapes(filtered_labels.astype(np.int32), mask=None, transform=transform)
     
     # Progress bar ile poligon işleme
     for geom, value in progress_bar(
         shape_generator,
-        total=num_features + 1,  # +1 for background (0)
+        total=filtered_count + 1,  # +1 for background (0)
         desc="Vektörleştirme",
         unit="poligon"
     ):
