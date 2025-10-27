@@ -332,6 +332,20 @@ class PipelineDefaults:
         default=1,
         metadata={"help": "Log detay seviyesi: 0=WARNING, 1=INFO, 2=DEBUG"},
     )
+    
+    # ===== CACHE YÖNETİMİ (ÇOK HIZLI TEKRAR ÇALIŞTIRMALAR İÇİN) =====
+    cache_derivatives: bool = field(
+        default=False,
+        metadata={"help": "RVT türevlerini (SVF, openness, LRM, slope) diske kaydet/oku; tekrar çalıştırmalarda çok hızlı"},
+    )
+    cache_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Cache dosyalarının kaydedileceği dizin; None ise girdi dosyasının yanına yazar"},
+    )
+    recalculate_cache: bool = field(
+        default=False,
+        metadata={"help": "Mevcut cache'i yoksay ve RVT türevlerini yeniden hesapla"},
+    )
 
 
 DEFAULTS = PipelineDefaults()
@@ -1160,8 +1174,15 @@ def infer_tiled(
     global_norm: bool,
     norm_sample_tiles: int,
     feather: bool,
+    precomputed_deriv: Optional[PrecomputedDerivatives] = None,
 ) -> InferenceOutputs:
-    """Run tiled inference and save outputs."""
+    """
+    Run tiled inference and save outputs.
+    
+    Args:
+        precomputed_deriv: Önceden hesaplanmış RVT türevleri (cache kullanımı için).
+                          None ise her tile için RVT yeniden hesaplanır.
+    """
     model.eval()
     model.to(device)
 
@@ -1253,50 +1274,84 @@ def infer_tiled(
             desc="Inference",
             unit="tile",
         ):
-            def read_band(idx: int) -> Optional[np.ndarray]:
-                if idx <= 0:
-                    return None
-                data = src.read(idx, window=window, boundless=True, masked=True)
-                return np.ma.filled(data.astype(np.float32), np.nan)
-
-            rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-            dsm = read_band(band_idx[3])
-            dtm = read_band(band_idx[4])
-            if dtm is None:
-                raise ValueError("DTM band is required (five-band input expected).")
-
             win_height = int(window.height)
             win_width = int(window.width)
             pad_h = max(0, tile - win_height)
             pad_w = max(0, tile - win_width)
+            
+            # Precomputed derivatives kullan (cache modunda)
+            if precomputed_deriv is not None:
+                # Tüm raster'dan tile'ı kes
+                row_start = int(window.row_off)
+                col_start = int(window.col_off)
+                row_end = row_start + win_height
+                col_end = col_start + win_width
+                
+                rgb = precomputed_deriv.rgb[:, row_start:row_end, col_start:col_end].copy()
+                dsm = precomputed_deriv.dsm[row_start:row_end, col_start:col_end].copy() if precomputed_deriv.dsm is not None else None
+                dtm = precomputed_deriv.dtm[row_start:row_end, col_start:col_end].copy()
+                svf = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
+                pos_open = precomputed_deriv.pos_open[row_start:row_end, col_start:col_end].copy()
+                neg_open = precomputed_deriv.neg_open[row_start:row_end, col_start:col_end].copy()
+                lrm = precomputed_deriv.lrm[row_start:row_end, col_start:col_end].copy()
+                slope = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
+                ndsm_tile = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
+                
+                # Padding ekle (gerekirse)
+                if pad_h or pad_w:
+                    rgb = np.pad(rgb, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    dtm = np.pad(dtm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    if dsm is not None:
+                        dsm = np.pad(dsm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    svf = np.pad(svf, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    pos_open = np.pad(pos_open, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    neg_open = np.pad(neg_open, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    lrm = np.pad(lrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    slope = np.pad(slope, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    ndsm_tile = np.pad(ndsm_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                
+                valid_mask = np.isfinite(dtm)
+            else:
+                # Normal mod - Her tile için RVT hesapla
+                def read_band(idx: int) -> Optional[np.ndarray]:
+                    if idx <= 0:
+                        return None
+                    data = src.read(idx, window=window, boundless=True, masked=True)
+                    return np.ma.filled(data.astype(np.float32), np.nan)
 
-            if pad_h or pad_w:
-                rgb = np.pad(
-                    rgb,
-                    ((0, 0), (0, pad_h), (0, pad_w)),
-                    mode="constant",
-                    constant_values=np.nan,
-                )
-                dtm = np.pad(
-                    dtm,
-                    ((0, pad_h), (0, pad_w)),
-                    mode="constant",
-                    constant_values=np.nan,
-                )
-                if dsm is not None:
-                    dsm = np.pad(
-                        dsm,
+                rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
+                dsm = read_band(band_idx[3])
+                dtm = read_band(band_idx[4])
+                if dtm is None:
+                    raise ValueError("DTM band is required (five-band input expected).")
+
+                if pad_h or pad_w:
+                    rgb = np.pad(
+                        rgb,
+                        ((0, 0), (0, pad_h), (0, pad_w)),
+                        mode="constant",
+                        constant_values=np.nan,
+                    )
+                    dtm = np.pad(
+                        dtm,
                         ((0, pad_h), (0, pad_w)),
                         mode="constant",
                         constant_values=np.nan,
                     )
+                    if dsm is not None:
+                        dsm = np.pad(
+                            dsm,
+                            ((0, pad_h), (0, pad_w)),
+                            mode="constant",
+                            constant_values=np.nan,
+                        )
 
-            valid_mask = np.isfinite(dtm)
+                valid_mask = np.isfinite(dtm)
 
-            ndsm_tile = compute_ndsm(dsm, dtm)
-            svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
-                dtm, pixel_size=pixel_size
-            )
+                ndsm_tile = compute_ndsm(dsm, dtm)
+                svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+                    dtm, pixel_size=pixel_size
+                )
 
             stacked = stack_channels(
                 rgb=rgb,
@@ -1797,6 +1852,232 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str]) -> Path:
     return input_path.with_suffix("")
 
 
+def get_cache_path(input_path: Path, cache_dir: Optional[str] = None) -> Path:
+    """RVT türevleri için cache dosya yolunu oluştur."""
+    if cache_dir:
+        cache_path = Path(cache_dir)
+        cache_path.mkdir(parents=True, exist_ok=True)
+        return cache_path / f"{input_path.stem}_derivatives.npz"
+    return input_path.with_suffix(".derivatives.npz")
+
+
+def save_derivatives_cache(
+    cache_path: Path,
+    derivatives_data: Dict[str, Any],
+    metadata: Dict[str, Any],
+) -> None:
+    """RVT türevlerini compressed numpy dosyası olarak kaydet."""
+    LOGGER.info(f"RVT türevleri kaydediliyor: {cache_path}")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Tüm verileri birleştir
+    save_dict = {**derivatives_data, **{"_metadata": metadata}}
+    
+    # Compressed format ile kaydet
+    np.savez_compressed(cache_path, **save_dict)
+    
+    # Boyut bilgisi
+    size_mb = cache_path.stat().st_size / (1024 * 1024)
+    LOGGER.info(f"Cache kaydedildi: {size_mb:.1f} MB")
+
+
+def load_derivatives_cache(cache_path: Path) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """RVT türevlerini cache'den yükle."""
+    if not cache_path.exists():
+        return None
+    
+    try:
+        LOGGER.info(f"Cache yükleniyor: {cache_path}")
+        data = np.load(cache_path, allow_pickle=True)
+        
+        # Metadata'yı ayır
+        if "_metadata" not in data:
+            LOGGER.warning("Cache dosyası geçersiz (metadata eksik)")
+            return None
+        
+        metadata = data["_metadata"].item()
+        
+        # Diğer verileri al
+        derivatives_data = {key: data[key] for key in data.files if key != "_metadata"}
+        
+        size_mb = cache_path.stat().st_size / (1024 * 1024)
+        LOGGER.info(f"Cache yüklendi: {size_mb:.1f} MB, {len(derivatives_data)} layer")
+        
+        return derivatives_data, metadata
+        
+    except Exception as e:
+        LOGGER.error(f"Cache yüklenirken hata: {e}")
+        return None
+
+
+def validate_cache(
+    metadata: Dict[str, Any],
+    input_path: Path,
+    bands: Sequence[int],
+    tile: int,
+    overlap: int,
+) -> bool:
+    """Cache'in mevcut parametrelerle uyumlu olup olmadığını kontrol et."""
+    required_keys = ["input_path", "input_mtime", "bands", "tile", "overlap", "shape"]
+    
+    if not all(key in metadata for key in required_keys):
+        LOGGER.warning("Cache metadata eksik")
+        return False
+    
+    # Dosya değişmiş mi?
+    current_mtime = input_path.stat().st_mtime
+    if abs(metadata["input_mtime"] - current_mtime) > 1.0:
+        LOGGER.warning("Girdi dosyası değişmiş, cache geçersiz")
+        return False
+    
+    # Parametreler aynı mı?
+    if (metadata["bands"] != list(bands) or
+        metadata["tile"] != tile or
+        metadata["overlap"] != overlap):
+        LOGGER.warning("İşleme parametreleri değişmiş, cache geçersiz")
+        return False
+    
+    LOGGER.info("Cache geçerli ✓")
+    return True
+
+
+@dataclass
+class PrecomputedDerivatives:
+    """Önceden hesaplanmış RVT türevlerini tutan sınıf."""
+    rgb: np.ndarray          # (3, H, W)
+    dsm: Optional[np.ndarray]  # (H, W) or None
+    dtm: np.ndarray          # (H, W)
+    svf: np.ndarray          # (H, W)
+    pos_open: np.ndarray     # (H, W)
+    neg_open: np.ndarray     # (H, W)
+    lrm: np.ndarray          # (H, W)
+    slope: np.ndarray        # (H, W)
+    ndsm: np.ndarray         # (H, W)
+    transform: Affine
+    crs: Optional[RasterioCRS]
+    pixel_size: float
+    
+
+def precompute_derivatives(
+    input_path: Path,
+    band_idx: Sequence[int],
+    use_cache: bool = False,
+    cache_path: Optional[Path] = None,
+    recalculate: bool = False,
+) -> Optional[PrecomputedDerivatives]:
+    """
+    Tüm raster için RVT türevlerini önceden hesapla.
+    
+    Bu fonksiyon:
+    1. Cache varsa ve geçerliyse yükler
+    2. Yoksa tüm raster'ı okur ve RVT türevlerini hesaplar
+    3. İstenirse cache'e kaydeder
+    
+    Returns:
+        PrecomputedDerivatives or None
+    """
+    with rasterio.open(input_path) as src:
+        height, width = src.height, src.width
+        transform = src.transform
+        crs = src.crs
+        pixel_size = float((abs(transform.a) + abs(transform.e)) / 2.0)
+        
+        # Cache kullanılacak mı kontrol et
+        if use_cache and cache_path and not recalculate:
+            cache_result = load_derivatives_cache(cache_path)
+            if cache_result:
+                derivatives_data, metadata = cache_result
+                # Cache geçerli mi?
+                if validate_cache(metadata, input_path, band_idx, 0, 0):
+                    # Cache'den yükle
+                    return PrecomputedDerivatives(
+                        rgb=derivatives_data["rgb"],
+                        dsm=derivatives_data.get("dsm"),
+                        dtm=derivatives_data["dtm"],
+                        svf=derivatives_data["svf"],
+                        pos_open=derivatives_data["pos_open"],
+                        neg_open=derivatives_data["neg_open"],
+                        lrm=derivatives_data["lrm"],
+                        slope=derivatives_data["slope"],
+                        ndsm=derivatives_data["ndsm"],
+                        transform=transform,
+                        crs=crs,
+                        pixel_size=pixel_size,
+                    )
+                else:
+                    LOGGER.info("Cache geçersiz, yeniden hesaplanacak")
+        
+        # Cache kullanılmıyor veya geçersiz - yeniden hesapla
+        LOGGER.info(f"RVT türevleri hesaplanıyor: {width}x{height} piksel")
+        LOGGER.info("Bu işlem birkaç dakika sürebilir...")
+        
+        # Tüm raster'ı oku
+        def read_band(idx: int) -> Optional[np.ndarray]:
+            if idx <= 0:
+                return None
+            data = src.read(idx, masked=True)
+            return np.ma.filled(data.astype(np.float32), np.nan)
+        
+        rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
+        dsm = read_band(band_idx[3])
+        dtm = read_band(band_idx[4])
+        
+        if dtm is None:
+            raise ValueError("DTM band gerekli")
+        
+        # nDSM hesapla
+        LOGGER.info("nDSM hesaplanıyor...")
+        ndsm = compute_ndsm(dsm, dtm)
+        
+        # RVT türevlerini hesapla
+        LOGGER.info("RVT türevleri hesaplanıyor (SVF, openness, LRM, slope)...")
+        svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+            dtm, pixel_size=pixel_size
+        )
+        
+        derivatives = PrecomputedDerivatives(
+            rgb=rgb,
+            dsm=dsm,
+            dtm=dtm,
+            svf=svf,
+            pos_open=pos_open,
+            neg_open=neg_open,
+            lrm=lrm,
+            slope=slope,
+            ndsm=ndsm,
+            transform=transform,
+            crs=crs,
+            pixel_size=pixel_size,
+        )
+        
+        # Cache'e kaydet (istenirse)
+        if use_cache and cache_path:
+            derivatives_data = {
+                "rgb": rgb,
+                "dsm": dsm if dsm is not None else np.array([]),  # None yerine boş array
+                "dtm": dtm,
+                "svf": svf,
+                "pos_open": pos_open,
+                "neg_open": neg_open,
+                "lrm": lrm,
+                "slope": slope,
+                "ndsm": ndsm,
+            }
+            metadata = {
+                "input_path": str(input_path),
+                "input_mtime": input_path.stat().st_mtime,
+                "bands": list(band_idx),
+                "tile": 0,
+                "overlap": 0,
+                "shape": (height, width),
+                "pixel_size": pixel_size,
+            }
+            save_derivatives_cache(cache_path, derivatives_data, metadata)
+        
+        LOGGER.info("RVT türevleri hazır ✓")
+        return derivatives
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         description="Arkeolojik alan tespiti için önceden eğitilmiş U-Net modeli.",
@@ -1983,6 +2264,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         default=default_for("verbose"),
         help=cli_help("verbose"),
     )
+    parser.add_argument(
+        "--cache-derivatives",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("cache_derivatives"),
+        dest="cache_derivatives",
+        help=cli_help("cache_derivatives", "(tekrar çalıştırmalarda çok hızlı!)"),
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=default_for("cache_dir"),
+        dest="cache_dir",
+        help=cli_help("cache_dir"),
+    )
+    parser.add_argument(
+        "--recalculate-cache",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("recalculate_cache"),
+        dest="recalculate_cache",
+        help=cli_help("recalculate_cache"),
+    )
 
     args = parser.parse_args(argv)
     config = build_config_from_args(args)
@@ -2056,6 +2358,26 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if config.half and device.type != "cuda":
         LOGGER.warning("--half requested but CUDA not available; running in float32.")
 
+    # Cache yönetimi - Multi-encoder için RVT türevlerini önceden hesapla
+    precomputed_deriv: Optional[PrecomputedDerivatives] = None
+    if config.enable_deep_learning and enc_mode not in ("", "none") and config.cache_derivatives:
+        # Multi-encoder modu + cache etkin
+        LOGGER.info("=" * 70)
+        LOGGER.info("CACHE MODU: RVT türevleri bir kez hesaplanacak, tüm encoderlar kullanacak")
+        LOGGER.info("=" * 70)
+        cache_path = get_cache_path(input_path, config.cache_dir)
+        precomputed_deriv = precompute_derivatives(
+            input_path=input_path,
+            band_idx=bands,
+            use_cache=True,
+            cache_path=cache_path,
+            recalculate=config.recalculate_cache,
+        )
+        if precomputed_deriv:
+            LOGGER.info("✓ RVT türevleri hazır - Her encoder çok daha hızlı çalışacak!")
+        else:
+            LOGGER.warning("RVT türevleri hesaplanamadı, normal moda devam ediliyor")
+
     # Derin öğrenme etkinse modelleri çalıştır
     if config.enable_deep_learning and enc_mode not in ("", "none"):
         enc_list = (
@@ -2063,6 +2385,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             if enc_mode == "all"
             else [enc.strip() for enc in config.encoders.split(",") if enc.strip()]
         )
+        
+        # Cache kullanılıyorsa ilerleme mesajı
+        if precomputed_deriv:
+            LOGGER.info(f"Toplam {len(enc_list)} encoder çalıştırılacak (RVT hesaplaması atlanacak)")
+        
         for enc in enc_list:
             smp_name, suffix = normalize_encoder(enc)
             try:
@@ -2105,6 +2432,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 global_norm=config.global_norm,
                 norm_sample_tiles=config.norm_sample_tiles,
                 feather=config.feather,
+                precomputed_deriv=precomputed_deriv,  # Cache kullanımı
             )
             LOGGER.info("[%s] Probability: %s", suffix, outputs.prob_path)
             LOGGER.info("[%s] Mask: %s", suffix, outputs.mask_path)
