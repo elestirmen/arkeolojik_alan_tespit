@@ -266,6 +266,10 @@ class PipelineDefaults:
         default=0.5,
         metadata={"help": "Fusion karışım ağırlığı (0-1); 1.0=sadece DL, 0.0=sadece klasik, 0.5=eşit ağırlık"},
     )
+    fuse_encoders: str = field(
+        default="all",
+        metadata={"help": "Füzyon yapılacak encoder listesi: 'all' veya 'resnet34,resnet50,efficientnet-b3'"},
+    )
     
     # ===== KARO İŞLEME AYARLARI =====
     tile: int = field(
@@ -854,17 +858,31 @@ def compute_derivatives_with_rvt(
     return svf_avg, pos_open, neg_open, lrm, slope
 
 
-def _score_rvtlog(dtm: np.ndarray, pixel_size: float) -> np.ndarray:
+def _score_rvtlog(
+    dtm: np.ndarray,
+    pixel_size: float,
+    pre_svf: Optional[np.ndarray] = None,
+    pre_neg_open: Optional[np.ndarray] = None,
+    pre_lrm: Optional[np.ndarray] = None,
+    pre_slope: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """Birleşik RVT + LoG + gradyan klasik skor hesaplama."""
     dtm_filled, valid = fill_nodata(dtm)
-    svf, _, neg, lrm, _ = compute_derivatives_with_rvt(dtm, pixel_size=pixel_size)
+    if pre_svf is None or pre_neg_open is None or pre_lrm is None:
+        svf, _, neg, lrm, _ = compute_derivatives_with_rvt(dtm, pixel_size=pixel_size)
+    else:
+        svf, neg, lrm = pre_svf, pre_neg_open, pre_lrm
     sigmas = DEFAULTS.sigma_scales
     log_responses = [
         np.abs(gaussian_laplace(dtm_filled, sigma=s, mode="nearest"))
         for s in sigmas
     ]
     blob = np.maximum.reduce(log_responses)
-    grad = gaussian_gradient_magnitude(dtm_filled, sigma=DEFAULTS.gaussian_gradient_sigma, mode="nearest")
+    if pre_slope is None:
+        grad = gaussian_gradient_magnitude(dtm_filled, sigma=DEFAULTS.gaussian_gradient_sigma, mode="nearest")
+        slope_term = _norm01(grad)
+    else:
+        slope_term = _norm01(pre_slope)
     svf_c = 1.0 - _norm01(svf)
     neg_n = _norm01(neg)
     lrm_n = _norm01(lrm)
@@ -873,7 +891,7 @@ def _score_rvtlog(dtm: np.ndarray, pixel_size: float) -> np.ndarray:
         0.30 * _norm01(blob)
         + 0.20 * lrm_n
         + 0.15 * _norm01(svf_c)
-        + 0.15 * _norm01(grad)
+        + 0.15 * slope_term
         + 0.10 * neg_n
         + 0.10 * var_n
     )
@@ -1231,23 +1249,39 @@ def infer_tiled(
             highs_list = []
             sampled = 0
             for window, row, col in generate_windows(width, height, tile, overlap):
-                def read_band(idx: int) -> Optional[np.ndarray]:
-                    if idx <= 0:
-                        return None
-                    data = src.read(idx, window=window, boundless=True, masked=True)
-                    return np.ma.filled(data.astype(np.float32), np.nan)
+                if precomputed_deriv is not None:
+                    # Use precomputed full-raster derivatives; slice to window
+                    row_start = int(window.row_off)
+                    col_start = int(window.col_off)
+                    row_end = row_start + int(window.height)
+                    col_end = col_start + int(window.width)
 
-                rgb_s = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-                dsm_s = read_band(band_idx[3])
-                dtm_s = read_band(band_idx[4])
-                if dtm_s is None:
-                    break
+                    rgb_s = precomputed_deriv.rgb[:, row_start:row_end, col_start:col_end].copy()
+                    svf_s = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
+                    pos_s = precomputed_deriv.pos_open[row_start:row_end, col_start:col_end].copy()
+                    neg_s = precomputed_deriv.neg_open[row_start:row_end, col_start:col_end].copy()
+                    lrm_s = precomputed_deriv.lrm[row_start:row_end, col_start:col_end].copy()
+                    slope_s = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
+                    ndsm_s = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
+                    stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
+                else:
+                    def read_band(idx: int) -> Optional[np.ndarray]:
+                        if idx <= 0:
+                            return None
+                        data = src.read(idx, window=window, boundless=True, masked=True)
+                        return np.ma.filled(data.astype(np.float32), np.nan)
 
-                ndsm_s = compute_ndsm(dsm_s, dtm_s)
-                svf_s, pos_s, neg_s, lrm_s, slope_s = compute_derivatives_with_rvt(
-                    dtm_s, pixel_size=pixel_size
-                )
-                stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
+                    rgb_s = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
+                    dsm_s = read_band(band_idx[3])
+                    dtm_s = read_band(band_idx[4])
+                    if dtm_s is None:
+                        break
+
+                    ndsm_s = compute_ndsm(dsm_s, dtm_s)
+                    svf_s, pos_s, neg_s, lrm_s, slope_s = compute_derivatives_with_rvt(
+                        dtm_s, pixel_size=pixel_size
+                    )
+                    stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
 
                 Hs, Ws = stack_s.shape[1], stack_s.shape[2]
                 ch = min(TILE_SAMPLE_CROP_SIZE, Hs)
@@ -1460,6 +1494,7 @@ def infer_classic_tiled(
     feather: bool = True,
     save_intermediate: bool = False,
     min_area: Optional[float] = None,
+    precomputed_deriv: Optional[PrecomputedDerivatives] = None,
 ) -> ClassicOutputs:
     """Run classical raster scoring methods in a tiled fashion."""
     if len(band_idx) < 5 or band_idx[4] <= 0:
@@ -1523,7 +1558,23 @@ def infer_classic_tiled(
 
             for mode in base_modes:
                 if mode == "rvtlog":
-                    score_tile = _score_rvtlog(dtm_tile, pixel_size=pixel_size)
+                    # Use precomputed derivatives if available
+                    if precomputed_deriv is not None:
+                        row_start = int(window.row_off)
+                        col_start = int(window.col_off)
+                        row_end = row_start + win_height
+                        col_end = col_start + win_width
+                        svf_tile = precomputed_deriv.svf[row_start:row_end, col_start:col_end]
+                        neg_tile = precomputed_deriv.neg_open[row_start:row_end, col_start:col_end]
+                        lrm_tile = precomputed_deriv.lrm[row_start:row_end, col_start:col_end]
+                        slope_tile = precomputed_deriv.slope[row_start:row_end, col_start:col_end]
+                        score_tile = _score_rvtlog(
+                            dtm_tile, pixel_size=pixel_size,
+                            pre_svf=svf_tile, pre_neg_open=neg_tile, pre_lrm=lrm_tile,
+                            pre_slope=slope_tile,
+                        )
+                    else:
+                        score_tile = _score_rvtlog(dtm_tile, pixel_size=pixel_size)
                 elif mode == "hessian":
                     score_tile = _score_hessian(dtm_tile)
                 elif mode == "morph":
@@ -2140,9 +2191,12 @@ def precompute_derivatives(
                 # Cache geçerli mi?
                 if validate_cache(metadata, input_path, band_idx):
                     # Cache'den yükle
+                    dsm_cached = derivatives_data.get("dsm")
+                    if dsm_cached is not None and getattr(dsm_cached, "size", 0) == 0:
+                        dsm_cached = None
                     return PrecomputedDerivatives(
                         rgb=derivatives_data["rgb"],
-                        dsm=derivatives_data.get("dsm"),
+                        dsm=dsm_cached,
                         dtm=derivatives_data["dtm"],
                         svf=derivatives_data["svf"],
                         pos_open=derivatives_data["pos_open"],
@@ -2356,6 +2410,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("alpha"),
     )
     parser.add_argument(
+        "--fuse-encoders",
+        default=default_for("fuse_encoders"),
+        help=cli_help("fuse_encoders", "('all' or CSV of encoder suffixes)")
+    )
+    parser.add_argument(
         "--mask-talls",
         type=float,
         default=default_for("mask_talls"),
@@ -2484,6 +2543,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         parser.error(f"Input raster not found: {input_path}")
 
     enc_mode = (config.encoders or "").strip().lower()
+    ran_multi = enc_mode not in ("", "none")
     if enc_mode in ("", "none"):
         if not config.zero_shot_imagenet and not config.weights:
             parser.error("Either provide --weights or use --zero-shot-imagenet for zero-shot inference.")
@@ -2502,6 +2562,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     
     classic_outputs: Optional[ClassicOutputs] = None
     fusion_outputs: Optional[FusionOutputs] = None
+    fusion_encoder_label: Optional[str] = None
+    dl_runs: List[Tuple[str, Path]] = []
+    multi_fused_results: List[Tuple[str, FusionOutputs]] = []
     resolved_classic_modes: Optional[Tuple[str, ...]] = None
     if config.enable_classic:
         raw_modes = [mode.strip() for mode in config.classic_modes.split(",") if mode.strip()]
@@ -2525,7 +2588,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     # Cache yönetimi - Multi-encoder için RVT türevlerini önceden hesapla
     precomputed_deriv: Optional[PrecomputedDerivatives] = None
-    if config.enable_deep_learning and enc_mode not in ("", "none") and config.cache_derivatives:
+    if (config.enable_deep_learning or config.enable_classic) and config.cache_derivatives:
         # Multi-encoder modu + cache etkin
         LOGGER.info("=" * 70)
         LOGGER.info("CACHE MODU: RVT türevleri bir kez hesaplanacak, tüm encoderlar kullanacak")
@@ -2544,7 +2607,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             LOGGER.warning("RVT türevleri hesaplanamadı, normal moda devam ediliyor")
 
     # Derin öğrenme etkinse modelleri çalıştır
-    if config.enable_deep_learning and enc_mode not in ("", "none"):
+    if config.enable_deep_learning and ran_multi:
         enc_list = (
             available_encoders_list()
             if enc_mode == "all"
@@ -2604,12 +2667,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 norm_sample_tiles=config.norm_sample_tiles,
                 feather=config.feather,
                 precomputed_deriv=precomputed_deriv,  # Cache kullanımı
-                encoder=suffix,
+                # encoder adı base prefix'te zaten var; tekrar eklemeyelim
+                encoder=None,
                 min_area=config.min_area,
             )
             LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
             LOGGER.info("[%s] ✓ İkili maske: %s", suffix, outputs.mask_path)
 
+            # Store last encoder label for fusion filenames
+            fusion_encoder_label = suffix
+            dl_runs.append((suffix, outputs.prob_path))
             if config.vectorize:
                 LOGGER.info("[%s] Vektörleştirme başlatılıyor...", suffix)
                 vector_base = outputs.mask_path.with_suffix("")
@@ -2636,13 +2703,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             LOGGER.info("Klasik yöntemler kapalı, işlem tamamlandı.")
             return
     
-    # Tek model çalıştır (enable_deep_learning aktifse ve enc_mode none ise)
-    if config.enable_deep_learning and config.zero_shot_imagenet:
+    # Tek model çalıştır (sadece encoders boş/none ise)
+    if enc_mode in ("", "none") and config.enable_deep_learning and config.zero_shot_imagenet:
         LOGGER.info("Zero-shot mode: using ImageNet-pretrained encoder inflated to 9 channels.")
         model = build_model_with_imagenet_inflated(
             arch=config.arch, encoder=config.encoder, in_ch=9
         )
-    elif config.enable_deep_learning:
+    elif enc_mode in ("", "none") and config.enable_deep_learning:
         model = build_model(arch=config.arch, encoder=config.encoder, in_ch=9)
         # weights_path is guaranteed to be set in this branch
         if weights_path is not None:
@@ -2657,7 +2724,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     # Derin öğrenme çıkarımını çalıştır (etkinse)
     outputs = None
-    if config.enable_deep_learning and model is not None:
+    if enc_mode in ("", "none") and config.enable_deep_learning and model is not None:
         outputs = infer_tiled(
             model=model,
             input_path=input_path,
@@ -2672,9 +2739,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             global_norm=config.global_norm,
             norm_sample_tiles=config.norm_sample_tiles,
             feather=config.feather,
+            precomputed_deriv=precomputed_deriv,
             encoder=config.encoder,
             min_area=config.min_area,
         )
+        # Record encoder for fusion filenames (single-encoder path)
+        fusion_encoder_label = config.encoder
 
         LOGGER.info("Olasılık haritası yazıldı: %s", outputs.prob_path)
         LOGGER.info("İkili maske yazıldı: %s", outputs.mask_path)
@@ -2702,6 +2772,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             feather=config.feather,
             save_intermediate=config.classic_save_intermediate,
             min_area=config.min_area,
+            precomputed_deriv=precomputed_deriv,
         )
         LOGGER.info("✓ Klasik yöntem birleşik çıktı: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
         if classic_outputs.per_mode:
@@ -2714,7 +2785,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
 
     # Fusion (birleştirme) çalıştır (etkinse ve her iki yöntem de çalıştıysa)
-    if fuse_enabled and classic_outputs is not None and outputs is not None:
+    if fuse_enabled and classic_outputs is not None:
         LOGGER.info("")
         LOGGER.info("=" * 70)
         LOGGER.info(f"FUSION (BİRLEŞTİRME) BAŞLATILIYOR (alpha={config.alpha})")
@@ -2722,6 +2793,59 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         alpha = float(config.alpha)
         fuse_threshold = config.th if config.th is not None else 0.5
         
+        # Per-encoder fusion (multi-encoder runs)
+        if ran_multi and dl_runs:
+            import rasterio as _rio
+            fuse_filter_raw = (config.fuse_encoders or "all").strip().lower()
+            fuse_filter = None if fuse_filter_raw == "all" else {s.strip().lower() for s in fuse_filter_raw.split(",") if s.strip()}
+            base_prefix = out_prefix.with_suffix("")
+            base_prefix.parent.mkdir(parents=True, exist_ok=True)
+            for enc_suffix, dl_prob_path in dl_runs:
+                if fuse_filter is not None and enc_suffix.lower() not in fuse_filter:
+                    continue
+                with _rio.open(dl_prob_path) as _src:
+                    _dl = _src.read(1).astype(np.float32)
+                _fprob, _fmask = compute_fused_probability(
+                    dl_prob=_dl,
+                    classic_prob=classic_outputs.prob_map.astype(np.float32),
+                    alpha=alpha,
+                    threshold=fuse_threshold,
+                )
+                _fname = build_filename_with_params(
+                    base_name=base_prefix.name,
+                    mode_suffix="fused",
+                    encoder=enc_suffix,
+                    threshold=fuse_threshold,
+                    tile=config.tile,
+                    alpha=alpha,
+                    min_area=config.min_area,
+                )
+                _pp = base_prefix.parent / f"{_fname}_prob.tif"
+                _mp = base_prefix.parent / f"{_fname}_mask.tif"
+                write_prob_and_mask_rasters(
+                    prob_map=_fprob,
+                    mask=_fmask,
+                    transform=classic_outputs.transform,
+                    crs=classic_outputs.crs,
+                    prob_path=_pp,
+                    mask_path=_mp,
+                )
+                multi_fused_results.append((enc_suffix, FusionOutputs(_pp, _mp, _fprob, _fmask, classic_outputs.transform, classic_outputs.crs, fuse_threshold)))
+                LOGGER.info("? Fused (%s): %s, %s", enc_suffix, _pp, _mp)
+        
+        # Ensure single-encoder fused only uses a valid DL probability map
+        if outputs is None and dl_runs:
+            try:
+                import rasterio as _rio
+                from types import SimpleNamespace as _SNS
+                enc_suffix, dl_prob_path = dl_runs[-1]
+                with _rio.open(dl_prob_path) as _src:
+                    _dl_last = _src.read(1).astype(np.float32)
+                outputs = _SNS(prob_map=_dl_last, transform=classic_outputs.transform, crs=classic_outputs.crs)
+                fusion_encoder_label = enc_suffix
+            except Exception:
+                outputs = None
+
         fused_prob, fused_mask = compute_fused_probability(
             dl_prob=outputs.prob_map.astype(np.float32),
             classic_prob=classic_outputs.prob_map.astype(np.float32),
@@ -2736,6 +2860,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         fused_filename = build_filename_with_params(
             base_name=base_prefix.name,
             mode_suffix="fused",
+            encoder=fusion_encoder_label,
             threshold=fuse_threshold,
             tile=config.tile,
             alpha=alpha,
@@ -2773,7 +2898,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.info("=" * 70)
         vector_jobs: List[Tuple[str, np.ndarray, np.ndarray, Affine, Optional[RasterioCRS], Path]] = []
         
-        if outputs is not None:
+        # Çoklu-encoder modunda DL çıktıları döngü sırasında vektörleştirildi; tekrar etmeyelim
+        if outputs is not None and not ran_multi:
             vector_jobs.append((
                 "dl",
                 outputs.mask,
@@ -2816,6 +2942,30 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     fusion_outputs.mask_path.with_suffix(""),
                 )
             )
+        if multi_fused_results:
+            for enc_label, fused in multi_fused_results:
+                vector_jobs.append(
+                    (
+                        f"fused_{enc_label}",
+                        fused.mask,
+                        fused.prob_map,
+                        fused.transform,
+                        fused.crs,
+                        fused.mask_path.with_suffix(""),
+                    )
+                )
+        if multi_fused_results:
+            for fused in multi_fused_results:
+                vector_jobs.append(
+                    (
+                        "fused_multi",
+                        fused.mask,
+                        fused.prob_map,
+                        fused.transform,
+                        fused.crs,
+                        fused.mask_path.with_suffix(""),
+                    )
+                )
 
         for label, mask_arr, prob_arr, transform, crs_obj, out_base in vector_jobs:
             LOGGER.info(f"  → {label} poligonlaştırılıyor...")
