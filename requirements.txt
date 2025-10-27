@@ -8,6 +8,7 @@ shapely==2.0.4
 pyproj==3.6.1
 geopandas==0.14.3
 fiona==1.9.5
+pyyaml==6.0.1
 
 # Relief Visualization Toolbox (import as `rvt`) for SVF/LRM/Openness derivation.
 # - On Python < 3.11 use the legacy rvt-py wheels.

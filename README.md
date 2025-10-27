@@ -1,3 +1,87 @@
+Arkeolojik Alan Tespiti (Derin Öğrenme + Klasik Yöntemler)
+==========================================================
+
+🇹🇷 TÜRKÇE HIZLI BAŞLANGIÇ
+===========================
+
+Çok Basit Kullanım! (2 Adım)
+-----------------------------
+**1. `config.yaml` dosyasını düzenleyin:**
+
+Dosyayı açın ve hangi yöntemlerin çalışacağını seçin:
+
+```yaml
+# Hangi yöntemlerin çalışacağını buradan kontrol edin:
+enable_deep_learning: true    # Derin öğrenme modeli
+enable_classic: true          # Klasik yöntemler (RVT, Hessian, Morfoloji)
+enable_fusion: true           # İki yöntemi birleştir
+
+# Diğer önemli ayarlar:
+th: 0.6                       # Tespit eşiği (düşük = daha fazla tespit)
+tile: 1024                    # Karo boyutu
+alpha: 0.5                    # Fusion karışım oranı (0.5 = eşit ağırlık)
+```
+
+**2. Çalıştırın:**
+```bash
+python archaeo_detect.py
+```
+
+Bu kadar! 🎉
+
+Farklı Senaryolar
+-----------------
+`config.yaml` içinde 3 temel senaryo için örnekler var:
+
+**Senaryo 1: Sadece Derin Öğrenme (Hızlı)**
+```yaml
+enable_deep_learning: true
+enable_classic: false
+enable_fusion: false
+```
+
+**Senaryo 2: Sadece Klasik Yöntemler (GPU gerektirmez)**
+```yaml
+enable_deep_learning: false
+enable_classic: true
+enable_fusion: false
+```
+
+**Senaryo 3: Her İkisi + Fusion (En İyi Sonuç) - ÖNERİLİR**
+```yaml
+enable_deep_learning: true
+enable_classic: true
+enable_fusion: true
+alpha: 0.5  # Eşit ağırlık
+```
+
+İleri Seviye Kullanım
+----------------------
+Config dosyasındaki parametreleri komut satırından override edebilirsiniz:
+```bash
+# Eşik değerini değiştir
+python archaeo_detect.py --th 0.7
+
+# Karo boyutunu değiştir
+python archaeo_detect.py --tile 512 --overlap 128
+
+# Fusion karışım oranını değiştir
+python archaeo_detect.py --alpha 0.7
+```
+
+Çıktı Dosyaları
+---------------
+- `*_prob.tif` - Olasılık haritası (0-1 arası)
+- `*_mask.tif` - İkili maske (0 veya 1)
+- `*_mask.gpkg` - Poligon vektör dosyası
+
+**Tüm ayarlar ve detaylı açıklamalar `config.yaml` dosyasında!**
+
+---
+
+🇬🇧 ENGLISH DOCUMENTATION
+==========================
+
 Archaeological Feature Detection (DL + Classic)
 ==============================================
 

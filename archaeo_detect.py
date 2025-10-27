@@ -1,23 +1,23 @@
 ﻿"""
-Command-line tool for archaeological feature detection from multi-band GeoTIFFs.
+Çok bantlı GeoTIFF'lerden arkeolojik alan tespiti için komut satırı aracı.
 
-The pipeline performs the following steps:
-1. Reads RGB, DSM, and DTM bands from a single raster and prepares per-tile workloads.
-2. Derives relief visualisation layers (sky-view factor, openness, local relief model,
-   slope) from the DTM via the Relief Visualization Toolbox (rvt-py).
-3. Builds a 9-channel tensor stack [R, G, B, SVF, PosOpen, NegOpen, LRM, Slope, nDSM],
-   normalises channels with robust 2-98 percentile scaling, and handles nodata safely.
-4. Runs tiled inference with a pretrained U-Net style model (segmentation_models_pytorch),
-   blending overlapping tiles to construct a seamless probability map.
-5. Applies optional tall-object masking, thresholds to a binary mask, and writes both
-   probability and mask GeoTIFF outputs with compression, preserving georeferencing.
-6. Optionally vectorises detected features into polygons with area/score attributes and
-   exports a GeoPackage for GIS workflows.
+Pipeline aşağıdaki adımları gerçekleştirir:
+1. Tek bir raster'dan RGB, DSM ve DTM bantlarını okur ve karo bazlı iş yüklerini hazırlar.
+2. DTM'den kabartma görselleştirme katmanlarını (gökyüzü görüş faktörü, açıklık, yerel 
+   kabartma modeli, eğim) Relief Visualization Toolbox (rvt-py) ile türetir.
+3. 9 kanallı tensör yığını [R, G, B, SVF, PosOpen, NegOpen, LRM, Slope, nDSM] oluşturur,
+   kanalları robust 2-98 persentil ölçekleme ile normalize eder ve nodata değerlerini güvenli şekilde işler.
+4. Önceden eğitilmiş U-Net tipi model (segmentation_models_pytorch) ile karolara bölünmüş
+   çıkarım yapar, örtüşen karoları harmanlayarak kesintisiz olasılık haritası oluşturur.
+5. İsteğe bağlı yüksek obje maskeleme uygular, eşikleme ile ikili maske oluşturur ve hem
+   olasılık hem de maske GeoTIFF çıktılarını sıkıştırılmış olarak, jeoreferansı koruyarak yazar.
+6. İsteğe bağlı olarak tespit edilen özellikleri alan/skor öznitelikleriyle poligonlara dönüştürür 
+   ve GIS iş akışları için GeoPackage formatında dışa aktarır.
 
-Assumptions:
-- Input mosaic aligns RGB, DSM, and DTM bands in the same CRS/extent/pixel-grid.
-- The pretrained model expects nine channels in the prescribed order.
-- rvt-py and torch-compatible compute environment are installed ahead of execution.
+Varsayımlar:
+- Girdi mozaiği RGB, DSM ve DTM bantlarını aynı CRS/kapsam/piksel-ızgarada içerir.
+- Önceden eğitilmiş model belirtilen sırada dokuz kanal bekler.
+- rvt-py ve torch uyumlu hesaplama ortamı önceden kurulmuştur.
 """
 
 from __future__ import annotations
@@ -88,30 +88,24 @@ try:
 except ImportError:  # pragma: no cover - optional, used to tame GDAL warnings
     gdal = None
 
+try:
+    import yaml
+except ImportError:
+    yaml = None  # YAML support is optional
+
 LOGGER = logging.getLogger("archaeo_detect")
 
 T = TypeVar("T")
 
-# ==== Constants ====
-# Normalization percentiles
-PERCENTILE_LOW = 2.0
-PERCENTILE_HIGH = 98.0
+# ==== Sabit Değerler ====
+# Bu değerler PipelineDefaults içinde yapılandırılabilir hale getirildi.
+# Eski kodlarla uyumluluk için burada referanslar var.
 
-# Multi-scale filter parameters
-SIGMA_SCALES = (1.0, 2.0, 4.0, 8.0)
-MORPHOLOGY_RADII = (3, 5, 9, 15)
-RVT_RADII = (5.0, 10.0, 20.0, 30.0, 50.0)
-
-# Histogram and threshold parameters
+# Histogram ve eşikleme parametreleri (algoritmanın çalışması için sabit kalmalı)
 HISTOGRAM_BINS = 256
 HISTOGRAM_RANGE = (0.0, 1.0)
 
-# Default filter sizes
-LOCAL_VARIANCE_WINDOW = 7
-GAUSSIAN_GRADIENT_SIGMA = 1.5
-GAUSSIAN_LRM_SIGMA = 6.0
-
-# Tile processing defaults
+# Karo işleme sabitleri
 TILE_SAMPLE_CROP_SIZE = 256
 LABEL_CONNECTIVITY_STRUCTURE = (3, 3)
 
@@ -157,156 +151,186 @@ def progress_bar(iterable: Iterable[T], **tqdm_kwargs) -> tqdm:
     tqdm_kwargs.setdefault("leave", False)
     return tqdm(iterable, **tqdm_kwargs)
 
-# Turkce not: Bu arac, ayni jeokoordinata sahip RGB, DSM ve DTM bantlarini tek bir GeoTIFF icinde bekler;
-# DTM'den SVF/Openness/LRM/slope turetilip RGB ile birlikte 9 kanalli tensore donusturulur.
-# Pretrained U-Net modeliyle kaydirma penceresi cikarimi yapilir; olasilik ve ikili maske GeoTIFF olarak yazilir;
-# istenirse poligonlastirilir.
-
-# ==== Pipeline defaults (tum ayarlar burada) ====
-# Bu dataclass tum parametreleri tek merkezde toplar ve her alanin uzerindeki yorum parametrenin ne yaptigini aciklar.
+# ==== PIPELINE AYARLARI (TÜM PARAMETRELERİ BURADAN KONTROl EDİN) ====
+# Bu dataclass tüm parametreleri tek merkezde toplar ve her alanın üzerindeki açıklama 
+# parametrenin ne yaptığını gösterir. İstediğiniz ayarları buradan değiştirebilirsiniz.
 
 
 @dataclass
 class PipelineDefaults:
-    # Girdide kullanilacak cok bantli GeoTIFF dosyasinin tam yolu; RGB, DSM ve DTM bantlarini icermelidir.
+    """
+    Arkeolojik alan tespit pipeline'ının tüm ayarlarını içeren merkezi yapılandırma sınıfı.
+    Tüm parametreleri buradan kontrol edebilir, hangi yöntemlerin çalışacağını belirleyebilirsiniz.
+    """
+    
+    # ===== GİRDİ/ÇIKTI AYARLARI =====
     input: str = field(
         default=r"C:\Users\ertug\Nextcloud\arkeolojik_alan_tespit\kesif_alani.tif",
-        metadata={"help": "Full path to the multi-band GeoTIFF (RGB + DSM + DTM)."},
+        metadata={"help": "Çok bantlı GeoTIFF dosyasının tam yolu (RGB + DSM + DTM içermeli)"},
     )
-    # Egitilmis .pth agirlik dosyasi; None ise zero-shot veya sablon agirlik akisi devreye girer.
-    weights: Optional[str] = field(
-        default=None,
-        metadata={"help": "Path to trained weights (*.pth); leave empty to rely on zero-shot/template logic."},
-    )
-    # R,G,B,DSM,DTM bantlarinin 1-indexli sirasi; bir bant yoksa 0 yazabilirsiniz.
-    bands: str = field(
-        default="1,2,3,4,5",
-        metadata={"help": "Comma separated band order (1-based) for R,G,B,DSM,DTM; use 0 if a band is absent."},
-    )
-    # Teker teker islenecek karo boyutu (piksel); daha buyuk deger GPU bellegini artirir, daha az karo anlamina gelir.
-    tile: int = field(
-        default=1024,
-        metadata={"help": "Tile size in pixels processed per forward pass; larger tiles need more memory."},
-    )
-    # Komsu karolarin bindirme miktari (piksel); dikis hatlarini azaltir fakat toplam karo sayisini artirir.
-    overlap: int = field(
-        default=256,
-        metadata={"help": "Overlap between tiles in pixels; balances seam quality vs. throughput."},
-    )
-    # DL olasilik haritasini maskeye cevirmek icin kullanilan esik (0-1 arasi); dusuk deger daha fazla aday uretir.
-    th: float = field(
-        default=0.6,
-        metadata={"help": "Probability threshold applied to the DL output when generating the binary mask."},
-    )
-    # CUDA mevcudiyetinde otomatik float16 (half precision) kullan; bellek ve hiz kazanci saglar.
-    half: bool = field(
-        default=True,
-        metadata={"help": "Use float16 autocast on CUDA devices (falls back to float32 when CUDA is unavailable)."},
-    )
-    # Tum karolar icin tek bir robust 2-98 yuzdelik normalizasyonu uygula; global kontrast tutarliligi saglar.
-    global_norm: bool = field(
-        default=True,
-        metadata={"help": "Estimate a global percentile normalisation and reuse it for every tile."},
-    )
-    # Global normalizasyon icin ornekleyecegimiz karo sayisi; daha yuksek deger istatistikleri saglamlastirir.
-    norm_sample_tiles: int = field(
-        default=32,
-        metadata={"help": "Number of tiles sampled to compute the global 2nd/98th percentiles."},
-    )
-    # Karo sinirlarinda kosinusu andiran agirliklarla yumusatma yaparak dikis izlerini azalt.
-    feather: bool = field(
-        default=True,
-        metadata={"help": "Feather tile borders with smooth weights; disable if you need raw tile edges."},
-    )
-    # Klasik kabartma tabanli (RVT, Hessian, morfoloji) pipeline'i calistir.
-    classic: bool = field(
-        default=True,
-        metadata={"help": "Run the classical relief pipeline (RVT log, Hessian, morphological filters)."},
-    )
-    # Klasik pipeline icin hangi modlar kullanilacak (rvtlog,hessian,morph,combo).
-    classic_modes: str = field(
-        default="combo",
-        metadata={"help": "Classic modes to compute (e.g. 'combo', 'rvtlog,hessian')."},
-    )
-    # Her klasik modu ayri dosya olarak kaydet; referans icin kullanisli.
-    classic_save_intermediate: bool = field(
-        default=True,
-        metadata={"help": "Write individual classic mode rasters besides the combined output."},
-    )
-    # Klasik pipeline icin sabit maske esigi (0-1); None ise otomatik Otsu kullanilir.
-    classic_th: Optional[float] = field(
-        default=None,
-        metadata={"help": "Manual threshold for classical mask; leave None to use automatic Otsu."},
-    )
-    # DL ve klasik olasiliklarini birlestiren ekstra ciktiyi etkinlestir.
-    fuse: bool = field(
-        default=True,
-        metadata={"help": "Blend DL and classical maps into a fused probability/mask pair."},
-    )
-    # Birlesimde DL olasiliginin agirligi (0-1); 1 yalniz DL, 0 yalniz klasik.
-    alpha: float = field(
-        default=0.5,
-        metadata={"help": "Fusion mixing factor; 1.0 keeps only DL scores, 0.0 keeps only classic."},
-    )
-    # nDSM yuksekliklerine gore yuksek objeleri maskele; bu esigi asan piksel tespit edilmez.
-    mask_talls: Optional[float] = field(
-        default=2.5,
-        metadata={"help": "Suppress detections where nDSM exceeds this height in metres."},
-    )
-    # Vektorelestirmede kabul edilecek minimum poligon alani (metrekare).
-    min_area: float = field(
-        default=80.0,
-        metadata={"help": "Minimum polygon area to keep during vectorisation (square metres)."},
-    )
-    # Poligonlar icin Douglas-Peucker basitlestirme toleransi (metre); None ise uygulanmaz.
-    simplify: Optional[float] = field(
-        default=None,
-        metadata={"help": "Polygon simplification tolerance in metres; set None to keep full detail."},
-    )
-    # Tespitleri GPKG poligon dosyasina aktar.
-    vectorize: bool = field(
-        default=True,
-        metadata={"help": "Export detection masks as polygons (GeoPackage)."},
-    )
-    # segmentation_models_pytorch icinden secilecek mimari adi.
-    arch: str = field(
-        default="Unet",
-        metadata={"help": "segmentation_models_pytorch architecture name (e.g. Unet, UnetPlusPlus)."},
-    )
-    # Tek model kosulurken kullanilacak varsayilan encoder.
-    encoder: str = field(
-        default="resnet34",
-        metadata={"help": "Default encoder backbone when running a single model."},
-    )
-    # Virgul ayrimli encoder listesi; 'all' hepsini, 'none' yalniz varsayilan encoderi kullanir.
-    encoders: str = field(
-        default="all",
-        metadata={"help": "Comma separated encoders to evaluate ('all', 'none', or explicit list)."},
-    )
-    # Encoder bazli agirlik dosya sablonu; {encoder} yer tutucusunu destekler.
-    weights_template: Optional[str] = field(
-        default=None,
-        metadata={"help": "Template for encoder-specific weights (e.g. models/unet_{encoder}_9ch_best.pth)."},
-    )
-    # Cikti dosyalari icin on-ek veya dizin; None ise girdi adindan otomatik uretilir.
     out_prefix: Optional[str] = field(
         default=None,
-        metadata={"help": "Output prefix or directory; defaults to using the input file stem."},
+        metadata={"help": "Çıktı dosyaları için ön-ek veya dizin; None ise girdi adından otomatik üretilir"},
     )
-    # Rastgelelik icin tohum degeri; numpy, torch ve random modullerine aktarilir.
-    seed: int = field(
-        default=42,
-        metadata={"help": "Random seed applied to numpy, torch, and Python random."},
+    bands: str = field(
+        default="1,2,3,4,5",
+        metadata={"help": "R,G,B,DSM,DTM bantlarının 1-tabanlı sırası; eksik bant için 0 yazın (örn: 1,2,3,4,5)"},
     )
-    # Trained weights olmadan ImageNet encoderini 9 kanala genisletip zero-shot calistir.
+    
+    # ===== YÖNTEM SEÇİMİ (HANGİ YÖNTEMLERİN ÇALIŞACAĞINI BURADAN KONTROL EDİN) =====
+    enable_deep_learning: bool = field(
+        default=True,
+        metadata={"help": "Derin öğrenme (U-Net) modelini çalıştır"},
+    )
+    enable_classic: bool = field(
+        default=True,
+        metadata={"help": "Klasik kabartma tabanlı yöntemleri (RVT, Hessian, morfoloji) çalıştır"},
+    )
+    enable_fusion: bool = field(
+        default=True,
+        metadata={"help": "Derin öğrenme ve klasik yöntem sonuçlarını birleştir (fusion)"},
+    )
+    
+    # ===== DERİN ÖĞRENME MODEL AYARLARI =====
+    arch: str = field(
+        default="Unet",
+        metadata={"help": "Segmentation model mimarisi (örn: Unet, UnetPlusPlus, DeepLabV3Plus)"},
+    )
+    encoder: str = field(
+        default="resnet34",
+        metadata={"help": "Tek model çalışırken kullanılacak varsayılan encoder (resnet34, resnet50, efficientnet-b3)"},
+    )
+    encoders: str = field(
+        default="none",
+        metadata={"help": "Çalıştırılacak encoder listesi; 'all'=hepsi, 'none'=sadece encoder parametresi, veya 'resnet34,resnet50'"},
+    )
+    weights: Optional[str] = field(
+        default=None,
+        metadata={"help": "Eğitilmiş model ağırlıkları (.pth dosyası); None ise zero-shot modu kullanılır"},
+    )
+    weights_template: Optional[str] = field(
+        default=None,
+        metadata={"help": "Encoder bazlı ağırlık şablonu (örn: models/unet_{encoder}_9ch.pth); {encoder} yerine encoder adı konur"},
+    )
     zero_shot_imagenet: bool = field(
         default=True,
-        metadata={"help": "Enable zero-shot inference by inflating ImageNet encoders to 9 channels."},
+        metadata={"help": "Ağırlık dosyası yoksa ImageNet encoder'ını 9 kanala genişletip zero-shot çalıştır"},
     )
-    # Log seviye kontrolu; 0 WARNING, 1 INFO, 2 DEBUG.
+    th: float = field(
+        default=0.6,
+        metadata={"help": "DL olasılık haritasını maskeye çevirmek için eşik (0-1 arası); düşük değer daha fazla tespit üretir"},
+    )
+    
+    # ===== KLASİK YÖNTEM AYARLARI =====
+    classic_modes: str = field(
+        default="combo",
+        metadata={"help": "Klasik yöntemler: 'combo' (hepsini çalıştır), veya 'rvtlog,hessian,morph' (seçili olanları çalıştır)"},
+    )
+    classic_save_intermediate: bool = field(
+        default=True,
+        metadata={"help": "Her klasik modu ayrı dosya olarak kaydet (karşılaştırma için kullanışlı)"},
+    )
+    classic_th: Optional[float] = field(
+        default=None,
+        metadata={"help": "Klasik yöntem için sabit maske eşiği (0-1); None ise otomatik Otsu eşiği kullanılır"},
+    )
+    
+    # ===== KLASİK YÖNTEM ALGORİTMA PARAMETRELERİ =====
+    sigma_scales: Tuple[float, ...] = field(
+        default=(1.0, 2.0, 4.0, 8.0),
+        metadata={"help": "Çok ölçekli filtreleme için sigma değerleri (LoG, Hessian için)"},
+    )
+    morphology_radii: Tuple[int, ...] = field(
+        default=(3, 5, 9, 15),
+        metadata={"help": "Morfolojik filtreleme için yapısal eleman yarıçapları"},
+    )
+    rvt_radii: Tuple[float, ...] = field(
+        default=(5.0, 10.0, 20.0, 30.0, 50.0),
+        metadata={"help": "RVT hesaplamaları (SVF, openness) için arama yarıçapları (metre)"},
+    )
+    local_variance_window: int = field(
+        default=7,
+        metadata={"help": "Yerel varyans hesaplama için pencere boyutu"},
+    )
+    gaussian_gradient_sigma: float = field(
+        default=1.5,
+        metadata={"help": "Gradyan büyüklüğü hesaplama için Gaussian sigma değeri"},
+    )
+    gaussian_lrm_sigma: float = field(
+        default=6.0,
+        metadata={"help": "LRM fallback hesaplama için Gaussian sigma değeri"},
+    )
+    
+    # ===== BİRLEŞTİRME (FUSION) AYARLARI =====
+    alpha: float = field(
+        default=0.5,
+        metadata={"help": "Fusion karışım ağırlığı (0-1); 1.0=sadece DL, 0.0=sadece klasik, 0.5=eşit ağırlık"},
+    )
+    
+    # ===== KARO İŞLEME AYARLARI =====
+    tile: int = field(
+        default=1024,
+        metadata={"help": "Karo boyutu (piksel); büyük değer daha fazla GPU belleği kullanır ama daha az karo demektir"},
+    )
+    overlap: int = field(
+        default=256,
+        metadata={"help": "Komşu karolar arası bindirme (piksel); dikiş hatlarını azaltır ama işlem süresini artırır"},
+    )
+    feather: bool = field(
+        default=True,
+        metadata={"help": "Karo sınırlarında yumuşatma uygula; dikiş izlerini azaltır"},
+    )
+    
+    # ===== NORMALİZASYON AYARLARI =====
+    global_norm: bool = field(
+        default=True,
+        metadata={"help": "Tüm karolar için tek bir global persentil normalizasyonu kullan (tutarlılık için önerilir)"},
+    )
+    norm_sample_tiles: int = field(
+        default=32,
+        metadata={"help": "Global normalizasyon için örneklenecek karo sayısı"},
+    )
+    percentile_low: float = field(
+        default=2.0,
+        metadata={"help": "Normalizasyon alt persentil değeri"},
+    )
+    percentile_high: float = field(
+        default=98.0,
+        metadata={"help": "Normalizasyon üst persentil değeri"},
+    )
+    
+    # ===== MASKELEME VE FİLTRELEME AYARLARI =====
+    mask_talls: Optional[float] = field(
+        default=2.5,
+        metadata={"help": "Bu yüksekliği (metre) aşan nDSM piksellerini maskele (yüksek bina/ağaçları eleme); None=kapalı"},
+    )
+    
+    # ===== VEKTÖRLEŞTİRME AYARLARI =====
+    vectorize: bool = field(
+        default=True,
+        metadata={"help": "Tespit maskelerini poligonlara dönüştürüp GeoPackage (.gpkg) olarak dışa aktar"},
+    )
+    min_area: float = field(
+        default=80.0,
+        metadata={"help": "Vektörleştirmede kabul edilecek minimum poligon alanı (metrekare)"},
+    )
+    simplify: Optional[float] = field(
+        default=None,
+        metadata={"help": "Poligon basitleştirme toleransı (metre); None ise basitleştirme yapılmaz"},
+    )
+    
+    # ===== PERFORMANS VE TEKNİK AYARLAR =====
+    half: bool = field(
+        default=True,
+        metadata={"help": "CUDA varsa float16 (yarı hassasiyet) kullan; bellek tasarrufu ve hız kazancı sağlar"},
+    )
+    seed: int = field(
+        default=42,
+        metadata={"help": "Rastgelelik tohum değeri (tekrarlanabilirlik için)"},
+    )
     verbose: int = field(
         default=1,
-        metadata={"help": "Verbosity level: 0=WARNING, 1=INFO, 2=DEBUG."},
+        metadata={"help": "Log detay seviyesi: 0=WARNING, 1=INFO, 2=DEBUG"},
     )
 
 
@@ -331,8 +355,61 @@ def cli_help(name: str, extra: Optional[str] = None) -> str:
     return base
 
 
+def load_config_from_yaml(yaml_path: Path) -> Dict[str, Any]:
+    """YAML config dosyasını oku ve dictionary olarak döndür."""
+    if yaml is None:
+        raise ImportError(
+            "YAML desteği için PyYAML yükleyin: pip install pyyaml"
+        )
+    
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"Config dosyası bulunamadı: {yaml_path}")
+    
+    with open(yaml_path, 'r', encoding='utf-8') as f:
+        config_dict = yaml.safe_load(f)
+    
+    if config_dict is None:
+        config_dict = {}
+    
+    return config_dict
+
+
 def build_config_from_args(args: argparse.Namespace) -> PipelineDefaults:
-    values = {f.name: getattr(args, f.name) for f in fields(PipelineDefaults)}
+    """Komut satırı argümanlarından ve opsiyonel YAML config'den PipelineDefaults oluştur."""
+    # Önce YAML config'i yükle (varsa)
+    base_config = {}
+    if hasattr(args, 'config') and args.config:
+        yaml_path = Path(args.config)
+        try:
+            base_config = load_config_from_yaml(yaml_path)
+            LOGGER.info(f"Config dosyası yüklendi: {yaml_path}")
+        except Exception as e:
+            LOGGER.warning(f"Config dosyası yüklenemedi ({yaml_path}): {e}")
+    
+    # YAML'dan gelen listeleri tuple'a çevir
+    list_to_tuple_fields = {'sigma_scales', 'morphology_radii', 'rvt_radii'}
+    for field_name in list_to_tuple_fields:
+        if field_name in base_config and isinstance(base_config[field_name], list):
+            base_config[field_name] = tuple(base_config[field_name])
+    
+    # Komut satırı argümanlarıyla override et
+    # Sadece komut satırında açıkça belirtilen argümanları kullan
+    values = {}
+    for f in fields(PipelineDefaults):
+        # Önce YAML'dan al (varsa)
+        if f.name in base_config:
+            values[f.name] = base_config[f.name]
+        # Sonra komut satırından al (varsa ve default değilse)
+        if hasattr(args, f.name):
+            arg_value = getattr(args, f.name)
+            # Eğer argüman default değilse, YAML'ı override et
+            default_value = default_for(f.name)
+            if arg_value != default_value:
+                values[f.name] = arg_value
+            # Eğer YAML'da da yoksa, default'u kullan
+            elif f.name not in values:
+                values[f.name] = arg_value
+    
     return PipelineDefaults(**values)
 
 
@@ -388,9 +465,13 @@ def compute_ndsm(dsm: Optional[np.ndarray], dtm: np.ndarray) -> np.ndarray:
 
 
 def percentile_clip(
-    arr: np.ndarray, low: float = PERCENTILE_LOW, high: float = PERCENTILE_HIGH
+    arr: np.ndarray, low: Optional[float] = None, high: Optional[float] = None
 ) -> np.ndarray:
-    """Clip array values between given percentiles while respecting NaNs."""
+    """Dizi değerlerini verilen persentiller arasında kırp, NaN değerlerine saygı göster."""
+    if low is None:
+        low = DEFAULTS.percentile_low
+    if high is None:
+        high = DEFAULTS.percentile_high
     if arr.size == 0:
         return arr
     valid = np.isfinite(arr)
@@ -407,12 +488,12 @@ def percentile_clip(
 
 
 def _norm01(arr: np.ndarray) -> np.ndarray:
-    """Convenience wrapper for percentile-based 0-1 scaling."""
-    return percentile_clip(arr, low=PERCENTILE_LOW, high=PERCENTILE_HIGH)
+    """Persentil tabanlı 0-1 ölçekleme için kolaylık sarmalayıcısı."""
+    return percentile_clip(arr)
 
 
 def _otsu_threshold_0to1(arr: np.ndarray, valid: np.ndarray) -> float:
-    """Compute Otsu threshold on 0..1 data respecting validity mask."""
+    """0..1 arası veride geçerlilik maskesini dikkate alarak Otsu eşiği hesapla."""
     data = arr[valid]
     if data.size == 0:
         return 0.5
@@ -436,8 +517,10 @@ def _otsu_threshold_0to1(arr: np.ndarray, valid: np.ndarray) -> float:
     return float(np.clip(threshold, 0.0, 1.0))
 
 
-def _local_variance(arr: np.ndarray, size: int = LOCAL_VARIANCE_WINDOW) -> np.ndarray:
-    """Estimate local variance using uniform filtering."""
+def _local_variance(arr: np.ndarray, size: Optional[int] = None) -> np.ndarray:
+    """Uniform filtreleme kullanarak yerel varyans tahmini yap."""
+    if size is None:
+        size = DEFAULTS.local_variance_window
     if size <= 1:
         return np.zeros_like(arr, dtype=np.float32)
     arr_f = arr.astype(np.float32, copy=False)
@@ -448,7 +531,7 @@ def _local_variance(arr: np.ndarray, size: int = LOCAL_VARIANCE_WINDOW) -> np.nd
 
 
 def _hessian_response(im: np.ndarray, sigma: float) -> np.ndarray:
-    """Compute normalised second eigenvalue magnitude from Hessian."""
+    """Hessian matrisinden normalize edilmiş ikinci özdeğer büyüklüğünü hesapla."""
     im_f = im.astype(np.float32, copy=False)
     Hxx = gaussian_filter(im_f, sigma=sigma, order=(2, 0), mode="nearest")
     Hxy = gaussian_filter(im_f, sigma=sigma, order=(1, 1), mode="nearest")
@@ -461,9 +544,13 @@ def _hessian_response(im: np.ndarray, sigma: float) -> np.ndarray:
 
 
 def robust_norm(
-    arr: np.ndarray, p_low: float = PERCENTILE_LOW, p_high: float = PERCENTILE_HIGH
+    arr: np.ndarray, p_low: Optional[float] = None, p_high: Optional[float] = None
 ) -> np.ndarray:
-    """Robust per-channel min-max normalisation with percentile clipping."""
+    """Persentil kırpma ile kanal başına robust min-max normalizasyonu."""
+    if p_low is None:
+        p_low = DEFAULTS.percentile_low
+    if p_high is None:
+        p_high = DEFAULTS.percentile_high
     if arr.ndim != 3:
         raise ValueError("robust_norm expects a (C, H, W) array.")
     normed = np.zeros_like(arr, dtype=np.float32)
@@ -509,9 +596,11 @@ def fill_nodata(
 def compute_derivatives_with_rvt(
     dtm: np.ndarray,
     pixel_size: float,
-    radii: Sequence[float] = RVT_RADII,
+    radii: Optional[Sequence[float]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Compute SVF, openness, LRM, and slope using RVT routines."""
+    """RVT rutinlerini kullanarak SVF, açıklık, LRM ve eğim hesapla."""
+    if radii is None:
+        radii = DEFAULTS.rvt_radii
     dtm_filled, valid_mask = fill_nodata(dtm)
     # Compatibility helpers for rvt-py API differences across versions
     def _as_float32_array(result_obj, name: str) -> np.ndarray:
@@ -706,8 +795,8 @@ def compute_derivatives_with_rvt(
 
         lrm = _as_float32_array(_call_lrm(), "local_relief_model")
     except AttributeError:
-        LOGGER.warning("rvt.vis.local_relief_model missing; using Gaussian fallback.")
-        low_pass = gaussian_filter(dtm_filled, sigma=GAUSSIAN_LRM_SIGMA)
+        LOGGER.warning("rvt.vis.local_relief_model eksik; Gaussian fallback kullanılıyor.")
+        low_pass = gaussian_filter(dtm_filled, sigma=DEFAULTS.gaussian_lrm_sigma)
         lrm = (dtm_filled - low_pass).astype(np.float32)
 
     # slope signature also varies across versions; try with/without keywords.
@@ -743,20 +832,20 @@ def compute_derivatives_with_rvt(
 
 
 def _score_rvtlog(dtm: np.ndarray, pixel_size: float) -> np.ndarray:
-    """Composite RVT + LoG + gradient classical score."""
+    """Birleşik RVT + LoG + gradyan klasik skor hesaplama."""
     dtm_filled, valid = fill_nodata(dtm)
     svf, _, neg, lrm, _ = compute_derivatives_with_rvt(dtm, pixel_size=pixel_size)
-    sigmas = SIGMA_SCALES
+    sigmas = DEFAULTS.sigma_scales
     log_responses = [
         np.abs(gaussian_laplace(dtm_filled, sigma=s, mode="nearest"))
         for s in sigmas
     ]
     blob = np.maximum.reduce(log_responses)
-    grad = gaussian_gradient_magnitude(dtm_filled, sigma=GAUSSIAN_GRADIENT_SIGMA, mode="nearest")
+    grad = gaussian_gradient_magnitude(dtm_filled, sigma=DEFAULTS.gaussian_gradient_sigma, mode="nearest")
     svf_c = 1.0 - _norm01(svf)
     neg_n = _norm01(neg)
     lrm_n = _norm01(lrm)
-    var_n = _norm01(_local_variance(dtm_filled, size=LOCAL_VARIANCE_WINDOW))
+    var_n = _norm01(_local_variance(dtm_filled))
     score = (
         0.30 * _norm01(blob)
         + 0.20 * lrm_n
@@ -770,9 +859,9 @@ def _score_rvtlog(dtm: np.ndarray, pixel_size: float) -> np.ndarray:
 
 
 def _score_hessian(dtm: np.ndarray) -> np.ndarray:
-    """Multi-scale Hessian ridge/valley response."""
+    """Çok ölçekli Hessian sırt/vadi yanıt hesaplama."""
     dtm_filled, valid = fill_nodata(dtm)
-    sigmas = SIGMA_SCALES
+    sigmas = DEFAULTS.sigma_scales
     responses = [_hessian_response(dtm_filled, sigma=s) for s in sigmas]
     score = np.maximum.reduce(responses)
     score[~valid] = np.nan
@@ -780,9 +869,9 @@ def _score_hessian(dtm: np.ndarray) -> np.ndarray:
 
 
 def _score_morph(dtm: np.ndarray) -> np.ndarray:
-    """Morphological white/black top-hat prominence score."""
+    """Morfolojik beyaz/siyah top-hat belirginlik skoru hesaplama."""
     dtm_filled, valid = fill_nodata(dtm)
-    radii = MORPHOLOGY_RADII
+    radii = DEFAULTS.morphology_radii
     wth_list = []
     bth_list = []
     for r in radii:
@@ -1710,13 +1799,19 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str]) -> Path:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Archaeological feature detection via pretrained U-Net.",
+        description="Arkeolojik alan tespiti için önceden eğitilmiş U-Net modeli.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="YAML konfigürasyon dosyası yolu. Tüm ayarları buradan kontrol edebilirsiniz.",
     )
     parser.add_argument(
         "--input",
         default=default_for("input"),
-        help=cli_help("input", "(update PipelineDefaults.input to change the baked-in path)."),
+        help=cli_help("input", "(PipelineDefaults.input veya config.yaml'dan değiştirin)."),
     )
     parser.add_argument(
         "--weights",
@@ -1771,10 +1866,25 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("feather", "(switch off with --no-feather for raw tile edges)."),
     )
     parser.add_argument(
-        "--classic",
+        "--enable-deep-learning",
         action=argparse.BooleanOptionalAction,
-        default=default_for("classic"),
-        help=cli_help("classic", "(disable with --no-classic if you only need DL inference)."),
+        default=default_for("enable_deep_learning"),
+        dest="enable_deep_learning",
+        help=cli_help("enable_deep_learning", "(--no-enable-deep-learning ile sadece klasik yöntemleri çalıştırabilirsiniz)."),
+    )
+    parser.add_argument(
+        "--enable-classic",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("enable_classic"),
+        dest="enable_classic",
+        help=cli_help("enable_classic", "(--no-enable-classic ile sadece DL çalıştırabilirsiniz)."),
+    )
+    parser.add_argument(
+        "--enable-fusion",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("enable_fusion"),
+        dest="enable_fusion",
+        help=cli_help("enable_fusion", "(--no-enable-fusion ile DL ve klasik sonuçları ayrı tutabilirsiniz)."),
     )
     parser.add_argument(
         "--classic-modes",
@@ -1792,12 +1902,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         type=float,
         default=default_for("classic_th"),
         help=cli_help("classic_th"),
-    )
-    parser.add_argument(
-        "--fuse",
-        action=argparse.BooleanOptionalAction,
-        default=default_for("fuse"),
-        help=cli_help("fuse", "(turn off with --no-fuse to keep DL and classic outputs separate)."),
     )
     parser.add_argument(
         "--alpha",
@@ -1925,21 +2029,25 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     bands = parse_band_indexes(config.bands)
     out_prefix = resolve_out_prefix(input_path, config.out_prefix)
+    # Yöntem etkinleştirme kontrolleri
+    if not config.enable_deep_learning and not config.enable_classic:
+        parser.error("En az bir yöntem etkin olmalı (deep learning veya classic).")
+    
     classic_outputs: Optional[ClassicOutputs] = None
     fusion_outputs: Optional[FusionOutputs] = None
     resolved_classic_modes: Optional[Tuple[str, ...]] = None
-    if config.classic:
+    if config.enable_classic:
         raw_modes = [mode.strip() for mode in config.classic_modes.split(",") if mode.strip()]
         if not raw_modes:
-            parser.error("--classic-modes must include at least one mode.")
+            parser.error("--classic-modes en az bir mod içermelidir.")
         valid_modes = {"rvtlog", "hessian", "morph", "combo"}
         invalid = [m for m in raw_modes if m.lower() not in valid_modes]
         if invalid:
-            parser.error(f"Unsupported classic mode(s): {', '.join(invalid)}")
+            parser.error(f"Desteklenmeyen klasik mod(lar): {', '.join(invalid)}")
         if len(raw_modes) == 1 and raw_modes[0].lower() == "combo":
             resolved_classic_modes = ("rvtlog", "hessian", "morph")
         elif any(m.lower() == "combo" for m in raw_modes):
-            parser.error("'combo' cannot be combined with other classic modes.")
+            parser.error("'combo' diğer klasik modlarla birleştirilemez.")
         else:
             resolved_classic_modes = tuple(m.lower() for m in raw_modes)
 
@@ -1948,7 +2056,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if config.half and device.type != "cuda":
         LOGGER.warning("--half requested but CUDA not available; running in float32.")
 
-    if enc_mode not in ("", "none"):
+    # Derin öğrenme etkinse modelleri çalıştır
+    if config.enable_deep_learning and enc_mode not in ("", "none"):
         enc_list = (
             available_encoders_list()
             if enc_mode == "all"
@@ -2014,47 +2123,54 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 if gpkg:
                     LOGGER.info("[%s] Vector: %s", suffix, gpkg)
         return
-
-    if config.zero_shot_imagenet:
+    
+    # Tek model çalıştır (enable_deep_learning aktifse ve enc_mode none ise)
+    if config.enable_deep_learning and config.zero_shot_imagenet:
         LOGGER.info("Zero-shot mode: using ImageNet-pretrained encoder inflated to 9 channels.")
         model = build_model_with_imagenet_inflated(
             arch=config.arch, encoder=config.encoder, in_ch=9
         )
-    else:
+    elif config.enable_deep_learning:
         model = build_model(arch=config.arch, encoder=config.encoder, in_ch=9)
         # weights_path is guaranteed to be set in this branch
-        assert weights_path is not None
-        load_weights(model, weights_path, map_location=device)
+        if weights_path is not None:
+            load_weights(model, weights_path, map_location=device)
+    else:
+        model = None
 
     if bands[3] <= 0:
         LOGGER.warning(
             "DSM band not provided; nDSM channel will be zero and tall-object masking will be disabled."
         )
 
-    outputs = infer_tiled(
-        model=model,
-        input_path=input_path,
-        band_idx=bands,
-        tile=config.tile,
-        overlap=config.overlap,
-        device=device,
-        use_half=config.half,
-        threshold=config.th,
-        mask_talls=config.mask_talls,
-        out_prefix=out_prefix,
-        global_norm=config.global_norm,
-        norm_sample_tiles=config.norm_sample_tiles,
-        feather=config.feather,
-    )
+    # Derin öğrenme çıkarımını çalıştır (etkinse)
+    outputs = None
+    if config.enable_deep_learning and model is not None:
+        outputs = infer_tiled(
+            model=model,
+            input_path=input_path,
+            band_idx=bands,
+            tile=config.tile,
+            overlap=config.overlap,
+            device=device,
+            use_half=config.half,
+            threshold=config.th,
+            mask_talls=config.mask_talls,
+            out_prefix=out_prefix,
+            global_norm=config.global_norm,
+            norm_sample_tiles=config.norm_sample_tiles,
+            feather=config.feather,
+        )
 
-    LOGGER.info("Probability map written to %s", outputs.prob_path)
-    LOGGER.info("Binary mask written to %s", outputs.mask_path)
+        LOGGER.info("Olasılık haritası yazıldı: %s", outputs.prob_path)
+        LOGGER.info("İkili maske yazıldı: %s", outputs.mask_path)
 
-    fuse_enabled = config.classic and config.fuse
-    if config.fuse and not config.classic:
-        LOGGER.warning("--fuse requested without --classic; ignoring fusion request.")
+    fuse_enabled = config.enable_classic and config.enable_fusion and config.enable_deep_learning
+    if config.enable_fusion and not (config.enable_classic and config.enable_deep_learning):
+        LOGGER.warning("Fusion için hem deep learning hem de classic yöntemlerin etkin olması gerekir.")
 
-    if config.classic and resolved_classic_modes is not None:
+    # Klasik pipeline'ı çalıştır (etkinse)
+    if config.enable_classic and resolved_classic_modes is not None:
         classic_outputs = infer_classic_tiled(
             input_path=input_path,
             band_idx=bands,
@@ -2066,17 +2182,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             feather=config.feather,
             save_intermediate=config.classic_save_intermediate,
         )
-        LOGGER.info("Classic outputs written: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
+        LOGGER.info("Klasik yöntem çıktıları yazıldı: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
         if classic_outputs.per_mode:
             for mode_name, mode_out in classic_outputs.per_mode.items():
                 LOGGER.info(
-                    "Classic mode '%s' outputs: %s, %s",
+                    "Klasik mod '%s' çıktıları: %s, %s",
                     mode_name,
                     mode_out.prob_path,
                     mode_out.mask_path,
                 )
 
-    if fuse_enabled and classic_outputs is not None:
+    # Fusion (birleştirme) çalıştır (etkinse ve her iki yöntem de çalıştıysa)
+    if fuse_enabled and classic_outputs is not None and outputs is not None:
         alpha = float(config.alpha)
         fuse_threshold = config.th if config.th is not None else 0.5
         
@@ -2110,19 +2227,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             crs=outputs.crs,
             threshold=fuse_threshold,
         )
-        LOGGER.info("Fused outputs written to %s, %s", fused_prob_path, fused_mask_path)
+        LOGGER.info("Birleştirilmiş (fused) çıktılar yazıldı: %s, %s", fused_prob_path, fused_mask_path)
 
+    # Vektörleştirme (etkinse)
     if config.vectorize:
-        vector_jobs: List[Tuple[str, np.ndarray, np.ndarray, Affine, Optional[RasterioCRS], Path]] = [
-            (
+        vector_jobs: List[Tuple[str, np.ndarray, np.ndarray, Affine, Optional[RasterioCRS], Path]] = []
+        
+        if outputs is not None:
+            vector_jobs.append((
                 "dl",
                 outputs.mask,
                 outputs.prob_map,
                 outputs.transform,
                 outputs.crs,
                 outputs.mask_path.with_suffix(""),
-            )
-        ]
+            ))
         if classic_outputs is not None:
             vector_jobs.append(
                 (
@@ -2169,17 +2288,58 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 simplify_tol=config.simplify,
             )
             if vector_file:
-                LOGGER.info("Vector output (%s) written to %s", label, vector_file)
+                LOGGER.info("Vektör çıktısı (%s) yazıldı: %s", label, vector_file)
 
 
 if __name__ == "__main__":
     main()
 
-# Quick Start:
-# (A) With trained weights:
-# python archaeo_detect.py --input /data/site_multiband.tif --weights /models/unet_resnet34_arch.pth \
-#     --bands 1,2,3,4,5 --tile 512 --overlap 64 --th 0.5 --mask-talls 2.5 --min-area 50 --vectorize
+# ============================================================================
+# HIZLI BAŞLANGIÇ
+# ============================================================================
 #
-# (B) Zero-shot (no weights; inflate ImageNet encoder to 9-ch):
-# python archaeo_detect.py --input /data/site_multiband.tif --bands 1,2,3,4,5 \
-#     --tile 512 --overlap 64 --th 0.6 --mask-talls 2.5 --min-area 80 --vectorize --zero-shot-imagenet
+# EN KOLAY YÖNTEM: Tek config.yaml dosyası! ⭐
+# --------------------------------------------
+# 1. config.yaml dosyasını düzenleyin:
+#    - enable_deep_learning: true/false
+#    - enable_classic: true/false
+#    - enable_fusion: true/false
+#    - th, tile, alpha ve diğer tüm ayarlar
+#
+# 2. Çalıştırın:
+#    python archaeo_detect.py
+#
+# Bu kadar! Tüm ayarlar ve detaylı açıklamalar config.yaml içinde.
+#
+#
+# KOMUT SATIRI ÖRNEKLERİ (config.yaml'ı override eder):
+# -------------------------------------------------------
+#
+# Temel kullanım (config.yaml'dan okur):
+# python archaeo_detect.py
+#
+# Eşik değerini değiştir:
+# python archaeo_detect.py --th 0.7
+#
+# Karo boyutunu ve overlap'i değiştir:
+# python archaeo_detect.py --tile 512 --overlap 128
+#
+# Fusion karışım oranını değiştir:
+# python archaeo_detect.py --alpha 0.7
+#
+# Eğitilmiş ağırlıklarla çalıştır:
+# python archaeo_detect.py --weights unet_resnet34_arch.pth
+#
+#
+# SENARYOLAR (config.yaml içinde):
+# ----------------------------------
+# Senaryo 1: Sadece DL
+#   enable_deep_learning: true, enable_classic: false, enable_fusion: false
+#
+# Senaryo 2: Sadece Klasik
+#   enable_deep_learning: false, enable_classic: true, enable_fusion: false
+#
+# Senaryo 3: Her İkisi + Fusion (ÖNERİLİR)
+#   enable_deep_learning: true, enable_classic: true, enable_fusion: true
+#
+# ============================================================================
