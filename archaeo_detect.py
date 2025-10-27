@@ -1914,11 +1914,15 @@ def validate_cache(
     metadata: Dict[str, Any],
     input_path: Path,
     bands: Sequence[int],
-    tile: int,
-    overlap: int,
 ) -> bool:
-    """Cache'in mevcut parametrelerle uyumlu olup olmadığını kontrol et."""
-    required_keys = ["input_path", "input_mtime", "bands", "tile", "overlap", "shape"]
+    """
+    Cache'in mevcut parametrelerle uyumlu olup olmadığını kontrol et.
+    
+    NOT: tile ve overlap parametreleri cache geçerliliğini ETKİLEMEZ!
+    RVT türevleri tüm raster için bir kez hesaplanır, tile/overlap sadece
+    model inference sırasında kullanılır.
+    """
+    required_keys = ["input_path", "input_mtime", "bands", "shape"]
     
     if not all(key in metadata for key in required_keys):
         LOGGER.warning("Cache metadata eksik")
@@ -1930,11 +1934,9 @@ def validate_cache(
         LOGGER.warning("Girdi dosyası değişmiş, cache geçersiz")
         return False
     
-    # Parametreler aynı mı?
-    if (metadata["bands"] != list(bands) or
-        metadata["tile"] != tile or
-        metadata["overlap"] != overlap):
-        LOGGER.warning("İşleme parametreleri değişmiş, cache geçersiz")
+    # Bant sırası aynı mı?
+    if metadata["bands"] != list(bands):
+        LOGGER.warning("Bant sırası değişmiş, cache geçersiz")
         return False
     
     LOGGER.info("Cache geçerli ✓")
@@ -1988,7 +1990,7 @@ def precompute_derivatives(
             if cache_result:
                 derivatives_data, metadata = cache_result
                 # Cache geçerli mi?
-                if validate_cache(metadata, input_path, band_idx, 0, 0):
+                if validate_cache(metadata, input_path, band_idx):
                     # Cache'den yükle
                     return PrecomputedDerivatives(
                         rgb=derivatives_data["rgb"],
@@ -2067,10 +2069,11 @@ def precompute_derivatives(
                 "input_path": str(input_path),
                 "input_mtime": input_path.stat().st_mtime,
                 "bands": list(band_idx),
-                "tile": 0,
-                "overlap": 0,
                 "shape": (height, width),
                 "pixel_size": pixel_size,
+                # NOT: tile ve overlap cache'e KAYDEDİLMEZ!
+                # RVT türevleri tüm raster için hesaplanır, tile/overlap
+                # sadece model inference sırasında kullanılır.
             }
             save_derivatives_cache(cache_path, derivatives_data, metadata)
         
