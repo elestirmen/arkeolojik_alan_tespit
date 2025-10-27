@@ -2392,8 +2392,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         # Cache kullanılıyorsa ilerleme mesajı
         if precomputed_deriv:
             LOGGER.info(f"Toplam {len(enc_list)} encoder çalıştırılacak (RVT hesaplaması atlanacak)")
+        else:
+            LOGGER.info(f"Toplam {len(enc_list)} encoder çalıştırılacak (her biri için RVT hesaplanacak)")
         
-        for enc in enc_list:
+        for idx, enc in enumerate(enc_list, 1):
+            LOGGER.info("=" * 70)
+            LOGGER.info(f"ENCODER {idx}/{len(enc_list)}: {enc.upper()}")
+            LOGGER.info("=" * 70)
+            
             smp_name, suffix = normalize_encoder(enc)
             try:
                 _ = smp.encoders.get_encoder(smp_name, in_channels=3)
@@ -2411,11 +2417,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     LOGGER.info("[%s] No weights at %s; falling back to zero-shot.", suffix, cand)
 
             if per_weights is not None:
-                LOGGER.info("Running %s with trained weights: %s", suffix, per_weights)
+                LOGGER.info("[%s] Eğitilmiş ağırlıklar yükleniyor: %s", suffix, per_weights)
                 model = build_model(arch=config.arch, encoder=smp_name, in_ch=9)
                 load_weights(model, per_weights, map_location=device)
             else:
-                LOGGER.info("Running %s in zero-shot (ImageNet 3->9) mode.", suffix)
+                LOGGER.info("[%s] Zero-shot modunda başlatılıyor (ImageNet 3->9 genişletme)", suffix)
                 model = build_model_with_imagenet_inflated(arch=config.arch, encoder=smp_name, in_ch=9)
 
             enc_prefix = out_prefix.with_suffix("")
@@ -2437,10 +2443,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 feather=config.feather,
                 precomputed_deriv=precomputed_deriv,  # Cache kullanımı
             )
-            LOGGER.info("[%s] Probability: %s", suffix, outputs.prob_path)
-            LOGGER.info("[%s] Mask: %s", suffix, outputs.mask_path)
+            LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
+            LOGGER.info("[%s] ✓ İkili maske: %s", suffix, outputs.mask_path)
 
             if config.vectorize:
+                LOGGER.info("[%s] Vektörleştirme başlatılıyor...", suffix)
                 vector_base = outputs.mask_path.with_suffix("")
                 gpkg = vectorize_predictions(
                     mask=outputs.mask,
@@ -2452,11 +2459,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     simplify_tol=config.simplify,
                 )
                 if gpkg:
-                    LOGGER.info("[%s] Vector: %s", suffix, gpkg)
+                    LOGGER.info("[%s] ✓ Vektör dosyası: %s", suffix, gpkg)
+        
+        LOGGER.info("")
+        LOGGER.info("=" * 70)
+        LOGGER.info("TÜM ENCODERLAR TAMAMLANDI!")
+        LOGGER.info("=" * 70)
         
         # Multi-encoder loop tamamlandı
         # Klasik yöntemler kapalıysa burada çık, açıksa devam et
         if not config.enable_classic:
+            LOGGER.info("Klasik yöntemler kapalı, işlem tamamlandı.")
             return
     
     # Tek model çalıştır (enable_deep_learning aktifse ve enc_mode none ise)
@@ -2506,6 +2519,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     # Klasik pipeline'ı çalıştır (etkinse)
     if config.enable_classic and resolved_classic_modes is not None:
+        LOGGER.info("")
+        LOGGER.info("=" * 70)
+        LOGGER.info("KLASİK YÖNTEMLER BAŞLATILIYOR")
+        LOGGER.info(f"Modlar: {', '.join(resolved_classic_modes)}")
+        LOGGER.info("=" * 70)
+        
         classic_outputs = infer_classic_tiled(
             input_path=input_path,
             band_idx=bands,
@@ -2517,11 +2536,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             feather=config.feather,
             save_intermediate=config.classic_save_intermediate,
         )
-        LOGGER.info("Klasik yöntem çıktıları yazıldı: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
+        LOGGER.info("✓ Klasik yöntem birleşik çıktı: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
         if classic_outputs.per_mode:
             for mode_name, mode_out in classic_outputs.per_mode.items():
                 LOGGER.info(
-                    "Klasik mod '%s' çıktıları: %s, %s",
+                    "  ✓ Klasik mod '%s': %s, %s",
                     mode_name,
                     mode_out.prob_path,
                     mode_out.mask_path,
@@ -2529,6 +2548,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     # Fusion (birleştirme) çalıştır (etkinse ve her iki yöntem de çalıştıysa)
     if fuse_enabled and classic_outputs is not None and outputs is not None:
+        LOGGER.info("")
+        LOGGER.info("=" * 70)
+        LOGGER.info(f"FUSION (BİRLEŞTİRME) BAŞLATILIYOR (alpha={config.alpha})")
+        LOGGER.info("=" * 70)
         alpha = float(config.alpha)
         fuse_threshold = config.th if config.th is not None else 0.5
         
@@ -2562,10 +2585,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             crs=outputs.crs,
             threshold=fuse_threshold,
         )
-        LOGGER.info("Birleştirilmiş (fused) çıktılar yazıldı: %s, %s", fused_prob_path, fused_mask_path)
+        LOGGER.info("✓ Birleştirilmiş (fused) çıktılar: %s, %s", fused_prob_path, fused_mask_path)
 
     # Vektörleştirme (etkinse)
     if config.vectorize:
+        LOGGER.info("")
+        LOGGER.info("=" * 70)
+        LOGGER.info("VEKTÖRLEŞTİRME BAŞLATILIYOR")
+        LOGGER.info("=" * 70)
         vector_jobs: List[Tuple[str, np.ndarray, np.ndarray, Affine, Optional[RasterioCRS], Path]] = []
         
         if outputs is not None:
@@ -2613,6 +2640,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
 
         for label, mask_arr, prob_arr, transform, crs_obj, out_base in vector_jobs:
+            LOGGER.info(f"  → {label} poligonlaştırılıyor...")
             vector_file = vectorize_predictions(
                 mask=mask_arr,
                 prob_map=prob_arr,
@@ -2623,7 +2651,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 simplify_tol=config.simplify,
             )
             if vector_file:
-                LOGGER.info("Vektör çıktısı (%s) yazıldı: %s", label, vector_file)
+                LOGGER.info("    ✓ Vektör çıktısı (%s): %s", label, vector_file)
+        
+        LOGGER.info("")
+        LOGGER.info("=" * 70)
+        LOGGER.info("✅ TÜM İŞLEMLER TAMAMLANDI!")
+        LOGGER.info("=" * 70)
 
 
 if __name__ == "__main__":
