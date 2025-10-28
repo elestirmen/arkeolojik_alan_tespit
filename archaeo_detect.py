@@ -631,6 +631,7 @@ def compute_derivatives_with_rvt(
     dtm: np.ndarray,
     pixel_size: float,
     radii: Optional[Sequence[float]] = None,
+    gaussian_lrm_sigma: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """RVT rutinlerini kullanarak SVF, açıklık, LRM ve eğim hesapla."""
     if radii is None:
@@ -838,7 +839,8 @@ def compute_derivatives_with_rvt(
         lrm = _as_float32_array(_call_lrm(), "local_relief_model")
     except AttributeError:
         LOGGER.warning("rvt.vis.local_relief_model eksik; Gaussian fallback kullanılıyor.")
-        low_pass = gaussian_filter(dtm_filled, sigma=DEFAULTS.gaussian_lrm_sigma)
+        _lrm_sigma = DEFAULTS.gaussian_lrm_sigma if gaussian_lrm_sigma is None else float(gaussian_lrm_sigma)
+        low_pass = gaussian_filter(dtm_filled, sigma=_lrm_sigma)
         lrm = (dtm_filled - low_pass).astype(np.float32)
 
     # slope signature also varies across versions; try with/without keywords.
@@ -881,28 +883,39 @@ def _score_rvtlog(
     pre_neg_open: Optional[np.ndarray] = None,
     pre_lrm: Optional[np.ndarray] = None,
     pre_slope: Optional[np.ndarray] = None,
+    sigmas: Optional[Sequence[float]] = None,
+    gaussian_gradient_sigma: Optional[float] = None,
+    local_variance_window: Optional[int] = None,
+    rvt_radii: Optional[Sequence[float]] = None,
+    gaussian_lrm_sigma: Optional[float] = None,
 ) -> np.ndarray:
     """Birleşik RVT + LoG + gradyan klasik skor hesaplama."""
     dtm_filled, valid = fill_nodata(dtm)
     if pre_svf is None or pre_neg_open is None or pre_lrm is None:
-        svf, _, neg, lrm, _ = compute_derivatives_with_rvt(dtm, pixel_size=pixel_size)
+        svf, _, neg, lrm, _ = compute_derivatives_with_rvt(
+            dtm, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
+        )
     else:
         svf, neg, lrm = pre_svf, pre_neg_open, pre_lrm
-    sigmas = DEFAULTS.sigma_scales
+    _sigmas = DEFAULTS.sigma_scales if sigmas is None else sigmas
     log_responses = [
         np.abs(gaussian_laplace(dtm_filled, sigma=s, mode="nearest"))
-        for s in sigmas
+        for s in _sigmas
     ]
     blob = np.maximum.reduce(log_responses)
     if pre_slope is None:
-        grad = gaussian_gradient_magnitude(dtm_filled, sigma=DEFAULTS.gaussian_gradient_sigma, mode="nearest")
+        _grad_sigma = (
+            DEFAULTS.gaussian_gradient_sigma if gaussian_gradient_sigma is None else float(gaussian_gradient_sigma)
+        )
+        grad = gaussian_gradient_magnitude(dtm_filled, sigma=_grad_sigma, mode="nearest")
         slope_term = _norm01(grad)
     else:
         slope_term = _norm01(pre_slope)
     svf_c = 1.0 - _norm01(svf)
     neg_n = _norm01(neg)
     lrm_n = _norm01(lrm)
-    var_n = _norm01(_local_variance(dtm_filled))
+    _var_win = DEFAULTS.local_variance_window if local_variance_window is None else int(local_variance_window)
+    var_n = _norm01(_local_variance(dtm_filled, size=_var_win))
     score = (
         0.30 * _norm01(blob)
         + 0.20 * lrm_n
@@ -915,20 +928,20 @@ def _score_rvtlog(
     return score.astype(np.float32)
 
 
-def _score_hessian(dtm: np.ndarray) -> np.ndarray:
+def _score_hessian(dtm: np.ndarray, sigmas: Optional[Sequence[float]] = None) -> np.ndarray:
     """Çok ölçekli Hessian sırt/vadi yanıt hesaplama."""
     dtm_filled, valid = fill_nodata(dtm)
-    sigmas = DEFAULTS.sigma_scales
-    responses = [_hessian_response(dtm_filled, sigma=s) for s in sigmas]
+    _sigmas = DEFAULTS.sigma_scales if sigmas is None else sigmas
+    responses = [_hessian_response(dtm_filled, sigma=s) for s in _sigmas]
     score = np.maximum.reduce(responses)
     score[~valid] = np.nan
     return score.astype(np.float32)
 
 
-def _score_morph(dtm: np.ndarray) -> np.ndarray:
+def _score_morph(dtm: np.ndarray, radii: Optional[Sequence[int]] = None) -> np.ndarray:
     """Morfolojik beyaz/siyah top-hat belirginlik skoru hesaplama."""
     dtm_filled, valid = fill_nodata(dtm)
-    radii = DEFAULTS.morphology_radii
+    radii = DEFAULTS.morphology_radii if radii is None else radii
     wth_list = []
     bth_list = []
     for r in radii:
@@ -1220,6 +1233,10 @@ def infer_tiled(
     precomputed_deriv: Optional[PrecomputedDerivatives] = None,
     encoder: Optional[str] = None,
     min_area: Optional[float] = None,
+    percentile_low: Optional[float] = None,
+    percentile_high: Optional[float] = None,
+    rvt_radii: Optional[Sequence[float]] = None,
+    gaussian_lrm_sigma: Optional[float] = None,
 ) -> InferenceOutputs:
     """
     Run tiled inference and save outputs.
@@ -1295,7 +1312,7 @@ def infer_tiled(
 
                     ndsm_s = compute_ndsm(dsm_s, dtm_s)
                     svf_s, pos_s, neg_s, lrm_s, slope_s = compute_derivatives_with_rvt(
-                        dtm_s, pixel_size=pixel_size
+                        dtm_s, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
                     )
                     stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
 
@@ -1316,8 +1333,10 @@ def infer_tiled(
                         lows[ci] = 0.0
                         highs[ci] = 1.0
                     else:
-                        lows[ci] = float(np.percentile(v, 2.0))
-                        highs[ci] = float(np.percentile(v, 98.0))
+                        _p_low = percentile_low if percentile_low is not None else DEFAULTS.percentile_low
+                        _p_high = percentile_high if percentile_high is not None else DEFAULTS.percentile_high
+                        lows[ci] = float(np.percentile(v, _p_low))
+                        highs[ci] = float(np.percentile(v, _p_high))
                 lows_list.append(lows)
                 highs_list.append(highs)
 
@@ -1411,7 +1430,7 @@ def infer_tiled(
 
                 ndsm_tile = compute_ndsm(dsm, dtm)
                 svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
-                    dtm, pixel_size=pixel_size
+                    dtm, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
                 )
 
             stacked = stack_channels(
@@ -1426,7 +1445,11 @@ def infer_tiled(
             if global_norm and fixed_lows is not None and fixed_highs is not None:
                 normed = robust_norm_fixed(stacked, fixed_lows, fixed_highs)
             else:
-                normed = robust_norm(stacked)
+                normed = robust_norm(
+                    stacked,
+                    p_low=percentile_low if percentile_low is not None else DEFAULTS.percentile_low,
+                    p_high=percentile_high if percentile_high is not None else DEFAULTS.percentile_high,
+                )
 
             tensor = torch.from_numpy(normed).unsqueeze(0).to(device)
             with torch.no_grad(), autocast_ctx:
@@ -1511,6 +1534,12 @@ def infer_classic_tiled(
     save_intermediate: bool = False,
     min_area: Optional[float] = None,
     precomputed_deriv: Optional[PrecomputedDerivatives] = None,
+    sigma_scales: Optional[Sequence[float]] = None,
+    morphology_radii: Optional[Sequence[int]] = None,
+    rvt_radii: Optional[Sequence[float]] = None,
+    gaussian_gradient_sigma: Optional[float] = None,
+    local_variance_window: Optional[int] = None,
+    gaussian_lrm_sigma: Optional[float] = None,
 ) -> ClassicOutputs:
     """Run classical raster scoring methods in a tiled fashion."""
     if len(band_idx) < 5 or band_idx[4] <= 0:
@@ -1588,13 +1617,25 @@ def infer_classic_tiled(
                             dtm_tile, pixel_size=pixel_size,
                             pre_svf=svf_tile, pre_neg_open=neg_tile, pre_lrm=lrm_tile,
                             pre_slope=slope_tile,
+                            sigmas=sigma_scales,
+                            gaussian_gradient_sigma=gaussian_gradient_sigma,
+                            local_variance_window=local_variance_window,
+                            rvt_radii=rvt_radii,
+                            gaussian_lrm_sigma=gaussian_lrm_sigma,
                         )
                     else:
-                        score_tile = _score_rvtlog(dtm_tile, pixel_size=pixel_size)
+                        score_tile = _score_rvtlog(
+                            dtm_tile, pixel_size=pixel_size,
+                            sigmas=sigma_scales,
+                            gaussian_gradient_sigma=gaussian_gradient_sigma,
+                            local_variance_window=local_variance_window,
+                            rvt_radii=rvt_radii,
+                            gaussian_lrm_sigma=gaussian_lrm_sigma,
+                        )
                 elif mode == "hessian":
-                    score_tile = _score_hessian(dtm_tile)
+                    score_tile = _score_hessian(dtm_tile, sigmas=sigma_scales)
                 elif mode == "morph":
-                    score_tile = _score_morph(dtm_tile)
+                    score_tile = _score_morph(dtm_tile, radii=morphology_radii)
                 else:  # pragma: no cover - guarded above
                     continue
 
@@ -2013,8 +2054,12 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str]) -> Path:
         out_path = Path(prefix)
         if out_path.is_dir():
             out_path = out_path / input_path.stem
-        return out_path
-    return input_path.with_suffix("")
+    else:
+        out_path = input_path.with_suffix("")
+
+    # Route all raster/vector outputs under a dedicated subfolder: 'ciktilar'
+    # Downstream code writes to base_prefix.parent; make that parent the 'ciktilar' folder
+    return out_path.parent / "ciktilar" / out_path.name
 
 
 def build_filename_with_params(
@@ -2181,6 +2226,8 @@ def precompute_derivatives(
     use_cache: bool = False,
     cache_path: Optional[Path] = None,
     recalculate: bool = False,
+    rvt_radii: Optional[Sequence[float]] = None,
+    gaussian_lrm_sigma: Optional[float] = None,
 ) -> Optional[PrecomputedDerivatives]:
     """
     Tüm raster için RVT türevlerini önceden hesapla.
@@ -2266,7 +2313,7 @@ def precompute_derivatives(
         # RVT türevlerini hesapla
         LOGGER.info("RVT türevleri hesaplanıyor (SVF, openness, LRM, slope)...")
         svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
-            dtm, pixel_size=pixel_size
+            dtm, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
         )
         
         derivatives = PrecomputedDerivatives(
@@ -2616,6 +2663,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             use_cache=True,
             cache_path=cache_path,
             recalculate=config.recalculate_cache,
+            rvt_radii=config.rvt_radii,
+            gaussian_lrm_sigma=config.gaussian_lrm_sigma,
         )
         if precomputed_deriv:
             LOGGER.info("✓ RVT türevleri hazır - Her encoder çok daha hızlı çalışacak!")
@@ -2686,6 +2735,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 # encoder adı base prefix'te zaten var; tekrar eklemeyelim
                 encoder=None,
                 min_area=config.min_area,
+                percentile_low=config.percentile_low,
+                percentile_high=config.percentile_high,
+                rvt_radii=config.rvt_radii,
+                gaussian_lrm_sigma=config.gaussian_lrm_sigma,
             )
             LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
             LOGGER.info("[%s] ✓ İkili maske: %s", suffix, outputs.mask_path)
@@ -2758,6 +2811,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             precomputed_deriv=precomputed_deriv,
             encoder=config.encoder,
             min_area=config.min_area,
+            percentile_low=config.percentile_low,
+            percentile_high=config.percentile_high,
+            rvt_radii=config.rvt_radii,
+            gaussian_lrm_sigma=config.gaussian_lrm_sigma,
         )
         # Record encoder for fusion filenames (single-encoder path)
         fusion_encoder_label = config.encoder
@@ -2789,6 +2846,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             save_intermediate=config.classic_save_intermediate,
             min_area=config.min_area,
             precomputed_deriv=precomputed_deriv,
+            sigma_scales=config.sigma_scales,
+            morphology_radii=config.morphology_radii,
+            rvt_radii=config.rvt_radii,
+            gaussian_gradient_sigma=config.gaussian_gradient_sigma,
+            local_variance_window=config.local_variance_window,
+            gaussian_lrm_sigma=config.gaussian_lrm_sigma,
         )
         LOGGER.info("✓ Klasik yöntem birleşik çıktı: %s, %s", classic_outputs.prob_path, classic_outputs.mask_path)
         if classic_outputs.per_mode:
@@ -2970,18 +3033,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         fused.mask_path.with_suffix(""),
                     )
                 )
-        if multi_fused_results:
-            for fused in multi_fused_results:
-                vector_jobs.append(
-                    (
-                        "fused_multi",
-                        fused.mask,
-                        fused.prob_map,
-                        fused.transform,
-                        fused.crs,
-                        fused.mask_path.with_suffix(""),
-                    )
-                )
+        # 'fused_multi' tekrarını engelle: zaten her encoder için 'fused_{enc_label}' eklendi
 
         for label, mask_arr, prob_arr, transform, crs_obj, out_base in vector_jobs:
             LOGGER.info(f"  → {label} poligonlaştırılıyor...")
