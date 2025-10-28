@@ -461,6 +461,7 @@ percentile_high: 98.0
 # UYARI: Çok düşük değer gerçek arkeolojik yapıları da maskeler
 # ÖNERİ: 2.5m iyi bir başlangıç, alanınıza göre ayarlayın
 mask_talls: 2.5
+rgb_only: false               # true yaparsan SVF/Openness/LRM/Slope/nDSM kanallari sifirlanir, model efektif olarak sadece RGB kullanir
 
 
 # ============================================================================

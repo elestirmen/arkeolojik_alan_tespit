@@ -309,6 +309,10 @@ class PipelineDefaults:
         default=2.5,
         metadata={"help": "Bu yüksekliği (metre) aşan nDSM piksellerini maskele (yüksek bina/ağaçları eleme); None=kapalı"},
     )
+    rgb_only: bool = field(
+        default=False,
+        metadata={"help": "If True, ignore derivative channels and run effective RGB-only inference by zero-filling SVF/Openness/LRM/Slope/nDSM."},
+    )
     
     # ===== VEKTÖRLEŞTİRME AYARLARI =====
     vectorize: bool = field(
@@ -1162,11 +1166,13 @@ def make_feather_weights(h: int, w: int, tile: int, overlap: int) -> np.ndarray:
 
     def _ramp(n: int) -> np.ndarray:
         win = np.ones(n, dtype=np.float32)
+        # Border tiles can be smaller; clamp ramp length
+        local_ramp = max(1, min(ramp, n // 2 if n > 1 else 1))
         # half-cosine ramps
-        t = np.linspace(0, np.pi, ramp, endpoint=False, dtype=np.float32)
+        t = np.linspace(0, np.pi, local_ramp, endpoint=False, dtype=np.float32)
         up = (1 - np.cos(t)) * 0.5  # 0â†’1
-        win[:ramp] = up
-        win[-ramp:] = up[::-1]
+        win[:local_ramp] = up
+        win[-local_ramp:] = up[::-1]
         return win
 
     wr = _ramp(h)
@@ -1237,6 +1243,7 @@ def infer_tiled(
     percentile_high: Optional[float] = None,
     rvt_radii: Optional[Sequence[float]] = None,
     gaussian_lrm_sigma: Optional[float] = None,
+    rgb_only: bool = False,
 ) -> InferenceOutputs:
     """
     Run tiled inference and save outputs.
@@ -1247,6 +1254,14 @@ def infer_tiled(
     """
     model.eval()
     model.to(device)
+
+    rgb_only_log_emitted = False
+
+    def log_rgb_only_once() -> None:
+        nonlocal rgb_only_log_emitted
+        if rgb_only and not rgb_only_log_emitted:
+            LOGGER.info("RGB-only mode active: derivative channels are zero-filled; effective input is RGB.")
+            rgb_only_log_emitted = True
 
     if mask_talls is not None and band_idx[3] <= 0:
         LOGGER.warning("Tall-object masking requested but DSM band missing; disabling.")
@@ -1296,6 +1311,16 @@ def infer_tiled(
                     lrm_s = precomputed_deriv.lrm[row_start:row_end, col_start:col_end].copy()
                     slope_s = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
                     ndsm_s = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
+                    if rgb_only:
+                        log_rgb_only_once()
+                        Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
+                        Z = np.zeros((Hs, Ws), dtype=np.float32)
+                        svf_s = Z
+                        pos_s = Z
+                        neg_s = Z
+                        lrm_s = Z
+                        slope_s = Z
+                        ndsm_s = Z
                     stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
                 else:
                     def read_band(idx: int) -> Optional[np.ndarray]:
@@ -1310,10 +1335,21 @@ def infer_tiled(
                     if dtm_s is None:
                         break
 
-                    ndsm_s = compute_ndsm(dsm_s, dtm_s)
-                    svf_s, pos_s, neg_s, lrm_s, slope_s = compute_derivatives_with_rvt(
-                        dtm_s, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
-                    )
+                    if rgb_only:
+                        log_rgb_only_once()
+                        Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
+                        Z = np.zeros((Hs, Ws), dtype=np.float32)
+                        svf_s = Z
+                        pos_s = Z
+                        neg_s = Z
+                        lrm_s = Z
+                        slope_s = Z
+                        ndsm_s = Z
+                    else:
+                        ndsm_s = compute_ndsm(dsm_s, dtm_s)
+                        svf_s, pos_s, neg_s, lrm_s, slope_s = compute_derivatives_with_rvt(
+                            dtm_s, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
+                        )
                     stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
 
                 Hs, Ws = stack_s.shape[1], stack_s.shape[2]
@@ -1389,7 +1425,18 @@ def infer_tiled(
                     lrm = np.pad(lrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     slope = np.pad(slope, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     ndsm_tile = np.pad(ndsm_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                
+
+                if rgb_only:
+                    log_rgb_only_once()
+                    Ht, Wt = rgb.shape[1], rgb.shape[2]
+                    Z = np.zeros((Ht, Wt), dtype=np.float32)
+                    svf = Z
+                    pos_open = Z
+                    neg_open = Z
+                    lrm = Z
+                    slope = Z
+                    ndsm_tile = Z
+
                 valid_mask = np.isfinite(dtm)
             else:
                 # Normal mod - Her tile için RVT hesapla
@@ -1428,10 +1475,21 @@ def infer_tiled(
 
                 valid_mask = np.isfinite(dtm)
 
-                ndsm_tile = compute_ndsm(dsm, dtm)
-                svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
-                    dtm, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
-                )
+                if rgb_only:
+                    log_rgb_only_once()
+                    Ht, Wt = rgb.shape[1], rgb.shape[2]
+                    Z = np.zeros((Ht, Wt), dtype=np.float32)
+                    svf = Z
+                    pos_open = Z
+                    neg_open = Z
+                    lrm = Z
+                    slope = Z
+                    ndsm_tile = Z
+                else:
+                    ndsm_tile = compute_ndsm(dsm, dtm)
+                    svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+                        dtm, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
+                    )
 
             stacked = stack_channels(
                 rgb=rgb,
@@ -2484,6 +2542,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("mask_talls"),
     )
     parser.add_argument(
+        "--rgb-only",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("rgb_only"),
+        dest="rgb_only",
+        help=cli_help("rgb_only", "Zero out SVF/Openness/LRM/Slope/nDSM so the model effectively runs on RGB only."),
+    )
+    parser.add_argument(
         "--min-area",
         type=float,
         default=default_for("min_area"),
@@ -2600,6 +2665,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     configure_logging(config.verbose)
     install_gdal_warning_filter()
     set_random_seeds(config.seed)
+
+    if config.rgb_only:
+        LOGGER.info("RGB-only mode active: derivative channels are zero-filled; effective input is RGB.")
 
     input_path = Path(config.input)
     if not input_path.exists():
@@ -2739,6 +2807,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 percentile_high=config.percentile_high,
                 rvt_radii=config.rvt_radii,
                 gaussian_lrm_sigma=config.gaussian_lrm_sigma,
+                rgb_only=config.rgb_only,
             )
             LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
             LOGGER.info("[%s] ✓ İkili maske: %s", suffix, outputs.mask_path)
@@ -2815,6 +2884,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             percentile_high=config.percentile_high,
             rvt_radii=config.rvt_radii,
             gaussian_lrm_sigma=config.gaussian_lrm_sigma,
+            rgb_only=config.rgb_only,
         )
         # Record encoder for fusion filenames (single-encoder path)
         fusion_encoder_label = config.encoder
