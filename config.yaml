@@ -1,0 +1,716 @@
+# ============================================================================
+# ARKEOLOJIK ALAN TESPIT - YAPILANDIRMA DOSYASI (config.yaml)
+# ============================================================================
+# Bu dosya, arkeolojik alan tespit sisteminin tüm davranışlarını kontrol eder.
+# Derin öğrenme, klasik görüntü işleme ve bunların birleştirilmesi gibi farklı
+# yöntemleri kullanarak LiDAR verilerinden potansiyel arkeolojik yapıları 
+# tespit edebilirsiniz.
+#
+# KULLANIM:
+#   1. Bu dosyadaki parametreleri ihtiyacınıza göre düzenleyin
+#   2. Komut satırından çalıştırın: python archaeo_detect.py
+#   3. Komut satırı parametreleri ile istediğiniz ayarı geçersiz kılabilirsiniz:
+#      Örnek: python archaeo_detect.py --th 0.7 --tile 512
+#
+# NOT: Tüm dosya yolları proje kök dizinine göre görecelidir.
+# Proje dizini: C:\d_surucusu\arkeolojik_alan_tespit
+# ============================================================================
+
+
+# ============================================================================
+# BÖLÜM 1: GİRDİ / ÇIKTI AYARLARI
+# ============================================================================
+# Bu bölüm, hangi dosyaların işleneceğini ve sonuçların nereye kaydedileceğini
+# belirler.
+
+# input: İşlenecek ana GeoTIFF dosyasının yolu
+# - Göreli yol kullanmanız önerilir (proje dizinine göre)
+# - Dosya çok bantlı bir GeoTIFF olmalıdır
+# - Önerilen bantlar: R, G, B, DSM (Yüzey Modeli), DTM (Arazi Modeli)
+# Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
+#input: "kesif_alani.tif"
+input: "karlik_vadi.tif"
+
+# out_prefix: Çıktı dosyalarının isim ön eki
+# - null ise: Girdi dosya adından otomatik üretilir
+#   Örneğin "kesif_alani.tif" için "kesif_alani" kullanılır
+# - Özel bir isim belirtebilirsiniz: "sonuc_2025" gibi
+# - Tüm çıktı dosyaları bu ön ek ile başlayacaktır
+# Örnek: null, "sonuc", "ciktilar/analiz1"
+out_prefix: null
+
+# bands: Kullanılacak bantların virgülle ayrılmış listesi (1-tabanlı indeksler)
+# - Her bant numarası GeoTIFF dosyasındaki bant sırasına karşılık gelir
+# - Tipik düzen: "1,2,3,4,5" → R, G, B, DSM, DTM
+# - DSM (Sayısal Yüzey Modeli) yoksa sıfır (0) kullanın
+# - DTM (Sayısal Arazi Modeli) yoksa sıfır (0) kullanın
+# - En az RGB bantları (1,2,3) gereklidir
+# UYARI: Bant sayısı encoder ile uyumlu olmalıdır!
+# Örnekler:
+#   - "1,2,3,4,5"    → RGB + DSM + DTM (önerilen)
+#   - "1,2,3,0,5"    → RGB + DSM yok + DTM
+#   - "1,2,3,0,0"    → Sadece RGB (yükseklik verisi yok)
+bands: "1,2,3,4,5"
+
+
+# ============================================================================
+# BÖLÜM 2: YÖNTEM SEÇİMİ
+# ============================================================================
+# Bu sistem üç farklı tespit yaklaşımı sunar. Birini, ikisini veya üçünü
+# birden etkinleştirebilirsiniz. Her yöntem farklı güçlü yönlere sahiptir.
+
+# enable_deep_learning: Derin öğrenme tabanlı tespit (U-Net ve SMP kütüphanesi)
+# - true: Segmentation Models PyTorch ile U-Net/DeepLab vb. kullanır
+# - false: Derin öğrenme atlanır, daha hızlı çalışır
+# ÖZELLİKLER:
+#   + Eğitilmiş model varsa çok yüksek doğruluk
+#   + Karmaşık paternleri öğrenebilir
+#   + Önceden eğitilmiş ImageNet ağırlıkları ile zero-shot çalışabilir
+#   - GPU olmazsa yavaş olabilir
+#   - İyi bir model gerektirir
+# ÖNERİ: Eğitilmiş bir modeliniz varsa true, yoksa false yapın
+enable_deep_learning: true
+
+# enable_classic: Klasik görüntü işleme yöntemleri (RVT, Hessian, Morfoloji)
+# - true: Relief Visualization Toolbox (RVT) ve diğer klasik algoritmalar
+# - false: Klasik yöntemler atlanır
+# ÖZELLİKLER:
+#   + Model eğitimi gerektirmez
+#   + Yükseklik verisi (DSM/DTM) ile çok etkili
+#   + Hızlı çalışır
+#   + Açıklanabilir sonuçlar verir
+#   - Karmaşık paternlerde derin öğrenmeden daha zayıf olabilir
+# ÖNERİ: Yükseklik veriniz varsa (DSM/DTM) mutlaka true yapın
+enable_classic: true
+
+# enable_fusion: Derin öğrenme ve klasik yöntemlerin birleştirilmesi
+# - true: Her iki yöntemin olasılık haritaları birleştirilir (alpha ile)
+# - false: Yöntemler ayrı ayrı sonuç üretir
+# ÖZELLİKLER:
+#   + İki yöntemin güçlü yönlerini birleştirir
+#   + Genellikle en iyi sonuçları verir
+#   + Yanlış pozitifleri azaltır
+#   - Her iki yöntem de etkin olmalıdır (enable_deep_learning ve enable_classic)
+# UYARI: Fusion için hem DL hem de Classic true olmalıdır!
+# ÖNERİ: Mümkünse true kullanın, en dengeli sonuçları verir
+enable_fusion: true
+
+
+# ============================================================================
+# BÖLÜM 3: DERİN ÖĞRENME MODEL AYARLARI
+# ============================================================================
+# Derin öğrenme yöntemi etkinse (enable_deep_learning: true), bu parametreler
+# hangi model mimarisinin ve encoder'ın kullanılacağını belirler.
+
+# arch: Segmentasyon model mimarisi
+# - Segmentation Models PyTorch (SMP) kütüphanesinden desteklenen mimari
+# SEÇENEKLER:
+#   - "Unet"           → Klasik U-Net (hızlı, etkili, önerilen)
+#   - "UnetPlusPlus"   → Geliştirilmiş U-Net++
+#   - "DeepLabV3Plus"  → DeepLabV3+ (çok ölçekli özellikler)
+#   - "FPN"            → Feature Pyramid Network
+#   - "PSPNet"         → Pyramid Scene Parsing Network
+#   - "PAN"            → Pyramid Attention Network
+#   - "MAnet"          → Multi-scale Attention Net
+#   - "Linknet"        → LinkNet (hafif ve hızlı)
+# ÖNERİ: Başlangıç için "Unet" kullanın, hız/doğruluk dengesi iyidir
+arch: "Unet"
+
+# encoder: TEK ENCODER modunda kullanılacak encoder ağı
+# - Önceden eğitilmiş (ImageNet) bir CNN omurgası
+# - Bu parametre yalnızca encoders: "single" olduğunda kullanılır
+# POPÜLER ENCODER'LAR:
+#   - "resnet34"          → Dengeli hız/doğruluk (önerilen başlangıç)
+#   - "resnet50"          → Daha derin, daha doğru ama yavaş
+#   - "efficientnet-b3"   → Çok verimli, modern
+#   - "mobilenet_v2"      → Hafif, hızlı (düşük GPU için)
+#   - "vgg16"             → Klasik, basit
+#   - "densenet121"       → Yoğun bağlantılar
+# ÖNERİ: "resnet34" ile başlayın, sonra "efficientnet-b3" deneyin
+encoder: "resnet34"
+
+# encoders: ÇOKLU ENCODER modu
+# - "all"  : Tüm desteklenen encoder'ları kullan (ensemble öğrenme)
+# - "single" : Sadece yukarıdaki 'encoder' parametresini kullan
+# - CSV liste: Virgülle ayrılmış encoder listesi, örn: "resnet34,resnet50,efficientnet-b3"
+# ÇOKLU ENCODER AVANTAJLARI:
+#   + Ensemble (topluluk) öğrenme ile daha güvenilir sonuçlar
+#   + Farklı encoder'lar farklı özellikleri yakalar
+#   + Çeşitlilik sayesinde daha robust tespit
+#   - Daha uzun çalışma süresi
+#   - Her encoder için ayrı model ağırlığı gerekebilir
+# ÖNERİ: Üretim için "all" veya 2-3 encoder kombinasyonu, test için "single"
+encoders: "all"
+
+# weights: TEK ENCODER için model ağırlık dosyası (.pth)
+# - Eğitilmiş model ağırlıklarınızın dosya yolu
+# - null ise: ImageNet ağırlıkları kullanılır (zero-shot)
+# - Örnek: "models/unet_resnet34_5ep.pth"
+# NOT: Bu parametre yalnızca tek encoder modunda (encoders: "single") kullanılır
+weights: null
+
+# weights_template: ÇOKLU ENCODER için model ağırlık şablonu
+# - {encoder} yer tutucusu her encoder adı ile değiştirilir
+# - null ise: Tüm encoder'lar için ImageNet ağırlıkları kullanılır
+# ÖRNEK KULLANIM:
+#   weights_template: "models/unet_{encoder}_9ch.pth"
+#   → resnet34 için: "models/unet_resnet34_9ch.pth"
+#   → resnet50 için: "models/unet_resnet50_9ch.pth"
+# NOT: Dosya bulunamazsa o encoder için ImageNet ağırlıkları kullanılır
+weights_template: null
+
+# zero_shot_imagenet: ImageNet ağırlıklarını çok kanala genişletme
+# - true: Özel ağırlık yoksa, ImageNet (3 kanal RGB) encoder'ı kullan
+#         ve ağırlıkları çok kanala (örn. 9 kanal) "inflate" ederek genişlet
+# - false: Özel ağırlık yoksa rastgele başlatma kullan
+# NASIL ÇALIŞIR:
+#   ImageNet encoder'ları 3 kanal (RGB) için eğitilmiştir.
+#   Sistem bu ağırlıkları tekrarlayarak veya ortalayarak 9 kanala genişletir.
+# AVANTAJLAR:
+#   + Eğitim verisi olmadan iyi başlangıç noktası
+#   + Transfer öğrenme etkisi
+#   - Yükseklik kanalları (DSM/DTM) için öğrenme gerektirilebilir
+# ÖNERİ: Özel modeliniz yoksa true yapın, genellikle daha iyi sonuç verir
+zero_shot_imagenet: true
+
+# th: Derin öğrenme olasılık eşiği
+# - Olasılık haritasını (0-1 arası) ikili maskeye (0 veya 1) çevirmek için
+# - Değer aralığı: 0.0 - 1.0
+# - Yüksek değer: Daha az ama daha kesin tespit (az yanlış pozitif)
+# - Düşük değer: Daha çok ama daha belirsiz tespit (fazla yanlış pozitif)
+# ÖNERILEN DEĞERLER:
+#   - 0.5  : Dengeli (varsayılan başlangıç)
+#   - 0.6  : Biraz daha seçici (daha az yanlış pozitif)
+#   - 0.7  : Çok seçici (sadece çok güvenli tespitler)
+#   - 0.4  : Daha liberal (daha fazla aday bölge)
+# ÖNERİ: 0.5-0.6 arasında başlayın, sonuçlara göre ayarlayın
+th: 0.6
+
+
+# ============================================================================
+# BÖLÜM 4: KLASİK GÖRÜNTÜ İŞLEME YÖNTEM AYARLARI
+# ============================================================================
+# Klasik yöntem etkinse (enable_classic: true), bu parametreler RVT, Hessian
+# ve morfolojik analizlerin nasıl yapılacağını belirler.
+
+# classic_modes: Kullanılacak klasik algoritmalar
+# - "rvtlog"   : Sadece RVT (Relief Visualization Toolbox) yöntemleri
+#                SVF (Sky-View Factor), Openness vb. kullanır
+# - "hessian"  : Sadece Hessian matris analizi (ridge/valley tespiti)
+# - "morph"    : Sadece morfolojik operatörler (açma/kapatma/gradyan)
+# - "combo"    : Tüm yöntemleri birleştirir (ÖNERİLEN)
+# - CSV liste  : Virgülle ayrılmış, örn: "rvtlog,hessian"
+# HER YÖNTEMİN GÜÇLÜ YÖNLERİ:
+#   - RVT: Ufak kabartılar, tümülüsler, höyükler için mükemmel
+#   - Hessian: Çizgisel yapılar, duvarlar, hendekler için ideal
+#   - Morph: Yerel dokusal özellikler, düzensiz şekiller için faydalı
+# ÖNERİ: "combo" kullanın, tüm yöntemlerin güçlü yönlerini birleştirir
+classic_modes: "combo"
+
+# classic_save_intermediate: Her modu ayrı dosya olarak kaydet
+# - true: Her algoritma için ayrı olasılık haritası üretir
+#   Örnek çıktılar: kesif_alani_classic_rvtlog_prob.tif
+#                   kesif_alani_classic_hessian_prob.tif
+#                   kesif_alani_classic_morph_prob.tif
+# - false: Sadece birleştirilmiş (combo) sonuç kaydedilir
+# KULLANIM AMACI:
+#   + Her yöntemin ayrı katkısını görmek için yararlı
+#   + Hangi yöntemin hangi yapılarda daha iyi çalıştığını analiz edebilirsiniz
+#   - Daha fazla disk alanı kullanır
+# ÖNERİ: İlk analizlerde true yapın, sonra false yaparak disk tasarrufu edin
+classic_save_intermediate: true
+
+# classic_th: Klasik yöntem olasılık eşiği
+# - Klasik olasılık haritasını ikili maskeye çevirmek için
+# - null: Otsu otomatik eşikleme algoritması kullanılır (ÖNERİLEN)
+# - 0.0-1.0 arası değer: Manuel eşik belirtebilirsiniz
+# OTSU HAKKINDA:
+#   Otsu algoritması histogram analizi yaparak optimal eşiği otomatik bulur.
+#   Genellikle manuel eşikten daha iyi sonuç verir.
+# MANUEL EŞIK NE ZAMAN:
+#   - Otsu çok fazla veya çok az tespit yapıyorsa
+#   - Belirli bir hassasiyet seviyesi istiyorsanız
+# ÖNERİ: Önce null (Otsu) deneyin, gerekirse manuel değer verin
+classic_th: null
+
+# ============================================================================
+# GELİŞMİŞ KLASİK PARAMETRE AYARLARI
+# ============================================================================
+# Bu parametreler klasik algoritmaların hassasiyetini ince ayar yapar.
+# Varsayılan değerler çoğu senaryo için iyidir, ama özel durumlar için
+# ayarlama yapabilirsiniz.
+
+# sigma_scales: Çok ölçekli Gaussian filtre sigma değerleri (piksel birimi)
+# - Farklı boyutlardaki yapıları tespit etmek için kullanılır
+# - Küçük sigma: Küçük, detaylı yapılar (örn: küçük çukurlar)
+# - Büyük sigma: Büyük, geniş yapılar (örn: büyük höyükler)
+# AYARLAMA İPUÇLARI:
+#   - Küçük yapılar arıyorsanız: [0.5, 1.0, 2.0, 4.0]
+#   - Büyük yapılar arıyorsanız: [2.0, 4.0, 8.0, 16.0]
+#   - Hem küçük hem büyük: [1.0, 2.0, 4.0, 8.0] (varsayılan)
+# NOT: Daha fazla sigma değeri = daha yavaş işlem ama daha hassas tespit
+sigma_scales: [1.0, 2.0, 4.0, 8.0]
+
+# morphology_radii: Morfolojik operatörler için yapısal eleman yarıçapları (piksel)
+# - Açma (opening) ve kapatma (closing) operasyonları için disk boyutları
+# - Küçük yarıçap: Küçük gürültüleri temizler, küçük özellikleri korur
+# - Büyük yarıçap: Büyük gürültüleri temizler, küçük özellikleri kaybedebilir
+# KULLANIM ALANLARI:
+#   - 3-5 piksel: Ufak gürültü temizleme
+#   - 9-15 piksel: Yapıların kontürlerini düzeltme
+#   - 20+ piksel: Çok geniş bölgeleri yumuşatma
+# ÖNERİ: Çeşitlilik sağlamak için farklı boyutlar kullanın
+morphology_radii: [3, 5, 9, 15]
+
+# rvt_radii: RVT (Relief Visualization) algoritmaları için arama yarıçapları (METRE)
+# - Sky-View Factor (SVF) ve Openness hesaplamaları için
+# - Coğrafi koordinatlarda metre cinsinden uzaklıktır
+# NASIL ÇALIŞIR:
+#   Her yarıçap için, o yarıçaptaki komşu piksellerin yükseklik ilişkisi analiz edilir
+# AYARLAMA İPUÇLARI:
+#   - Küçük yarıçap (5-10m): Yerel detaylar, duvar kalınlıkları
+#   - Orta yarıçap (20-30m): Tümülüs tepeleri, yapı kalıntıları
+#   - Büyük yarıçap (50-100m): Geniş höyükler, büyük yapılar
+# NOT: Çok büyük yarıçap çok yavaş işlem demektir
+# ÖNERİ: Çalışma alanınızdaki yapı boyutlarına göre ayarlayın
+rvt_radii: [5.0, 10.0, 20.0, 30.0, 50.0]
+
+# local_variance_window: Yerel varyans hesaplama pencere boyutu (piksel)
+# - Yerel doku değişkenliğini ölçmek için kullanılır
+# - Küçük pencere: Çok lokal, ufak detayları yakalar
+# - Büyük pencere: Daha geniş, genel paternleri yakalar
+# KULLANIM:
+#   Düz arazideki yapılar yüksek varyansa sahiptir, bu onları tespit eder
+# AYARLAMA:
+#   - 5-7 piksel: Küçük yapılar ve detaylar için
+#   - 11-15 piksel: Orta boy yapılar için
+# ÖNERİ: 7-11 arası makul bir değer
+local_variance_window: 7
+
+# gaussian_gradient_sigma: Gradyan büyüklüğü hesaplamak için Gaussian yumuşatma
+# - Gradyan hesabından önce uygulanan Gaussian filtrenin sigma değeri
+# - Küçük sigma: Hassas ama gürültülü gradyanlar
+# - Büyük sigma: Yumuşak ama daha az detaylı gradyanlar
+# KULLANIM:
+#   Yükseklik haritasındaki ani değişimleri (kenarları) tespit eder
+# ÖNERİ: 1.0-2.0 arası, varsayılan 1.5 genellikle iyidir
+gaussian_gradient_sigma: 1.5
+
+# gaussian_lrm_sigma: LRM (Local Relief Model) fallback için Gaussian sigma
+# - DTM eksikse kullanılan yedek yöntem için yumuşatma miktarı
+# - LRM: DSM'den genel topoğrafyayı çıkararak yerel kabartıları gösterir
+# AYARLAMA:
+#   - Küçük sigma (3-5): Çok lokal kabartılar
+#   - Orta sigma (6-10): Dengeli, bölgesel trend çıkarma
+#   - Büyük sigma (15+): Çok geniş ölçekli trend çıkarma
+# NOT: DTM varsa bu parametre kullanılmaz
+# ÖNERİ: 6.0 çoğu durum için yeterlidir
+gaussian_lrm_sigma: 6.0
+
+
+# ============================================================================
+# BÖLÜM 5: FUSION (BİRLEŞTİRME) AYARLARI
+# ============================================================================
+# Fusion etkinse (enable_fusion: true), derin öğrenme ve klasik yöntem
+# olasılıklarını birleştirerek hibrit bir sonuç üretir.
+
+# alpha: Birleştirme ağırlık katsayısı
+# - Değer aralığı: 0.0 - 1.0
+# - Formül: fused = alpha * DL + (1 - alpha) * Classic
+# AYARLAMA REHBERİ:
+#   - alpha = 1.0 : Sadece derin öğrenme (klasik yöntem göz ardı edilir)
+#   - alpha = 0.7 : Derin öğrenmeye ağırlık verilir (%70 DL, %30 klasik)
+#   - alpha = 0.5 : Eşit ağırlık (%50 DL, %50 klasik) - DENGELI
+#   - alpha = 0.3 : Klasik yönteme ağırlık verilir (%30 DL, %70 klasik)
+#   - alpha = 0.0 : Sadece klasik yöntem (DL göz ardı edilir)
+# KULLANIM SENARYOLARI:
+#   - Eğitilmiş iyi bir modeliniz varsa: 0.7-0.8
+#   - Model yok ama yükseklik verisi iyiyse: 0.3-0.4
+#   - Her ikisi de eşit kalitede: 0.5
+# ÖNERİ: 0.5 ile başlayın, sonuçlara göre ayarlayın
+alpha: 0.5
+
+# fuse_encoders: Çoklu encoder modunda hangi encoder'lar için fusion üretilecek
+# - "all"    : Tüm encoder'lar için ayrı fusion sonuçları üretir
+# - "mean"   : Tüm encoder'ların ortalaması ile tek bir fusion sonucu
+# - CSV liste: Sadece belirtilen encoder'lar için fusion
+#              Örnek: "resnet34,efficientnet-b3"
+# ÇIKTI DOSYALARI:
+#   "all" kullanırsanız her encoder için:
+#     - kesif_alani_fused_resnet34_prob.tif
+#     - kesif_alani_fused_resnet50_prob.tif
+#     - kesif_alani_fused_efficientnet-b3_prob.tif
+# NOT: Bu parametre yalnızca çoklu encoder modunda (encoders: "all") geçerlidir
+# ÖNERİ: "all" kullanın, sonra en iyi sonuç veren encoder'ı seçin
+fuse_encoders: "all"
+
+
+# ============================================================================
+# BÖLÜM 6: KARO (TILE) İŞLEME AYARLARI
+# ============================================================================
+# Büyük görüntüler küçük karolara (tiles) bölünerek işlenir. Bu bellek
+# verimliliği sağlar ve GPU kullanımını optimize eder.
+
+# tile: Karo boyutu (piksel x piksel)
+# - Her karo bu boyutta kare olarak işlenir
+# - Küçük karo: Daha az bellek kullanır ama daha yavaş (çok karo)
+# - Büyük karo: Daha hızlı ama daha fazla bellek gerektirir
+# ÖNERILEN DEĞERLER:
+#   - GPU'nuz yoksa veya GPU belleği az (<4GB): 512
+#   - Orta GPU (6-8GB): 1024 (varsayılan)
+#   - Güçlü GPU (12GB+): 2048 veya 4096
+# DİKKAT: Çok büyük karo GPU belleğini aşabilir (Out of Memory hatası)
+# ÖNERİ: 1024 iyi bir başlangıç noktasıdır
+tile: 1024
+
+# overlap: Karolar arası bindirme miktarı (piksel)
+# - Komşu karolar arasında örtüşen bölge boyutu
+# - Amaç: Karo sınırlarında görüntü bozulmasını (artifacts) önlemek
+# AÇIKLAMA:
+#   Karoların kenarlarında model tahmini daha az güvenilir olabilir.
+#   Bindirme ile bu kenar bölgeleri birden fazla kez işlenir ve
+#   sonuçlar birleştirilir (blending).
+# AYARLAMA:
+#   - Küçük overlap (64-128): Hızlı ama kenar artefaktları olabilir
+#   - Orta overlap (256): Dengeli, önerilen (tile boyutunun ~%25'i)
+#   - Büyük overlap (512+): En iyi kalite ama çok yavaş
+# ÖNERİ: Tile boyutunun 1/4'ü kadar overlap kullanın (örn: tile=1024, overlap=256)
+overlap: 256
+
+# feather: Karo kenarlarında kosinüs yumuşatma (feathering)
+# - true: Karoların kenarlarına doğru tahminleri yumuşak geçiş ile karıştırır
+# - false: Karoları doğrudan birleştirir (keskin geçişler olabilir)
+# NASIL ÇALIŞIR:
+#   Bindirme bölgesinde kosinüs fonksiyonu kullanarak ağırlıklı karıştırma
+#   yapar. Kenarlar yumuşak ve görünmez hale gelir.
+# AVANTAJLAR:
+#   + Karo sınırlarında dikiş izleri (seam) olmaz
+#   + Daha homojen sonuçlar
+#   - Çok hafif bir performans maliyeti (genellikle ihmal edilebilir)
+# ÖNERİ: Neredeyse her zaman true kullanın
+feather: true
+
+
+# ============================================================================
+# BÖLÜM 7: NORMALİZASYON AYARLARI
+# ============================================================================
+# Normalizasyon, farklı bantların değer aralıklarını standartlaştırır.
+# Bu, sinir ağlarının daha iyi öğrenmesini sağlar.
+
+# global_norm: Global (tüm görüntü) normalizasyon
+# - true: Tüm görüntüden örneklenmiş karolara göre normalizasyon parametreleri hesaplanır
+# - false: Her karo kendi içinde normalize edilir (lokal normalizasyon)
+# FARK:
+#   Global: Tüm karolar tutarlı şekilde normalleşir, bölgeler arası karşılaştırılabilir
+#   Lokal: Her karo bağımsız, lokal kontrast artırılır ama bölgeler arası tutarsızlık olabilir
+# AVANTAJLAR (global_norm: true):
+#   + Tüm görüntü üzerinde tutarlı ölçekleme
+#   + Farklı bölgelerde benzer yapılar benzer değerlere sahip olur
+#   - Bazı karolarda kontrast düşük olabilir
+# ÖNERİ: Çoğu durumda true kullanın, tutarlılık önemlidir
+global_norm: true
+
+# norm_sample_tiles: Global normalizasyon için örneklenen karo sayısı
+# - Global norm etkinse, istatistikler (persentiller) bu kadar karodan hesaplanır
+# - Küçük sayı: Hızlı ama istatistikler temsili olmayabilir
+# - Büyük sayı: Daha iyi temsil ama hesaplama maliyeti artar
+# AYARLAMA:
+#   - Küçük görüntü (<50 karo): 16-32
+#   - Orta görüntü (50-200 karo): 32-64 (varsayılan)
+#   - Büyük görüntü (200+ karo): 64-128
+# ÖNERİ: 32 çoğu durumda yeterlidir
+norm_sample_tiles: 32
+
+# percentile_low: Alt persentil (normalizasyon alt sınırı)
+# - Bu persentil değerinin altındaki pikseller kırpılır (clipping)
+# - Amaç: Aşırı düşük değerlerin (outliers) normalizasyonu bozmasını engeller
+# AYARLAMA:
+#   - 1.0-2.0: Daha sıkı kırpma, aşırı değerleri agresif temizler
+#   - 2.0-5.0: Normal, dengelidir
+#   - 5.0+: Çok yumuşak, aşırı değerlere müsamahakâr
+# ÖNERİ: 2.0 iyi bir varsayılandır
+percentile_low: 2.0
+
+# percentile_high: Üst persentil (normalizasyon üst sınırı)
+# - Bu persentil değerinin üstündeki pikseller kırpılır
+# - Amaç: Aşırı yüksek değerlerin normalizasyonu bozmasını engeller
+# AYARLAMA:
+#   - 95.0-98.0: Daha sıkı kırpma
+#   - 98.0-99.5: Normal, dengelidir
+#   - 99.5+: Çok yumuşak
+# ÖNERİ: 98.0 genellikle iyidir
+percentile_high: 98.0
+
+
+# ============================================================================
+# BÖLÜM 8: MASKELEME AYARLARI
+# ============================================================================
+# Bazı alanlar (örn: ağaçlar, binalar) tespitten otomatik olarak hariç tutulabilir.
+
+# mask_talls: Yüksek yapıları maskeleme eşiği (nDSM metre cinsinden)
+# - nDSM = DSM - DTM (normalize edilmiş sayısal yüzey modeli)
+# - nDSM > bu değer olan pikseller maskelenir (göz ardı edilir)
+# - null: Maskeleme kapalı
+# KULLANIM:
+#   Ağaçlar, binalar gibi yüksek objeler arkeolojik yapı değildir.
+#   Bu parametreyi ayarlayarak onları otomatik eliyebilirsiniz.
+# AYARLAMA:
+#   - 1.0-1.5m: Düşük bitki örtüsü, küçük çalılar
+#   - 2.0-2.5m: Orta boy ağaçlar, yüksek çalılar (varsayılan)
+#   - 3.0-5.0m: Sadece çok yüksek ağaçlar ve binalar
+# UYARI: Çok düşük değer gerçek arkeolojik yapıları da maskeler
+# ÖNERİ: 2.5m iyi bir başlangıç, alanınıza göre ayarlayın
+mask_talls: 2.5
+
+
+# ============================================================================
+# BÖLÜM 9: VEKTÖRLEŞTIRME AYARLARI
+# ============================================================================
+# Raster (piksel) sonuçlarını vektör (poligon) formatına dönüştürme.
+# GIS yazılımlarında (QGIS, ArcGIS) kullanım için yararlıdır.
+
+# vectorize: Vektörleştirme etkin mi?
+# - true: Maskeleri poligonlara çevirir ve GeoPackage (.gpkg) dosyası üretir
+# - false: Sadece raster (GeoTIFF) çıktıları üretilir
+# ÇIKTI DOSYASI:
+#   - kesif_alani_mask.gpkg (veya benzeri)
+#   - QGIS, ArcGIS gibi yazılımlarda doğrudan açılabilir
+# AVANTAJLAR:
+#   + Poligonlar üzerinde alan hesaplama, filtreleme yapabilirsiniz
+#   + Vektör haritalarla birleştirme kolay
+#   + Daha küçük dosya boyutu (büyük raster dosyalara göre)
+# ÖNERİ: Sonuçları GIS'te analiz edecekseniz true yapın
+vectorize: true
+
+# min_area: Minimum poligon alanı (metrekare)
+# - Bu alandan küçük poligonlar çıktıdan filtrelenir
+# - Amaç: Çok küçük, anlamsız tespit bölgelerini temizlemek
+# AYARLAMA:
+#   - 10-50 m²: Çok küçük yapılar (duvar parçaları)
+#   - 80-100 m²: Orta boy yapılar (küçük tümülüsler, duvar kalıntıları)
+#   - 200+ m²: Sadece büyük yapılar (höyükler, geniş kalıntılar)
+# KULLANIM SENARYOLARI:
+#   - Gürültüyü azaltmak için: Yüksek değer (100-200 m²)
+#   - Tüm adayları görmek için: Düşük değer (20-50 m²)
+# ÖNERİ: Aradığınız yapı boyutuna göre ayarlayın, 80 m² dengeli bir değer
+min_area: 80.0
+
+# simplify: Poligon basitleştirme toleransı (metre)
+# - Douglas-Peucker algoritması ile poligon köşe sayısını azaltır
+# - null: Basitleştirme kapalı (orijinal detay korunur)
+# - Sayı değer: Bu mesafeden daha az sapma tolerans edilir
+# NASIL ÇALIŞIR:
+#   Poligon köşelerini birleştirerek daha basit, daha az köşeli şekiller üretir.
+#   Küçük girinti-çıkıntılar yumuşatılır.
+# AYARLAMA:
+#   - 0.5-1.0m: Hafif basitleştirme (detay korunur)
+#   - 2.0-5.0m: Orta basitleştirme (daha yumuşak hatlar)
+#   - 10.0m+: Agresif basitleştirme (çok basit şekiller)
+# AVANTAJLAR:
+#   + Daha küçük dosya boyutu
+#   + GIS'te daha hızlı render ve sorgu
+#   + Daha temiz görünüm
+#   - Bazı detaylar kaybolabilir
+# ÖNERİ: İlk çalıştırmada null (kapalı), sonra gerekirse 2.0-3.0m deneyin
+simplify: null
+
+
+# ============================================================================
+# BÖLÜM 10: PERFORMANS AYARLARI
+# ============================================================================
+# Hesaplama hızı ve bellek kullanımını optimize etme.
+
+# half: Yarı hassasiyetli (float16) hesaplama
+# - true: GPU varsa mixed precision (FP16) kullanır
+# - false: Tam hassasiyetli (FP32) hesaplama
+# AVANTAJLAR (half: true):
+#   + 2x daha hızlı hesaplama (GPU'da)
+#   + 2x daha az GPU belleği kullanımı
+#   + Daha büyük karolar veya batch size kullanabilirsiniz
+#   - Çok hafif hassasiyet kaybı (genellikle ihmal edilebilir)
+# UYARI:
+#   - Sadece GPU (CUDA) ile çalışır
+#   - Eski GPU'larda desteklenmeyebilir (Pascal öncesi)
+# ÖNERİ: GPU varsa ve bellek sıkıntısı yaşıyorsanız true yapın
+half: false
+
+# seed: Rastgelelik tohumu (reproducibility için)
+# - Tüm rastgele işlemler bu tohum ile başlatılır
+# - Aynı tohum = aynı sonuçlar (tekrarlanabilirlik)
+# - Farklı tohum = farklı sonuçlar (varyasyon testi için)
+# KULLANIM:
+#   Bilimsel çalışmalarda sonuçların tekrarlanabilir olması önemlidir.
+#   Aynı seed her zaman aynı sonucu verir.
+# ÖNERİ: Varsayılan 42'yi kullanın veya istediğiniz bir sayı verin
+seed: 42
+
+# verbose: Log (günlük) detay seviyesi
+# - 0: WARNING (sadece uyarılar ve hatalar)
+# - 1: INFO (genel ilerleme bilgileri) - ÖNERİLEN
+# - 2: DEBUG (ayrıntılı teknik bilgiler)
+# KULLANIM SENARYOLARI:
+#   - 0: Sessiz mod, sadece önemli mesajlar (otomasyon için)
+#   - 1: Normal kullanım, ilerlemeyi takip etmek için
+#   - 2: Hata ayıklama, sorun giderme için
+# ÖNERİ: Normal kullanımda 1, sorun varsa 2 yapın
+verbose: 1
+
+
+# ============================================================================
+# BÖLÜM 11: ÖNBELLEK (CACHE) YÖNETİMİ
+# ============================================================================
+# RVT türevleri (SVF, openness vb.) hesaplaması zaman alır. Bu hesaplamaları
+# önbelleğe alarak tekrar kullanabilir, işlem süresini büyük ölçüde azaltabilirsiniz.
+
+# cache_derivatives: RVT türevlerini önbelleğe al
+# - true: RVT hesaplamaları .npz dosyası olarak kaydedilir ve tekrar kullanılır
+# - false: Her çalıştırmada RVT sıfırdan hesaplanır
+# NASIL ÇALIŞIR:
+#   İlk çalıştırma: RVT hesaplanır ve diske kaydedilir (~30 saniye)
+#   Sonraki çalıştırmalar: Diskten okunur (~2 saniye)
+# ÖNBELLEK DOSYASI:
+#   - kesif_alani.derivatives.npz (girdi dosyası adı + .derivatives.npz)
+#   - Boyut: Genellikle 10-50 MB
+# AVANTAJLAR:
+#   + 10-20x daha hızlı işlem (önbellek varsa)
+#   + Parametreler değişince sadece model tekrar çalışır, RVT hesaplanmaz
+#   - Disk alanı kullanır
+# ÖNERİ: Neredeyse her zaman true kullanın, büyük zaman kazancı sağlar
+cache_derivatives: true
+
+# cache_dir: Önbellek dosyalarının kaydedileceği dizin
+# - null: Girdi dosyasının bulunduğu dizine kaydet (varsayılan)
+# - Yol belirtin: Özel bir önbellek dizini kullanın
+# ÖRNEK:
+#   - null: kesif_alani.derivatives.npz, kesif_alani.tif'in yanında
+#   - "cache/": cache/kesif_alani.derivatives.npz
+#   - "C:/temp/": C:/temp/kesif_alani.derivatives.npz
+# KULLANIM:
+#   Birden fazla proje için merkezi bir önbellek dizini istiyorsanız kullanın
+# ÖNERİ: Varsayılan null kullanın, daha basit
+cache_dir: null
+
+# recalculate_cache: Mevcut önbelleği yok say ve yeniden hesapla
+# - true: Önbellek dosyası varsa bile RVT'yi sıfırdan hesapla
+# - false: Önbellek varsa onu kullan, yoksa hesapla (normal davranış)
+# NE ZAMAN KULLANILIR:
+#   - Girdi dosyası değiştiyse ama adı aynıysa
+#   - RVT parametreleri (rvt_radii vb.) değiştirdiyseniz
+#   - Önbelleğin bozuk olduğundan şüpheleniyorsanız
+# UYARI: true yaparsanız önbellekleme avantajı kaybolur (her seferinde yavaş)
+# ÖNERİ: Normal kullanımda false, girdi değiştiyse true yapın
+recalculate_cache: false
+
+
+# ============================================================================
+# BÖLÜM 12: ÇIKTI DOSYALARI (BİLGİLENDİRME)
+# ============================================================================
+# Sistem, etkinleştirdiğiniz yöntemlere göre çeşitli çıktı dosyaları üretir.
+# Aşağıda hangi dosyaların ne zaman üretileceği açıklanmıştır.
+
+# ÇEKİRDEK ÇIKTILAR:
+# Bu dosyalar hangi yöntemin etkin olduğuna bağlı olarak üretilir.
+
+# 1) DERİN ÖĞRENME ETKİNSE (enable_deep_learning: true):
+#    TEK ENCODER modu (encoders: "single"):
+#      - <prefix>_prob.tif              → DL olasılık haritası (0-1 arası, sürekli)
+#      - <prefix>_mask.tif              → DL ikili maske (0 veya 1, eşik uygulanmış)
+#      - <prefix>_mask.gpkg (opsiyonel) → Vektör poligonlar (vectorize: true ise)
+#
+#    ÇOKLU ENCODER modu (encoders: "all" veya CSV liste):
+#      Her encoder için ayrı dosyalar:
+#      - <prefix>_<encoder>_prob.tif    → Örn: kesif_alani_resnet34_prob.tif
+#      - <prefix>_<encoder>_mask.tif    → Örn: kesif_alani_resnet50_mask.tif
+#      - <prefix>_<encoder>_mask.gpkg
+#
+# 2) KLASİK YÖNTEM ETKİNSE (enable_classic: true):
+#      - <prefix>_classic_prob.tif      → Klasik yöntem olasılık haritası
+#      - <prefix>_classic_mask.tif      → Klasik yöntem ikili maske
+#      - <prefix>_classic_mask.gpkg
+#
+#    ARA DOSYALAR (classic_save_intermediate: true ise):
+#      - <prefix>_classic_rvtlog_prob.tif    → Sadece RVT yöntemi sonucu
+#      - <prefix>_classic_hessian_prob.tif   → Sadece Hessian yöntemi sonucu
+#      - <prefix>_classic_morph_prob.tif     → Sadece Morfoloji yöntemi sonucu
+#      Her biri için mask ve gpkg versiyonları da üretilebilir
+#
+# 3) FUSION ETKİNSE (enable_fusion: true):
+#    DL ve Classic yöntemlerinin birleşimi
+#
+#    TEK ENCODER + FUSION:
+#      - <prefix>_fused_<encoder>_prob.tif   → Örn: kesif_alani_fused_resnet34_prob.tif
+#      - <prefix>_fused_<encoder>_mask.tif
+#      - <prefix>_fused_<encoder>_mask.gpkg
+#
+#    ÇOKLU ENCODER + FUSION (fuse_encoders: "all"):
+#      Her encoder için ayrı fusion sonuçları:
+#      - <prefix>_fused_resnet34_prob.tif
+#      - <prefix>_fused_resnet50_prob.tif
+#      - <prefix>_fused_efficientnet-b3_prob.tif
+#      ve ilgili mask + gpkg dosyaları
+#
+# ÖNBELLEK DOSYALARI:
+# (cache_derivatives: true ise)
+#      - <prefix>.derivatives.npz       → RVT hesaplamaları önbelleği
+#                                           Örn: kesif_alani.derivatives.npz
+#
+# DOSYA ADLARI:
+# - <prefix>: out_prefix parametresi (null ise girdi dosya adı kullanılır)
+# - <encoder>: resnet34, resnet50, efficientnet-b3 vb.
+# - Tüm GeoTIFF (.tif) dosyaları coğrafi koordinat sistemini korur
+# - GeoPackage (.gpkg) dosyaları vektör formatında poligonlar içerir
+
+# ÖNERİ:
+# İlk çalıştırmada tüm yöntemleri etkinleştirin (DL, Classic, Fusion: true)
+# ve sonuçları karşılaştırın. En iyi sonucu veren yöntemi belirleyip
+# o yönteme odaklanabilirsiniz.
+#
+# ÖRNEK SENARYO:
+# Eğitilmiş model yoksa:
+#   enable_deep_learning: false
+#   enable_classic: true
+#   enable_fusion: false
+#
+# Eğitilmiş model var ama yükseklik verisi de çok önemliyse:
+#   enable_deep_learning: true
+#   enable_classic: true
+#   enable_fusion: true
+#   alpha: 0.6  (DL'ye biraz daha ağırlık)
+#
+# Sadece hızlı bir test için:
+#   enable_deep_learning: true
+#   encoders: "single"
+#   encoder: "resnet34"
+#   enable_classic: false
+#   tile: 512  (daha hızlı)
+
+# ============================================================================
+# SON NOTLAR VE İPUÇLARI
+# ============================================================================
+# 1. İLK KULLANIM:
+#    - Varsayılan ayarlarla başlayın
+#    - Sonuçları görsel olarak inceleyin (QGIS'te)
+#    - Çok fazla veya çok az tespit varsa eşik (th, classic_th) ayarlayın
+#
+# 2. PERFORMANS OPTİMİZASYONU:
+#    - GPU varsa: half: true, tile: 2048
+#    - GPU yoksa: tile: 512, enable_deep_learning: false
+#    - Önbellek kullanın: cache_derivatives: true
+#
+# 3. SONUÇ KALİTESİ:
+#    - Fusion genellikle en iyi sonuçları verir
+#    - Çoklu encoder ensemble yaklaşımı daha güvenilirdir
+#    - min_area ile küçük gürültüleri filtreleyin
+#
+# 4. SORUN GİDERME:
+#    - Hata alırsanız: verbose: 2 yapın, detaylı log görün
+#    - Bellek hatası: tile boyutunu küçültün (512)
+#    - Çok yavaş: cache kullanın, tile büyütün, tek encoder kullanın
+#
+# 5. DAHA FAZLA BİLGİ:
+#    - archaeo_detect.py dosyasındaki dokümantasyonu okuyun
+#    - Komut satırı yardımı: python archaeo_detect.py --help
+#    - GitHub/Proje dökümantasyonuna başvurun
+#
+# İyi tespit çalışmaları!
+# ============================================================================
