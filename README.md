@@ -36,6 +36,7 @@ Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (t
 ### 🧠 Dört Güçlü Yöntem
 - **Derin Öğrenme (Deep Learning)**: U-Net, DeepLabV3+ ve diğer modern segmentasyon mimarileri
 - **YOLO11 (YENİ!)**: Ultralytics YOLO11 ile hızlı nesne tespit ve segmentasyon + etiketli arazi envanteri 🏷️
+  - ⚠️ **Not:** Kuş bakışı görüntüler için fine-tuning gerekir (YOLO11_NADIR_TRAINING.md)
 - **Klasik Görüntü İşleme**: RVT (Relief Visualization Toolbox), Hessian matrisi, Morfolojik operatörler
 - **Hibrit Fusion**: Her yöntemin güçlü yönlerini birleştiren akıllı füzyon
 

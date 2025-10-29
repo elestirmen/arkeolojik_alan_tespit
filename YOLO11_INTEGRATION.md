@@ -55,17 +55,64 @@ python archaeo_detect.py --enable-yolo --yolo-conf 0.3
 python archaeo_detect.py --enable-yolo --no-enable-deep-learning --no-enable-classic
 ```
 
+## ⚠️ ÖNEMLİ: Kuş Bakışı (Nadir) Görüntüler Hakkında
+
+### YOLO11 ve Perspektif Sorunu
+
+**YOLO11'in varsayılan COCO ağırlıkları YATAY perspektiften eğitilmiştir!**
+
+| Özellik | COCO (Varsayılan) | Arkeolojik Alan |
+|---------|-------------------|-----------------|
+| Perspektif | Yatay (yan/önden) | Kuş bakışı (üstten) |
+| Görüntü kaynağı | Sokak kameraları | LiDAR/İHA/Uydu |
+| Nesne görünümü | Yan profil | Üst görünüş |
+| Performans | ✅ Yüksek | ❌ Düşük |
+
+**Sonuç:** Varsayılan YOLO11 modeli kuş bakışı görüntülerde **kötü performans** gösterir veya **yanlış tespitler** yapar.
+
+### 🛠️ Çözüm
+
+**Seçenek 1: Fine-Tuning (ÖNERİLEN)**
+```bash
+# Kendi kuş bakışı verilerinizle eğitin
+yolo segment train \
+    data=nadir_dataset/data.yaml \
+    model=yolo11s-seg.pt \
+    epochs=100 \
+    imgsz=1280
+```
+
+Detaylı rehber: **YOLO11_NADIR_TRAINING.md**
+
+**Seçenek 2: Hazır Nadir Modeller**
+- DroneVision veri setiyle eğitilmiş modeller
+- Aerial Object Detection modelleri
+- Kendinizin eğittiği modeller
+
+**Seçenek 3: Test Amaçlı Kullanım**
+- Varsayılan modeli genel envanter için kullanabilirsiniz
+- Ama sonuçlar düşük doğrulukta olacaktır
+- Arkeolojik yapı tespiti için **güvenmeyin**!
+
+---
+
 ## 🎨 YOLO11 Model Seçenekleri
 
 ### Segmentasyon Modelleri (Önerilen)
 
 Piksel seviyesinde maske üretir:
 
+**Varsayılan (COCO) - YATAY Perspektif:**
 - **yolo11n-seg.pt** - Nano (3.4M parametre) - Hızlı, hafif
 - **yolo11s-seg.pt** - Small (11M parametre) - Dengeli
 - **yolo11m-seg.pt** - Medium (27M parametre) - Yüksek doğruluk
 - **yolo11l-seg.pt** - Large (46M parametre) - Çok yüksek doğruluk
 - **yolo11x-seg.pt** - Extra Large (71M parametre) - Maksimum doğruluk
+
+**Özel Eğitilmiş - KUŞ BAKIŞI (Nadir):**
+- **models/yolo11_nadir_best.pt** - Kendi eğittiğiniz nadir model
+- **models/yolo11_archaeological.pt** - Arkeolojik özel model
+- **yolo11-aerial.pt** - Hazır aerial detection modeli (varsa)
 
 ### Tespit Modelleri (Detection)
 

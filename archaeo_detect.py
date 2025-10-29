@@ -1698,6 +1698,25 @@ def infer_yolo_tiled(
         LOGGER.info("YOLO ağırlık dosyası belirtilmedi, varsayılan kullanılıyor: %s", yolo_weights)
     
     LOGGER.info("YOLO11 modeli yükleniyor: %s", yolo_weights)
+    
+    # Kuş bakışı (nadir) görüntüler için uyarı
+    if yolo_weights is None or "yolo11" in str(yolo_weights).lower() and "nadir" not in str(yolo_weights).lower() and "aerial" not in str(yolo_weights).lower():
+        LOGGER.warning("")
+        LOGGER.warning("=" * 70)
+        LOGGER.warning("⚠️  YOLO11 KUŞ BAKIŞI (NADIR) GÖRÜNTÜ UYARISI")
+        LOGGER.warning("=" * 70)
+        LOGGER.warning("Varsayılan YOLO11 modeli YATAY perspektiften eğitilmiştir.")
+        LOGGER.warning("Arkeolojik LiDAR/İHA görüntüleri KUŞ BAKIŞI perspektiftedir.")
+        LOGGER.warning("")
+        LOGGER.warning("ÖNERİ:")
+        LOGGER.warning("  1. YOLO11'i kendi kuş bakışı verilerinizle fine-tune edin")
+        LOGGER.warning("  2. Detaylar için: YOLO11_NADIR_TRAINING.md dosyasına bakın")
+        LOGGER.warning("  3. Hazır nadir model: yolo_weights: 'models/yolo11_nadir_best.pt'")
+        LOGGER.warning("")
+        LOGGER.warning("ŞUANKI SONUÇLAR: Genel envanter amaçlı, düşük doğruluk beklenir")
+        LOGGER.warning("=" * 70)
+        LOGGER.warning("")
+    
     model = YOLO(yolo_weights)
     
     with rasterio.open(input_path) as src:

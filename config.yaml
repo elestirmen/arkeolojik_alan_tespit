@@ -369,6 +369,36 @@ fuse_encoders: "all"
 # yolo_weights: YOLO11 model ağırlık dosyası
 # - null        : Varsayılan model (yolo11n-seg.pt) otomatik indirilir
 # - Dosya yolu  : Özel eğitilmiş model dosyanız
+# 
+# ⚠️ ÖNEMLİ: KUŞ BAKIŞI (NADIR) GÖRÜNTÜLER İÇİN
+# ============================================================================
+# YOLO11'in varsayılan COCO ağırlıkları YATAY perspektiften eğitilmiştir
+# (sokak görüntüleri, ev içi, vb.). Arkeolojik alan tespitinde kullanılan
+# LiDAR/İHA görüntüleri ise KUŞ BAKIŞI (nadir/vertical) perspektiftedir.
+#
+# VARSAYILAN MODEL SINIRLAMALARI:
+#   ❌ Nesneler farklı görünür (üstten bakış vs. yandan bakış)
+#   ❌ COCO sınıfları (person, car, vb.) kuş bakışında farklı
+#   ❌ Düşük performans veya yanlış tespitler beklenir
+#
+# ÖNERİLEN ÇÖZÜMLER:
+#   1. ÖZEL MODEL EĞİTİMİ (en iyi seçenek):
+#      - Kendi kuş bakışı verilerinizle YOLO11'i fine-tune edin
+#      - Örnek: python train_yolo_nadir.py --data nadir_dataset.yaml
+#      - Eğitilmiş modeli kullanın: yolo_weights: "models/yolo11_nadir_best.pt"
+#
+#   2. HAZIR NADIR MODELLER (varsa):
+#      - DroneVision, Aerial Object Detection veri setleriyle eğitilmiş
+#      - Örnek: "yolo11-aerial.pt", "yolo11-drone.pt"
+#
+#   3. SINIRSIZ KULLANIM (test için):
+#      - Varsayılan modeli test amaçlı kullanabilirsiniz
+#      - Ama sonuçların genel envanter olarak yorumlanması gerekir
+#      - Arkeolojik yapı tespiti için GÜVENMEYIN!
+#
+# NOT: Kuş bakışı model eğitimi için YOLO11_NADIR_TRAINING.md dosyasına bakın
+# ============================================================================
+#
 # MODEL SEÇENEKLERİ:
 #   SEGMENTASYON (önerilen - piksel seviyesinde maske):
 #     - "yolo11n-seg.pt"   : Nano - Hızlı, hafif (3.4M parametre)
@@ -380,9 +410,11 @@ fuse_encoders: "all"
 #     - "yolo11n.pt"       : Nano detection model
 #     - "yolo11s.pt"       : Small detection model
 #     - "yolo11m.pt"       : Medium detection model
-# NOT: Segmentasyon modelleri arkeolojik yapı tespiti için daha uygundur.
-#      Detection modelleri sadece dikdörtgen kutu üretir.
-# ÖNERİ: İlk denemeler için "yolo11n-seg.pt", daha iyi sonuç için "yolo11s-seg.pt"
+#   ÖZEL NADIR MODELLER (kendi eğittiğiniz):
+#     - "models/yolo11_nadir_best.pt"     : Kendi eğittiğiniz nadir model
+#     - "models/yolo11_archaeological.pt" : Arkeolojik özel model
+#
+# ÖNERİ: Önce kendi verilerinizle fine-tune yapın, sonra kullanın!
 yolo_weights: null
 
 # yolo_conf: Tespit güven eşiği
