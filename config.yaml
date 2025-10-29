@@ -28,8 +28,8 @@
 # - Dosya çok bantlı bir GeoTIFF olmalıdır
 # - Önerilen bantlar: R, G, B, DSM (Yüzey Modeli), DTM (Arazi Modeli)
 # Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
-#input: "kesif_alani.tif"
-input: "karlik_vadi.tif"
+input: "kesif_alani.tif"
+#input: "karlik_vadi.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
 # - null ise: Girdi dosya adından otomatik üretilir
@@ -82,6 +82,21 @@ enable_deep_learning: true
 #   - Karmaşık paternlerde derin öğrenmeden daha zayıf olabilir
 # ÖNERİ: Yükseklik veriniz varsa (DSM/DTM) mutlaka true yapın
 enable_classic: true
+
+# enable_yolo: YOLO11 nesne tespit/segmentasyon modeli
+# - true: YOLO11 ile RGB görüntülerden nesne tespiti yapılır
+# - false: YOLO11 atlanır
+# ÖZELLİKLER:
+#   + RGB görüntülerden direkt tespit yapar
+#   + Hızlı çalışır (özellikle GPU ile)
+#   + Önceden eğitilmiş modellerle zero-shot kullanılabilir
+#   + Segmentasyon modelleri (yolo11n-seg.pt) piksel seviyesinde maske üretir
+#   + Detection modelleri (yolo11n.pt) bounding box üretir
+#   - Sadece RGB bantlarını kullanır (DSM/DTM görmez)
+#   - Eğitilmiş model yoksa genel amaçlı sonuçlar verir
+# NOT: YOLO11 segmentasyon modeli (..-seg.pt) kullanmanız önerilir
+# ÖNERİ: RGB tabanlı tespit için true yapın, ultralytics kurulumu gerektirir
+enable_yolo: true
 
 # enable_fusion: Derin öğrenme ve klasik yöntemlerin birleştirilmesi
 # - true: Her iki yöntemin olasılık haritaları birleştirilir (alpha ile)
@@ -346,7 +361,136 @@ fuse_encoders: "all"
 
 
 # ============================================================================
-# BÖLÜM 6: KARO (TILE) İŞLEME AYARLARI
+# BÖLÜM 6: YOLO11 MODEL AYARLARI
+# ============================================================================
+# YOLO11, Ultralytics tarafından geliştirilen son nesil nesne tespit ve
+# segmentasyon modelidir. RGB görüntülerden direkt çalışır, DSM/DTM gerektirmez.
+
+# yolo_weights: YOLO11 model ağırlık dosyası
+# - null        : Varsayılan model (yolo11n-seg.pt) otomatik indirilir
+# - Dosya yolu  : Özel eğitilmiş model dosyanız
+# MODEL SEÇENEKLERİ:
+#   SEGMENTASYON (önerilen - piksel seviyesinde maske):
+#     - "yolo11n-seg.pt"   : Nano - Hızlı, hafif (3.4M parametre)
+#     - "yolo11s-seg.pt"   : Small - Dengeli (11M parametre)
+#     - "yolo11m-seg.pt"   : Medium - Yüksek doğruluk (27M parametre)
+#     - "yolo11l-seg.pt"   : Large - Çok yüksek doğruluk (46M parametre)
+#     - "yolo11x-seg.pt"   : Extra Large - Maksimum doğruluk (71M parametre)
+#   TESPİT (bounding box):
+#     - "yolo11n.pt"       : Nano detection model
+#     - "yolo11s.pt"       : Small detection model
+#     - "yolo11m.pt"       : Medium detection model
+# NOT: Segmentasyon modelleri arkeolojik yapı tespiti için daha uygundur.
+#      Detection modelleri sadece dikdörtgen kutu üretir.
+# ÖNERİ: İlk denemeler için "yolo11n-seg.pt", daha iyi sonuç için "yolo11s-seg.pt"
+yolo_weights: null
+
+# yolo_conf: Tespit güven eşiği
+# - Değer aralığı: 0.0 - 1.0
+# - YOLO bu değerin üzerindeki tespitleri kabul eder
+# AYARLAMA REHBERİ:
+#   - 0.15-0.20 : Çok hassas, çok fazla tespit (yanlış pozitif artar)
+#   - 0.25      : Dengeli, varsayılan değer
+#   - 0.35-0.50 : Seçici, daha az tespit (yanlış pozitif azalır)
+#   - 0.60+     : Çok seçici, sadece çok net tespitler
+# KULLANIM SENARYOLARI:
+#   - Hiç tespit kaçırmak istemiyorsanız: 0.15-0.20
+#   - Dengeli sonuç istiyorsanız: 0.25-0.30
+#   - Sadece kesin tespitler istiyorsanız: 0.40-0.50
+# ÖNERİ: 0.25 ile başlayın, çok fazla/az tespit varsa ayarlayın
+yolo_conf: 0.25
+
+# yolo_iou: NMS (Non-Maximum Suppression) IoU eşiği
+# - Değer aralığı: 0.0 - 1.0
+# - Birbirine çok yakın tespitleri birleştirmek için kullanılır
+# NASıL ÇALIŞIR:
+#   İki tespitin örtüşme oranı (IoU) bu eşiği geçerse, güveni düşük olan elenir
+# AYARLAMA:
+#   - 0.3-0.4  : Agresif NMS, çok fazla birleştirme
+#   - 0.45     : Dengeli, varsayılan
+#   - 0.5-0.6  : Yumuşak NMS, ayrı tespitleri korur
+#   - 0.7+     : Çok yumuşak, neredeyse tüm tespitler korunur
+# KULLANIM SENARYOLARI:
+#   - Çok yakın yapıları ayırt etmek istiyorsanız: 0.3-0.4
+#   - Normal kullanım: 0.45
+#   - Overlap yapıları ayrı görmek istiyorsanız: 0.5-0.6
+# ÖNERİ: Varsayılan 0.45 çoğu durum için iyidir
+yolo_iou: 0.45
+
+# yolo_tile: YOLO için özel karo boyutu (piksel)
+# - null     : Genel --tile parametresini kullanır
+# - Sayı     : YOLO için özel tile boyutu belirtir
+# NE ZAMAN ÖZEL TILE:
+#   - YOLO daha küçük tile'larla daha iyi çalışabilir (örn: 640, 1280)
+#   - DL/Classic için 1024 kullanıp YOLO için 640 kullanabilirsiniz
+# AYARLAMA İPUÇLARI:
+#   - 640   : Hızlı, küçük yapılar için iyi
+#   - 1280  : Dengeli, orta boy yapılar için
+#   - 1920+ : Yavaş ama büyük yapıları tek parça görebilir
+# NOT: YOLO'nun kendi imgsz parametresi var, tile ile karıştırmayın
+# ÖNERİ: Önce null deneyin, sorun olursa 640 veya 1280 deneyin
+yolo_tile: null
+
+# yolo_imgsz: YOLO model girdi boyutu
+# - YOLO modeli her tile'ı bu boyuta yeniden ölçekler
+# - Değer aralığı: 320-1920 (32'nin katları)
+# MODEL EĞİTİMİ İLE İLİŞKİ:
+#   Model hangi boyutta eğitildiyse o boyutta en iyi çalışır
+# STANDART BOYUTLAR:
+#   - 320  : Çok hızlı, düşük doğruluk
+#   - 640  : Dengeli, varsayılan (çoğu model bu boyutta eğitilir)
+#   - 1280 : Yavaş, yüksek doğruluk (büyük yapılar için)
+# NOT: Büyük imgsz = daha yavaş ama daha detaylı tespit
+# ÖNERİ: 640 kullanın, özel model farklı boyut gerektiriyorsa değiştirin
+yolo_imgsz: 640
+
+# yolo_device: YOLO için hesaplama cihazı
+# - null     : Otomatik (CUDA varsa GPU, yoksa CPU)
+# - "0"      : İlk GPU (CUDA:0)
+# - "1"      : İkinci GPU (CUDA:1)
+# - "cpu"    : CPU'yu zorla kullan
+# - "mps"    : Apple Silicon (M1/M2) GPU (MacOS)
+# CİHAZ SEÇİMİ:
+#   GPU varsa mutlaka kullanın, 10-50x daha hızlı
+# KULLANIM SENARYOLARI:
+#   - Tek GPU: null (otomatik)
+#   - Çoklu GPU sistemi: "0" veya "1"
+#   - GPU yok veya sorunlu: "cpu"
+#   - MacOS M1/M2: "mps"
+# ÖNERİ: null bırakın, otomatik en iyisini seçer
+yolo_device: null
+
+# ============================================================================
+# 🆕 YOLO11 ETİKETLİ TESPİTLER (LABELS)
+# ============================================================================
+# YOLO11 etkinse, sistem otomatik olarak tespit edilen TÜM nesneleri
+# etiketli bir GeoPackage dosyasına kaydeder:
+#   - kesif_alani_yolo11_th0.25_tile1024_minarea80_labels.gpkg
+#
+# Bu dosya şunları içerir:
+#   • Sınıf etiketleri (person, car, tree, building, vb. - 80 COCO sınıfı)
+#   • Güven skorları (confidence)
+#   • Alan bilgileri (area_m2)
+#   • Coğrafi koordinatlar (center_x, center_y)
+#   • Poligon veya bounding box geometrileri
+#
+# KULLANIM ALANLARI:
+#   🌳 Ağaç envanteri
+#   🏗️ Bina tespiti
+#   🚗 Araç sayımı
+#   👥 İnsan aktivitesi analizi
+#   📊 Genel arazi kullanım haritası
+#
+# QGIS'TE GÖRÜNTÜLEME:
+#   1. Layer → Add Vector Layer → labels.gpkg
+#   2. Symbology → Categorized → class_name
+#   3. Her sınıf farklı renkte görünür
+#
+# NOT: Bu özellik otomatik aktiftir, kapatılamaz.
+
+
+# ============================================================================
+# BÖLÜM 7: KARO (TILE) İŞLEME AYARLARI
 # ============================================================================
 # Büyük görüntüler küçük karolara (tiles) bölünerek işlenir. Bu bellek
 # verimliliği sağlar ve GPU kullanımını optimize eder.
@@ -392,7 +536,7 @@ feather: true
 
 
 # ============================================================================
-# BÖLÜM 7: NORMALİZASYON AYARLARI
+# BÖLÜM 8: NORMALİZASYON AYARLARI
 # ============================================================================
 # Normalizasyon, farklı bantların değer aralıklarını standartlaştırır.
 # Bu, sinir ağlarının daha iyi öğrenmesini sağlar.
@@ -443,7 +587,7 @@ percentile_high: 98.0
 
 
 # ============================================================================
-# BÖLÜM 8: MASKELEME AYARLARI
+# BÖLÜM 9: MASKELEME AYARLARI
 # ============================================================================
 # Bazı alanlar (örn: ağaçlar, binalar) tespitten otomatik olarak hariç tutulabilir.
 
@@ -465,7 +609,7 @@ rgb_only: false               # true yaparsan SVF/Openness/LRM/Slope/nDSM kanall
 
 
 # ============================================================================
-# BÖLÜM 9: VEKTÖRLEŞTIRME AYARLARI
+# BÖLÜM 10: VEKTÖRLEŞTIRME AYARLARI
 # ============================================================================
 # Raster (piksel) sonuçlarını vektör (poligon) formatına dönüştürme.
 # GIS yazılımlarında (QGIS, ArcGIS) kullanım için yararlıdır.
@@ -517,7 +661,7 @@ simplify: null
 
 
 # ============================================================================
-# BÖLÜM 10: PERFORMANS AYARLARI
+# BÖLÜM 11: PERFORMANS AYARLARI
 # ============================================================================
 # Hesaplama hızı ve bellek kullanımını optimize etme.
 
@@ -558,7 +702,7 @@ verbose: 1
 
 
 # ============================================================================
-# BÖLÜM 11: ÖNBELLEK (CACHE) YÖNETİMİ
+# BÖLÜM 12: ÖNBELLEK (CACHE) YÖNETİMİ
 # ============================================================================
 # RVT türevleri (SVF, openness vb.) hesaplaması zaman alır. Bu hesaplamaları
 # önbelleğe alarak tekrar kullanabilir, işlem süresini büyük ölçüde azaltabilirsiniz.
@@ -604,7 +748,7 @@ recalculate_cache: false
 
 
 # ============================================================================
-# BÖLÜM 12: ÇIKTI DOSYALARI (BİLGİLENDİRME)
+# BÖLÜM 13: ÇIKTI DOSYALARI (BİLGİLENDİRME)
 # ============================================================================
 # Sistem, etkinleştirdiğiniz yöntemlere göre çeşitli çıktı dosyaları üretir.
 # Aşağıda hangi dosyaların ne zaman üretileceği açıklanmıştır.

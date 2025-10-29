@@ -33,16 +33,18 @@ Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (t
 
 ## ✨ Özellikler
 
-### 🧠 Üç Güçlü Yöntem
+### 🧠 Dört Güçlü Yöntem
 - **Derin Öğrenme (Deep Learning)**: U-Net, DeepLabV3+ ve diğer modern segmentasyon mimarileri
+- **YOLO11 (YENİ!)**: Ultralytics YOLO11 ile hızlı nesne tespit ve segmentasyon + etiketli arazi envanteri 🏷️
 - **Klasik Görüntü İşleme**: RVT (Relief Visualization Toolbox), Hessian matrisi, Morfolojik operatörler
-- **Hibrit Fusion**: Her iki yöntemin güçlü yönlerini birleştiren akıllı füzyon
+- **Hibrit Fusion**: Her yöntemin güçlü yönlerini birleştiren akıllı füzyon
 
 ### 🎯 Akıllı Tespit Özellikleri
 - ✅ **Çoklu Encoder Desteği**: ResNet, EfficientNet, VGG, DenseNet, MobileNet ve daha fazlası
 - ✅ **Zero-Shot Öğrenme**: Eğitilmiş model olmadan bile ImageNet ağırlıkları ile çalışabilir
 - ✅ **Ensemble Learning**: Birden fazla encoder'ın sonuçlarını birleştirerek daha güvenilir tespit
 - ✅ **Çok Ölçekli Analiz**: Farklı boyutlardaki yapıları tespit edebilme
+- ✅ **🆕 Etiketli Nesne Tespiti**: YOLO11 ile 80 farklı nesne sınıfını (ağaç, bina, araç, vb.) otomatik etiketleme
 
 ### 🔧 Teknik Özellikler
 - 🚀 **Karo Tabanlı İşleme**: Büyük görüntüler için bellek verimli işleme

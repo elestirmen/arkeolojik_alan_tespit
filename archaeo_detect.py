@@ -94,6 +94,11 @@ try:
 except ImportError:
     yaml = None  # YAML support is optional
 
+try:
+    from ultralytics import YOLO
+except ImportError:
+    YOLO = None  # YOLO11 support is optional
+
 LOGGER = logging.getLogger("archaeo_detect")
 
 T = TypeVar("T")
@@ -187,6 +192,10 @@ class PipelineDefaults:
         default=True,
         metadata={"help": "Klasik kabartma tabanlı yöntemleri (RVT, Hessian, morfoloji) çalıştır"},
     )
+    enable_yolo: bool = field(
+        default=False,
+        metadata={"help": "YOLO11 nesne tespit/segmentasyon modelini çalıştır"},
+    )
     enable_fusion: bool = field(
         default=True,
         metadata={"help": "Derin öğrenme ve klasik yöntem sonuçlarını birleştir (fusion)"},
@@ -260,6 +269,32 @@ class PipelineDefaults:
     gaussian_lrm_sigma: float = field(
         default=6.0,
         metadata={"help": "LRM fallback hesaplama için Gaussian sigma değeri"},
+    )
+    
+    # ===== YOLO11 MODEL AYARLARI =====
+    yolo_weights: Optional[str] = field(
+        default=None,
+        metadata={"help": "YOLO11 ağırlık dosyası (örn: yolo11n.pt, yolo11n-seg.pt); None ise varsayılan yolo11n-seg.pt indirilir"},
+    )
+    yolo_conf: float = field(
+        default=0.25,
+        metadata={"help": "YOLO11 tespit güven eşiği (0-1 arası)"},
+    )
+    yolo_iou: float = field(
+        default=0.45,
+        metadata={"help": "YOLO11 NMS IoU eşiği (0-1 arası)"},
+    )
+    yolo_tile: Optional[int] = field(
+        default=None,
+        metadata={"help": "YOLO11 için özel tile boyutu; None ise --tile değerini kullanır"},
+    )
+    yolo_imgsz: int = field(
+        default=640,
+        metadata={"help": "YOLO11 model girdi boyutu (piksel); model bu boyuta ölçekler"},
+    )
+    yolo_device: Optional[str] = field(
+        default=None,
+        metadata={"help": "YOLO11 için cihaz ('0', 'cpu', vb.); None ise otomatik seçilir"},
     )
     
     # ===== BİRLEŞTİRME (FUSION) AYARLARI =====
@@ -1222,6 +1257,17 @@ class FusionOutputs:
     threshold: float
 
 
+@dataclass
+class YoloOutputs:
+    prob_path: Path
+    mask_path: Path
+    prob_map: np.ndarray
+    mask: np.ndarray
+    transform: Affine
+    crs: Optional[RasterioCRS]
+    threshold: float
+
+
 def infer_tiled(
     model: torch.nn.Module,
     input_path: Path,
@@ -1578,6 +1624,409 @@ def infer_tiled(
         transform=transform,
         crs=crs,
     )
+
+
+def stretch_to_uint8(rgb: np.ndarray, low: float = 2.0, high: float = 98.0) -> np.ndarray:
+    """Stretch float/int bands to uint8 using percentile bounds."""
+    stretched = np.zeros_like(rgb, dtype=np.uint8)
+    for idx in range(rgb.shape[0]):
+        band = rgb[idx].astype(np.float32)
+        valid = np.isfinite(band)
+        if not np.any(valid):
+            continue
+        lo = float(np.nanpercentile(band, low))
+        hi = float(np.nanpercentile(band, high))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            lo = float(np.nanmin(band[valid]))
+            hi = float(np.nanmax(band[valid]))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            continue
+        scaled = np.zeros_like(band, dtype=np.float32)
+        scaled[valid] = (band[valid] - lo) / (hi - lo)
+        np.clip(scaled, 0.0, 1.0, out=scaled)
+        stretched[idx] = (scaled * 255.0).astype(np.uint8)
+    return stretched
+
+
+def infer_yolo_tiled(
+    input_path: Path,
+    band_idx: Sequence[int],
+    tile: int,
+    overlap: int,
+    out_prefix: Path,
+    yolo_weights: Optional[str] = None,
+    conf_threshold: float = 0.25,
+    iou_threshold: float = 0.45,
+    imgsz: int = 640,
+    device: Optional[str] = None,
+    min_area: Optional[float] = None,
+    precomputed_deriv: Optional[PrecomputedDerivatives] = None,
+    percentile_low: float = 2.0,
+    percentile_high: float = 98.0,
+    save_labels: bool = True,
+) -> YoloOutputs:
+    """
+    Run YOLO11 segmentation inference on RGB tiles.
+    
+    Args:
+        input_path: Path to multi-band GeoTIFF
+        band_idx: Band indices (RGB bands used: band_idx[0:3])
+        tile: Tile size for sliding window
+        overlap: Overlap between tiles
+        out_prefix: Output file prefix
+        yolo_weights: Path to YOLO weights file (e.g. 'yolo11n-seg.pt')
+        conf_threshold: Detection confidence threshold
+        iou_threshold: NMS IoU threshold
+        imgsz: YOLO model input size
+        device: Device for inference ('0', 'cpu', etc.)
+        min_area: Minimum polygon area filter
+        precomputed_deriv: Precomputed derivatives (for RGB extraction)
+        percentile_low: Lower percentile for RGB stretch
+        percentile_high: Upper percentile for RGB stretch
+    
+    Returns:
+        YoloOutputs with probability map, mask, and metadata
+    """
+    if YOLO is None:
+        raise ImportError(
+            "Ultralytics YOLO gerekli. Yüklemek için: pip install ultralytics>=8.1.0"
+        )
+    
+    # Load YOLO model
+    if yolo_weights is None:
+        yolo_weights = "yolo11n-seg.pt"
+        LOGGER.info("YOLO ağırlık dosyası belirtilmedi, varsayılan kullanılıyor: %s", yolo_weights)
+    
+    LOGGER.info("YOLO11 modeli yükleniyor: %s", yolo_weights)
+    model = YOLO(yolo_weights)
+    
+    with rasterio.open(input_path) as src:
+        height, width = src.height, src.width
+        transform = src.transform
+        crs = src.crs
+        
+        # Initialize accumulator arrays
+        prob_acc = np.zeros((height, width), dtype=np.float32)
+        weight_acc = np.zeros((height, width), dtype=np.float32)
+        valid_global = np.zeros((height, width), dtype=bool)
+        
+        # Initialize label detection storage
+        all_detections: List[Dict[str, Any]] = []
+        detection_id = 0
+        
+        total_tiles = math.ceil(height / max(tile - overlap, 1)) * math.ceil(
+            width / max(tile - overlap, 1)
+        )
+        
+        LOGGER.info("YOLO11 inference başlıyor: %dx%d piksel, %d tile", width, height, total_tiles)
+        
+        for window, row, col in progress_bar(
+            generate_windows(width, height, tile, overlap),
+            total=total_tiles,
+            desc="YOLO11",
+            unit="tile",
+        ):
+            win_height = int(window.height)
+            win_width = int(window.width)
+            
+            # Read RGB bands
+            if precomputed_deriv is not None:
+                row_start = int(window.row_off)
+                col_start = int(window.col_off)
+                row_end = row_start + win_height
+                col_end = col_start + win_width
+                rgb = precomputed_deriv.rgb[:, row_start:row_end, col_start:col_end].copy()
+            else:
+                def read_band(idx: int) -> Optional[np.ndarray]:
+                    if idx <= 0:
+                        return None
+                    data = src.read(idx, window=window, boundless=True, masked=True)
+                    return np.ma.filled(data.astype(np.float32), np.nan)
+                
+                rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
+            
+            # Convert to uint8 for YOLO
+            rgb_uint8 = stretch_to_uint8(rgb, low=percentile_low, high=percentile_high)
+            
+            # Transpose to HWC format and convert to BGR
+            image_rgb = np.transpose(rgb_uint8, (1, 2, 0))
+            image_bgr = np.ascontiguousarray(image_rgb[:, :, ::-1])
+            
+            # Check if tile is valid (not all NaN/zero)
+            valid_mask = np.any(rgb_uint8 > 0, axis=0)
+            if not np.any(valid_mask):
+                continue
+            
+            # Run YOLO inference
+            predict_kwargs = {
+                'conf': conf_threshold,
+                'iou': iou_threshold,
+                'imgsz': imgsz,
+                'verbose': False,
+                'save': False,
+            }
+            if device is not None:
+                predict_kwargs['device'] = device
+            
+            try:
+                results = model.predict(image_bgr, **predict_kwargs)
+                result = results[0]
+                
+                # Create probability map from masks
+                tile_prob = np.zeros((win_height, win_width), dtype=np.float32)
+                
+                # Get class names from model
+                class_names = result.names if hasattr(result, 'names') else {}
+                
+                if hasattr(result, 'masks') and result.masks is not None:
+                    # Segmentation masks available
+                    masks_data = result.masks.data.cpu().numpy()  # (N, H, W)
+                    boxes = result.boxes.xyxy.cpu().numpy() if result.boxes is not None else None
+                    confidences = result.boxes.conf.cpu().numpy() if result.boxes is not None else None
+                    class_ids = result.boxes.cls.cpu().numpy().astype(int) if result.boxes is not None else None
+                    
+                    for i, mask in enumerate(masks_data):
+                        # Resize mask to tile size if needed
+                        if mask.shape != (win_height, win_width):
+                            from scipy.ndimage import zoom
+                            zy = win_height / mask.shape[0]
+                            zx = win_width / mask.shape[1]
+                            mask = zoom(mask, (zy, zx), order=1)
+                        
+                        # Weight by confidence
+                        conf = float(confidences[i]) if confidences is not None and i < len(confidences) else 1.0
+                        tile_prob = np.maximum(tile_prob, mask * conf)
+                        
+                        # Store detection info for label export
+                        if save_labels and boxes is not None and i < len(boxes):
+                            bbox = boxes[i]
+                            xmin_tile, ymin_tile, xmax_tile, ymax_tile = bbox
+                            
+                            # Convert to global pixel coordinates
+                            xmin_global = float(xmin_tile + col)
+                            xmax_global = float(xmax_tile + col)
+                            ymin_global = float(ymin_tile + row)
+                            ymax_global = float(ymax_tile + row)
+                            
+                            # Get class info
+                            class_id = int(class_ids[i]) if class_ids is not None and i < len(class_ids) else -1
+                            class_name = class_names.get(class_id, f"class_{class_id}")
+                            
+                            # Create polygon from mask in geographic coordinates
+                            mask_binary = (mask > 0.5).astype(np.uint8)
+                            if np.any(mask_binary):
+                                # Apply proper transformation: tile offset + main transform
+                                # Window transform for this tile
+                                tile_transform = transform * Affine.translation(col, row)
+                                
+                                # Convert mask to polygon using rasterio.features.shapes
+                                geoms = list(shapes(mask_binary, mask=mask_binary, transform=tile_transform))
+                                if geoms:
+                                    geom_dict, _ = geoms[0]
+                                    from shapely.geometry import shape as shapely_shape
+                                    polygon = shapely_shape(geom_dict)
+                                    
+                                    # Calculate center in geographic coordinates from polygon
+                                    center_geom = polygon.centroid
+                                    center_x = float(center_geom.x)
+                                    center_y = float(center_geom.y)
+                                    
+                                    all_detections.append({
+                                        'id': detection_id,
+                                        'class_id': class_id,
+                                        'class_name': class_name,
+                                        'confidence': conf,
+                                        'bbox_xmin': xmin_global,
+                                        'bbox_ymin': ymin_global,
+                                        'bbox_xmax': xmax_global,
+                                        'bbox_ymax': ymax_global,
+                                        'center_x': center_x,
+                                        'center_y': center_y,
+                                        'tile_row': int(row),
+                                        'tile_col': int(col),
+                                        'geometry': polygon,
+                                    })
+                                    detection_id += 1
+                
+                elif hasattr(result, 'boxes') and result.boxes is not None:
+                    # Only bounding boxes available - create masks from boxes
+                    boxes = result.boxes.xyxy.cpu().numpy()
+                    confidences = result.boxes.conf.cpu().numpy()
+                    class_ids = result.boxes.cls.cpu().numpy().astype(int)
+                    
+                    for i, (bbox, conf, class_id) in enumerate(zip(boxes, confidences, class_ids)):
+                        xmin, ymin, xmax, ymax = bbox.astype(int)
+                        xmin = max(0, min(xmin, win_width - 1))
+                        xmax = max(0, min(xmax, win_width))
+                        ymin = max(0, min(ymin, win_height - 1))
+                        ymax = max(0, min(ymax, win_height))
+                        
+                        if xmax > xmin and ymax > ymin:
+                            tile_prob[ymin:ymax, xmin:xmax] = np.maximum(
+                                tile_prob[ymin:ymax, xmin:xmax],
+                                float(conf)
+                            )
+                            
+                            # Store detection info for label export
+                            if save_labels:
+                                # Convert to global pixel coordinates
+                                xmin_global = float(xmin + col)
+                                xmax_global = float(xmax + col)
+                                ymin_global = float(ymin + row)
+                                ymax_global = float(ymax + row)
+                                
+                                # Get class name
+                                class_name = class_names.get(int(class_id), f"class_{class_id}")
+                                
+                                # Create bounding box polygon in geographic coordinates
+                                # Use Affine transform to convert pixel coords to geo coords
+                                from shapely.geometry import Polygon
+                                
+                                # Get corners of bounding box in geo coordinates
+                                # Affine transform * (col, row) -> (x_geo, y_geo)
+                                corners = []
+                                for px, py in [(xmin_global, ymin_global), 
+                                              (xmax_global, ymin_global),
+                                              (xmax_global, ymax_global),
+                                              (xmin_global, ymax_global),
+                                              (xmin_global, ymin_global)]:
+                                    geo_x, geo_y = transform * (px, py)
+                                    corners.append((geo_x, geo_y))
+                                
+                                polygon = Polygon(corners)
+                                
+                                # Calculate center from polygon
+                                center_geom = polygon.centroid
+                                center_x = float(center_geom.x)
+                                center_y = float(center_geom.y)
+                                
+                                all_detections.append({
+                                    'id': detection_id,
+                                    'class_id': int(class_id),
+                                    'class_name': class_name,
+                                    'confidence': float(conf),
+                                    'bbox_xmin': xmin_global,
+                                    'bbox_ymin': ymin_global,
+                                    'bbox_xmax': xmax_global,
+                                    'bbox_ymax': ymax_global,
+                                    'center_x': center_x,
+                                    'center_y': center_y,
+                                    'tile_row': int(row),
+                                    'tile_col': int(col),
+                                    'geometry': polygon,
+                                })
+                                detection_id += 1
+                
+                # Accumulate results
+                row_slice = slice(row, row + win_height)
+                col_slice = slice(col, col + win_width)
+                
+                valid_tile = valid_mask & np.isfinite(tile_prob)
+                
+                # Apply feathering weights
+                weights = make_feather_weights(win_height, win_width, tile, overlap)
+                
+                prob_acc[row_slice, col_slice] += tile_prob * weights * valid_tile
+                weight_acc[row_slice, col_slice] += weights * valid_tile.astype(np.float32)
+                valid_global[row_slice, col_slice] |= valid_tile
+                
+            except Exception as e:
+                LOGGER.warning("YOLO inference failed for tile at row=%d, col=%d: %s", row, col, e)
+                continue
+        
+        # Normalize accumulated probabilities
+        with np.errstate(divide="ignore", invalid="ignore"):
+            prob_map = np.divide(prob_acc, weight_acc, out=np.zeros_like(prob_acc), where=weight_acc > 0)
+        prob_map[~valid_global] = np.nan
+        prob_map = prob_map.astype(np.float32)
+        
+        # Create binary mask using confidence threshold
+        binary_mask = (prob_map >= conf_threshold).astype(np.uint8)
+        binary_mask[~valid_global] = 0
+        
+        # Build output paths
+        base_prefix = out_prefix.with_suffix("")
+        base_prefix.parent.mkdir(parents=True, exist_ok=True)
+        
+        filename = build_filename_with_params(
+            base_name=base_prefix.name,
+            mode_suffix="yolo11",
+            threshold=conf_threshold,
+            tile=tile,
+            min_area=min_area,
+        )
+        
+        prob_path = base_prefix.parent / f"{filename}_prob.tif"
+        mask_path = base_prefix.parent / f"{filename}_mask.tif"
+        
+        # Write outputs
+        write_prob_and_mask_rasters(
+            prob_map=prob_map,
+            mask=binary_mask,
+            transform=transform,
+            crs=crs,
+            prob_path=prob_path,
+            mask_path=mask_path,
+        )
+        
+        # Export labeled detections to GeoPackage
+        labels_path = None
+        if save_labels and all_detections:
+            LOGGER.info("YOLO11 etiketli tespitler GeoPackage'e yazılıyor: %d nesne", len(all_detections))
+            labels_path = base_prefix.parent / f"{filename}_labels.gpkg"
+            
+            try:
+                if gpd is not None:
+                    # Create GeoDataFrame with all detections
+                    gdf = gpd.GeoDataFrame(all_detections, geometry='geometry', crs=crs)
+                    
+                    # Calculate area for each detection (in square meters)
+                    if crs and not crs.is_projected:
+                        # If geographic CRS, project to calculate area
+                        from pyproj import CRS as PyProjCRS, Transformer
+                        area_crs = PyProjCRS.from_epsg(6933)  # Equal Area projection
+                        transformer = Transformer.from_crs(crs, area_crs, always_xy=True)
+                        gdf['area_m2'] = gdf.geometry.to_crs(area_crs).area
+                    else:
+                        gdf['area_m2'] = gdf.geometry.area
+                    
+                    # Reorder columns for better readability
+                    column_order = [
+                        'id', 'class_id', 'class_name', 'confidence', 'area_m2',
+                        'center_x', 'center_y',
+                        'bbox_xmin', 'bbox_ymin', 'bbox_xmax', 'bbox_ymax',
+                        'tile_row', 'tile_col', 'geometry'
+                    ]
+                    gdf = gdf[[col for col in column_order if col in gdf.columns]]
+                    
+                    # Save to GeoPackage
+                    gdf.to_file(labels_path, driver="GPKG", layer="detections")
+                    LOGGER.info("✓ YOLO11 etiketli tespitler kaydedildi: %s", labels_path)
+                    
+                    # Print summary statistics
+                    class_counts = gdf['class_name'].value_counts()
+                    LOGGER.info("Tespit edilen sınıflar:")
+                    for class_name, count in class_counts.items():
+                        LOGGER.info("  - %s: %d adet", class_name, count)
+                
+                else:
+                    LOGGER.warning("GeoPandas yüklü değil, etiketli tespitler kaydedilemedi")
+                    
+            except Exception as e:
+                LOGGER.error("YOLO11 etiketli tespitler kaydedilirken hata: %s", e)
+        
+        elif save_labels and not all_detections:
+            LOGGER.info("YOLO11 hiç tespit bulamadı, etiketli çıktı yok")
+        
+        return YoloOutputs(
+            prob_path=prob_path,
+            mask_path=mask_path,
+            prob_map=prob_map,
+            mask=binary_mask,
+            transform=transform,
+            crs=crs,
+            threshold=conf_threshold,
+        )
 
 
 def infer_classic_tiled(
@@ -2637,6 +3086,55 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         dest="recalculate_cache",
         help=cli_help("recalculate_cache"),
     )
+    parser.add_argument(
+        "--enable-yolo",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("enable_yolo"),
+        dest="enable_yolo",
+        help=cli_help("enable_yolo", "(YOLO11 nesne tespit/segmentasyon modelini etkinleştir)"),
+    )
+    parser.add_argument(
+        "--yolo-weights",
+        type=str,
+        default=default_for("yolo_weights"),
+        dest="yolo_weights",
+        help=cli_help("yolo_weights"),
+    )
+    parser.add_argument(
+        "--yolo-conf",
+        type=float,
+        default=default_for("yolo_conf"),
+        dest="yolo_conf",
+        help=cli_help("yolo_conf"),
+    )
+    parser.add_argument(
+        "--yolo-iou",
+        type=float,
+        default=default_for("yolo_iou"),
+        dest="yolo_iou",
+        help=cli_help("yolo_iou"),
+    )
+    parser.add_argument(
+        "--yolo-tile",
+        type=int,
+        default=default_for("yolo_tile"),
+        dest="yolo_tile",
+        help=cli_help("yolo_tile"),
+    )
+    parser.add_argument(
+        "--yolo-imgsz",
+        type=int,
+        default=default_for("yolo_imgsz"),
+        dest="yolo_imgsz",
+        help=cli_help("yolo_imgsz"),
+    )
+    parser.add_argument(
+        "--yolo-device",
+        type=str,
+        default=default_for("yolo_device"),
+        dest="yolo_device",
+        help=cli_help("yolo_device"),
+    )
 
     args = parser.parse_args(argv)
     config = build_config_from_args(args)
@@ -2688,10 +3186,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     bands = parse_band_indexes(config.bands)
     out_prefix = resolve_out_prefix(input_path, config.out_prefix)
     # Yöntem etkinleştirme kontrolleri
-    if not config.enable_deep_learning and not config.enable_classic:
-        parser.error("En az bir yöntem etkin olmalı (deep learning veya classic).")
+    if not config.enable_deep_learning and not config.enable_classic and not config.enable_yolo:
+        parser.error("En az bir yöntem etkin olmalı (deep learning, classic veya YOLO11).")
     
     classic_outputs: Optional[ClassicOutputs] = None
+    yolo_outputs: Optional[YoloOutputs] = None
     fusion_outputs: Optional[FusionOutputs] = None
     fusion_encoder_label: Optional[str] = None
     dl_runs: List[Tuple[str, Path]] = []
@@ -2933,6 +3432,39 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     mode_out.mask_path,
                 )
 
+    # YOLO11 pipeline'ı çalıştır (etkinse)
+    if config.enable_yolo:
+        if YOLO is None:
+            LOGGER.error("YOLO11 etkinleştirildi ama ultralytics yüklü değil. Yüklemek için: pip install ultralytics>=8.1.0")
+        else:
+            LOGGER.info("")
+            LOGGER.info("=" * 70)
+            LOGGER.info("YOLO11 BAŞLATILIYOR")
+            LOGGER.info("=" * 70)
+            
+            yolo_tile_size = config.yolo_tile if config.yolo_tile is not None else config.tile
+            
+            yolo_outputs = infer_yolo_tiled(
+                input_path=input_path,
+                band_idx=bands,
+                tile=yolo_tile_size,
+                overlap=config.overlap,
+                out_prefix=out_prefix,
+                yolo_weights=config.yolo_weights,
+                conf_threshold=config.yolo_conf,
+                iou_threshold=config.yolo_iou,
+                imgsz=config.yolo_imgsz,
+                device=config.yolo_device,
+                min_area=config.min_area,
+                precomputed_deriv=precomputed_deriv,
+                percentile_low=config.percentile_low,
+                percentile_high=config.percentile_high,
+                save_labels=True,  # Etiketli tespitleri GeoPackage olarak kaydet
+            )
+            
+            LOGGER.info("✓ YOLO11 olasılık haritası: %s", yolo_outputs.prob_path)
+            LOGGER.info("✓ YOLO11 ikili maske: %s", yolo_outputs.mask_path)
+
     # Fusion (birleştirme) çalıştır (etkinse ve her iki yöntem de çalıştıysa)
     if fuse_enabled and classic_outputs is not None:
         LOGGER.info("")
@@ -3057,6 +3589,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 outputs.crs,
                 outputs.mask_path.with_suffix(""),
             ))
+        if yolo_outputs is not None:
+            vector_jobs.append((
+                "yolo11",
+                yolo_outputs.mask,
+                yolo_outputs.prob_map,
+                yolo_outputs.transform,
+                yolo_outputs.crs,
+                yolo_outputs.mask_path.with_suffix(""),
+            ))
         if classic_outputs is not None:
             vector_jobs.append(
                 (
@@ -3167,13 +3708,32 @@ if __name__ == "__main__":
 #
 # SENARYOLAR (config.yaml içinde):
 # ----------------------------------
-# Senaryo 1: Sadece DL
-#   enable_deep_learning: true, enable_classic: false, enable_fusion: false
+# Senaryo 1: Sadece DL (U-Net)
+#   enable_deep_learning: true, enable_classic: false, enable_yolo: false, enable_fusion: false
 #
 # Senaryo 2: Sadece Klasik
-#   enable_deep_learning: false, enable_classic: true, enable_fusion: false
+#   enable_deep_learning: false, enable_classic: true, enable_yolo: false, enable_fusion: false
 #
-# Senaryo 3: Her İkisi + Fusion (ÖNERİLİR)
-#   enable_deep_learning: true, enable_classic: true, enable_fusion: true
+# Senaryo 3: Sadece YOLO11
+#   enable_deep_learning: false, enable_classic: false, enable_yolo: true, enable_fusion: false
+#
+# Senaryo 4: DL + Klasik + Fusion (ÖNERİLİR)
+#   enable_deep_learning: true, enable_classic: true, enable_yolo: false, enable_fusion: true
+#
+# Senaryo 5: Tüm Yöntemler (DL + Klasik + YOLO11)
+#   enable_deep_learning: true, enable_classic: true, enable_yolo: true, enable_fusion: true
+#
+# YOLO11 KULLANIMI:
+# -----------------
+# YOLO11 için segmentasyon modelini kullanmanız önerilir:
+#   yolo_weights: "yolo11n-seg.pt"  # nano segmentation model
+#   yolo_weights: "yolo11s-seg.pt"  # small segmentation model
+#   yolo_weights: "yolo11m-seg.pt"  # medium segmentation model
+#
+# Tespit (detection) modeli kullanırsanız, bounding box'lardan maske oluşturulur:
+#   yolo_weights: "yolo11n.pt"      # nano detection model
+#
+# Özel eğitilmiş modelinizi kullanabilirsiniz:
+#   yolo_weights: "path/to/your/best.pt"
 #
 # ============================================================================
