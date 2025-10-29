@@ -1694,24 +1694,37 @@ def infer_yolo_tiled(
     
     # Load YOLO model
     if yolo_weights is None:
-        yolo_weights = "yolo11n-seg.pt"
+        # YOLOv8 daha olgun ve daha fazla topluluk desteği var
+        yolo_weights = "yolov8s-seg.pt"
         LOGGER.info("YOLO ağırlık dosyası belirtilmedi, varsayılan kullanılıyor: %s", yolo_weights)
+        LOGGER.info("Not: YOLOv8 (daha olgun) kullanılıyor. YOLO11 için: yolo_weights='yolo11s-seg.pt'")
     
-    LOGGER.info("YOLO11 modeli yükleniyor: %s", yolo_weights)
+    LOGGER.info("YOLO modeli yükleniyor: %s", yolo_weights)
     
     # Kuş bakışı (nadir) görüntüler için uyarı
-    if yolo_weights is None or "yolo11" in str(yolo_weights).lower() and "nadir" not in str(yolo_weights).lower() and "aerial" not in str(yolo_weights).lower():
+    # Varsayılan COCO modelleri (yolov8, yolo11) için uyar, özel nadir modeller için uyarma
+    weights_str = str(yolo_weights).lower()
+    is_default_coco = ("yolov8" in weights_str or "yolo11" in weights_str) and \
+                      "nadir" not in weights_str and \
+                      "aerial" not in weights_str and \
+                      "drone" not in weights_str and \
+                      "visdrone" not in weights_str
+    
+    if is_default_coco:
+        model_version = "YOLOv8" if "yolov8" in weights_str else "YOLO11"
         LOGGER.warning("")
         LOGGER.warning("=" * 70)
-        LOGGER.warning("⚠️  YOLO11 KUŞ BAKIŞI (NADIR) GÖRÜNTÜ UYARISI")
+        LOGGER.warning("⚠️  KUŞ BAKIŞI (NADIR) GÖRÜNTÜ UYARISI")
         LOGGER.warning("=" * 70)
-        LOGGER.warning("Varsayılan YOLO11 modeli YATAY perspektiften eğitilmiştir.")
+        LOGGER.warning("Varsayılan %s COCO modeli YATAY perspektiften eğitilmiştir.", model_version)
         LOGGER.warning("Arkeolojik LiDAR/İHA görüntüleri KUŞ BAKIŞI perspektiftedir.")
         LOGGER.warning("")
         LOGGER.warning("ÖNERİ:")
-        LOGGER.warning("  1. YOLO11'i kendi kuş bakışı verilerinizle fine-tune edin")
+        LOGGER.warning("  1. VisDrone ile %s'i fine-tune edin (1-2 gün)", model_version)
+        LOGGER.warning("     yolo segment train data=visdrone_yolo/data.yaml model=%s epochs=100", 
+                      "yolov8s-seg.pt" if "yolov8" in weights_str else "yolo11s-seg.pt")
         LOGGER.warning("  2. Detaylar için: YOLO11_NADIR_TRAINING.md dosyasına bakın")
-        LOGGER.warning("  3. Hazır nadir model: yolo_weights: 'models/yolo11_nadir_best.pt'")
+        LOGGER.warning("  3. Hazır nadir model: yolo_weights: 'models/yolov8_nadir_visdrone.pt'")
         LOGGER.warning("")
         LOGGER.warning("ŞUANKI SONUÇLAR: Genel envanter amaçlı, düşük doğruluk beklenir")
         LOGGER.warning("=" * 70)

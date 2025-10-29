@@ -400,21 +400,32 @@ fuse_encoders: "all"
 # ============================================================================
 #
 # MODEL SEÇENEKLERİ:
-#   SEGMENTASYON (önerilen - piksel seviyesinde maske):
-#     - "yolo11n-seg.pt"   : Nano - Hızlı, hafif (3.4M parametre)
-#     - "yolo11s-seg.pt"   : Small - Dengeli (11M parametre)
-#     - "yolo11m-seg.pt"   : Medium - Yüksek doğruluk (27M parametre)
-#     - "yolo11l-seg.pt"   : Large - Çok yüksek doğruluk (46M parametre)
-#     - "yolo11x-seg.pt"   : Extra Large - Maksimum doğruluk (71M parametre)
-#   TESPİT (bounding box):
-#     - "yolo11n.pt"       : Nano detection model
-#     - "yolo11s.pt"       : Small detection model
-#     - "yolo11m.pt"       : Medium detection model
-#   ÖZEL NADIR MODELLER (kendi eğittiğiniz):
-#     - "models/yolo11_nadir_best.pt"     : Kendi eğittiğiniz nadir model
-#     - "models/yolo11_archaeological.pt" : Arkeolojik özel model
+#   
+#   YOLOv8 SEGMENTASYON (ÖNERİLEN - daha olgun):
+#     - "yolov8n-seg.pt"   : Nano - Hızlı, hafif
+#     - "yolov8s-seg.pt"   : Small - Dengeli ⭐ BAŞLANGIÇ İÇİN
+#     - "yolov8m-seg.pt"   : Medium - Yüksek doğruluk
+#     - "yolov8l-seg.pt"   : Large - Çok yüksek doğruluk
+#     - "yolov8x-seg.pt"   : Extra Large - Maksimum doğruluk
 #
-# ÖNERİ: Önce kendi verilerinizle fine-tune yapın, sonra kullanın!
+#   YOLO11 SEGMENTASYON (en yeni):
+#     - "yolo11n-seg.pt"   : Nano - Hızlı, hafif
+#     - "yolo11s-seg.pt"   : Small - Dengeli
+#     - "yolo11m-seg.pt"   : Medium - Yüksek doğruluk
+#     - "yolo11l-seg.pt"   : Large - Çok yüksek doğruluk
+#     - "yolo11x-seg.pt"   : Extra Large - Maksimum doğruluk
+#
+#   TESPİT (bounding box - daha az önerilir):
+#     - "yolov8n.pt"       : YOLOv8 Nano detection
+#     - "yolo11n.pt"       : YOLO11 Nano detection
+#
+#   ÖZEL NADIR MODELLER (kendi eğittiğiniz - EN İYİSİ):
+#     - "models/yolov8_nadir_visdrone.pt"  : VisDrone ile eğitilmiş YOLOv8
+#     - "models/yolo11_nadir_best.pt"      : Kendi YOLO11 nadir modeliniz
+#     - "models/yolov8_archaeological.pt"  : Arkeolojik özel YOLOv8
+#
+# ÖNERİ: YOLOv8 daha olgun, daha fazla topluluk desteği var!
+#        Kuş bakışı için mutlaka fine-tune yapın!
 yolo_weights: null
 
 # yolo_conf: Tespit güven eşiği
