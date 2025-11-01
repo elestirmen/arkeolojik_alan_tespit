@@ -160,3 +160,4 @@ Size üç seçenek sunuyorum:
 Ben **B seçeneğini** (şimdilik atlama) öneriyorum - sisteminiz zaten çok güçlü! ADAF'i ileride ekleyebiliriz.
 
 
+

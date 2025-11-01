@@ -155,7 +155,8 @@ encoder: "resnet34"
 #   - Daha uzun çalışma süresi
 #   - Her encoder için ayrı model ağırlığı gerekebilir
 # ÖNERİ: Üretim için "all" veya 2-3 encoder kombinasyonu, test için "single"
-encoders: "all"
+encoders: "none"
+
 
 # weights: TEK ENCODER için model ağırlık dosyası (.pth)
 # - Eğitilmiş model ağırlıklarınızın dosya yolu
@@ -343,7 +344,7 @@ gaussian_lrm_sigma: 6.0
 #   - Model yok ama yükseklik verisi iyiyse: 0.3-0.4
 #   - Her ikisi de eşit kalitede: 0.5
 # ÖNERİ: 0.5 ile başlayın, sonuçlara göre ayarlayın
-alpha: 0.5
+alpha: 0.4
 
 # fuse_encoders: Çoklu encoder modunda hangi encoder'lar için fusion üretilecek
 # - "all"    : Tüm encoder'lar için ayrı fusion sonuçları üretir
@@ -426,7 +427,7 @@ fuse_encoders: "all"
 #
 # ÖNERİ: YOLOv8 daha olgun, daha fazla topluluk desteği var!
 #        Kuş bakışı için mutlaka fine-tune yapın!
-yolo_weights: null
+yolo_weights: "yolo11s-seg.pt"
 
 # yolo_conf: Tespit güven eşiği
 # - Değer aralığı: 0.0 - 1.0
@@ -681,7 +682,7 @@ vectorize: true
 #   - Gürültüyü azaltmak için: Yüksek değer (100-200 m²)
 #   - Tüm adayları görmek için: Düşük değer (20-50 m²)
 # ÖNERİ: Aradığınız yapı boyutuna göre ayarlayın, 80 m² dengeli bir değer
-min_area: 80.0
+min_area: 50.0
 
 # simplify: Poligon basitleştirme toleransı (metre)
 # - Douglas-Peucker algoritması ile poligon köşe sayısını azaltır
@@ -701,6 +702,8 @@ min_area: 80.0
 #   - Bazı detaylar kaybolabilir
 # ÖNERİ: İlk çalıştırmada null (kapalı), sonra gerekirse 2.0-3.0m deneyin
 simplify: null
+vector_opening_size: 3         # Vektörleştirmede morfolojik açma çekirdeği (piksel)
+label_connectivity: 8          # Bileşen etiketlemede bağlanırlık (4 veya 8)
 
 
 # ============================================================================
@@ -720,7 +723,7 @@ simplify: null
 #   - Sadece GPU (CUDA) ile çalışır
 #   - Eski GPU'larda desteklenmeyebilir (Pascal öncesi)
 # ÖNERİ: GPU varsa ve bellek sıkıntısı yaşıyorsanız true yapın
-half: false
+half: false  # CUDA yoksa otomatik float32'ye düşer; CUDA varsa performans için önerilir
 
 # seed: Rastgelelik tohumu (reproducibility için)
 # - Tüm rastgele işlemler bu tohum ile başlatılır
@@ -776,7 +779,7 @@ cache_derivatives: true
 # KULLANIM:
 #   Birden fazla proje için merkezi bir önbellek dizini istiyorsanız kullanın
 # ÖNERİ: Varsayılan null kullanın, daha basit
-cache_dir: null
+cache_dir: "cache/"
 
 # recalculate_cache: Mevcut önbelleği yok say ve yeniden hesapla
 # - true: Önbellek dosyası varsa bile RVT'yi sıfırdan hesapla

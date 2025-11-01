@@ -171,8 +171,8 @@ class PipelineDefaults:
     
     # ===== GİRDİ/ÇIKTI AYARLARI =====
     input: str = field(
-        default=r"C:\Users\ertug\Nextcloud\arkeolojik_alan_tespit\kesif_alani.tif",
-        metadata={"help": "Çok bantlı GeoTIFF dosyasının tam yolu (RGB + DSM + DTM içermeli)"},
+        default="kesif_alani.tif",
+        metadata={"help": "Çok bantlı GeoTIFF dosyasının yolu (RGB + DSM + DTM önerilir)"},
     )
     out_prefix: Optional[str] = field(
         default=None,
@@ -362,6 +362,14 @@ class PipelineDefaults:
         default=None,
         metadata={"help": "Poligon basitleştirme toleransı (metre); None ise basitleştirme yapılmaz"},
     )
+    vector_opening_size: int = field(
+        default=3,
+        metadata={"help": "Vektörleştirme için morfolojik açma (opening) boyutu (piksel)"},
+    )
+    label_connectivity: int = field(
+        default=8,
+        metadata={"help": "Bileşen etiketlemede bağlanırlık (4 veya 8 komşuluk)"},
+    )
     
     # ===== PERFORMANS VE TEKNİK AYARLAR =====
     half: bool = field(
@@ -393,21 +401,6 @@ class PipelineDefaults:
 
 
 DEFAULTS = PipelineDefaults()
-
-# Adjust default input to CWD if it points to the old absolute path
-try:
-    _in = DEFAULTS.input if isinstance(DEFAULTS.input, str) else str(DEFAULTS.input)
-    if (
-        isinstance(_in, str)
-        and (
-            "\\Nextcloud\\arkeolojik_alan_tespit\\kesif_alani.tif" in _in
-            or "/Nextcloud/arkeolojik_alan_tespit/kesif_alani.tif" in _in
-        )
-    ):
-        DEFAULTS.input = str(Path.cwd() / "kesif_alani.tif")
-except Exception:
-    # Best effort; do not fail if any issue occurs here
-    pass
 
 
 def default_for(name: str):
@@ -1429,6 +1422,8 @@ def infer_tiled(
             if lows_list and highs_list:
                 fixed_lows = np.median(np.stack(lows_list, axis=0), axis=0)
                 fixed_highs = np.median(np.stack(highs_list, axis=0), axis=0)
+            if global_norm and (fixed_lows is None or fixed_highs is None):
+                LOGGER.info("Global normalization skipped; falling back to per-tile normalization.")
 
         for window, row, col in progress_bar(
             generate_windows(width, height, tile, overlap),
@@ -2313,6 +2308,8 @@ def vectorize_predictions(
     out_path: Path,
     min_area: float,
     simplify_tol: Optional[float],
+    opening_size: int,
+    label_connectivity: int,
 ) -> Optional[Path]:
     """Convert binary mask into polygons and write to GeoPackage."""
     if fiona is None and gpd is None:
@@ -2321,10 +2318,15 @@ def vectorize_predictions(
 
     # Küçük gürültüleri temizlemek için binary opening (hızlı!)
     LOGGER.info("Küçük gürültüler temizleniyor...")
-    cleaned_mask = grey_opening(mask.astype(np.uint8), size=(3, 3))
+    k = max(1, int(opening_size))
+    cleaned_mask = grey_opening(mask.astype(np.uint8), size=(k, k))
     
     LOGGER.info("Etiketleme yapılıyor...")
-    structure = np.ones(LABEL_CONNECTIVITY_STRUCTURE, dtype=int)
+    # Connectivity: 4-neighbour (cross) or 8-neighbour (3x3 ones)
+    if int(label_connectivity) == 4:
+        structure = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=int)
+    else:
+        structure = np.ones((3, 3), dtype=int)
     labels, num_features = ndimage.label(cleaned_mask.astype(bool), structure=structure)
     if num_features == 0:
         LOGGER.info("No features above threshold; skipping vectorisation.")
@@ -2337,13 +2339,14 @@ def vectorize_predictions(
     pixel_counts = ndimage.sum(mask.astype(np.uint8), labels, index=label_ids)
     prob_sums = ndimage.sum(prob_map.astype(np.float32), labels, index=label_ids)
     
-    # Piksel tabanlı ön filtreleme: min_area'yı yaklaşık piksel sayısına çevir
+    # Piksel tabanlı ön filtreleme: min_area'yı piksel sayısına çevir
     # Transform'dan piksel boyutunu hesapla (m²)
     pixel_width = abs(transform[0])  # x yönünde piksel boyutu
     pixel_height = abs(transform[4])  # y yönünde piksel boyutu
     pixel_area = pixel_width * pixel_height  # piksel alanı (m²)
     
-    min_pixels = max(1, int(min_area / pixel_area * 0.5))  # Güvenli marj ile
+    from math import ceil
+    min_pixels = max(1, int(ceil(min_area / pixel_area)))
     valid_labels = pixel_counts >= min_pixels
     
     if not valid_labels.any():
@@ -2506,6 +2509,9 @@ def create_raster_metadata(
     nodata: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Create standardized raster metadata dictionary."""
+    # Choose predictor: 3 for floating point, 2 otherwise
+    _dtype = str(dtype).lower()
+    predictor_val = 3 if _dtype.startswith("float") else 2
     meta = {
         "driver": "GTiff",
         "height": height,
@@ -2515,6 +2521,10 @@ def create_raster_metadata(
         "crs": crs,
         "dtype": dtype,
         "compress": "deflate",
+        "tiled": True,
+        "blockxsize": 256,
+        "blockysize": 256,
+        "predictor": predictor_val,
     }
     if nodata is not None:
         meta["nodata"] = nodata
@@ -3357,6 +3367,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     out_path=vector_base,
                     min_area=config.min_area,
                     simplify_tol=config.simplify,
+                    opening_size=config.vector_opening_size,
+                    label_connectivity=config.label_connectivity,
                 )
                 if gpkg:
                     LOGGER.info("[%s] ✓ Vektör dosyası: %s", suffix, gpkg)
@@ -3688,6 +3700,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 out_path=out_base,
                 min_area=config.min_area,
                 simplify_tol=config.simplify,
+                opening_size=config.vector_opening_size,
+                label_connectivity=config.label_connectivity,
             )
             if vector_file:
                 LOGGER.info("    ✓ Vektör çıktısı (%s): %s", label, vector_file)
