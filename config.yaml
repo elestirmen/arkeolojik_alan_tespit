@@ -146,7 +146,7 @@ encoder: "resnet34"
 
 # encoders: ÇOKLU ENCODER modu
 # - "all"  : Tüm desteklenen encoder'ları kullan (ensemble öğrenme)
-# - "single" : Sadece yukarıdaki 'encoder' parametresini kullan
+# - "none" : Sadece yukarıdaki 'encoder' parametresini kullan
 # - CSV liste: Virgülle ayrılmış encoder listesi, örn: "resnet34,resnet50,efficientnet-b3"
 # ÇOKLU ENCODER AVANTAJLARI:
 #   + Ensemble (topluluk) öğrenme ile daha güvenilir sonuçlar
@@ -156,7 +156,7 @@ encoder: "resnet34"
 #   - Her encoder için ayrı model ağırlığı gerekebilir
 # ÖNERİ: Üretim için "all" veya 2-3 encoder kombinasyonu, test için "single"
 #encoders: "none"
-encoders: "resnet34,resnet50,efficientnet-b3"
+encoders: "resnet34,resnet50,efficientnet-b3,DenseNet121"
 
 
 # weights: TEK ENCODER için model ağırlık dosyası (.pth)
@@ -201,7 +201,7 @@ zero_shot_imagenet: true
 #   - 0.7  : Çok seçici (sadece çok güvenli tespitler)
 #   - 0.4  : Daha liberal (daha fazla aday bölge)
 # ÖNERİ: 0.5-0.6 arasında başlayın, sonuçlara göre ayarlayın
-th: 0.6
+th: 0.7
 
 
 # ============================================================================
@@ -235,7 +235,7 @@ classic_modes: "combo"
 #   + Hangi yöntemin hangi yapılarda daha iyi çalıştığını analiz edebilirsiniz
 #   - Daha fazla disk alanı kullanır
 # ÖNERİ: İlk analizlerde true yapın, sonra false yaparak disk tasarrufu edin
-classic_save_intermediate: true
+classic_save_intermediate: false
 
 # classic_th: Klasik yöntem olasılık eşiği
 # - Klasik olasılık haritasını ikili maskeye çevirmek için
@@ -248,6 +248,7 @@ classic_save_intermediate: true
 #   - Otsu çok fazla veya çok az tespit yapıyorsa
 #   - Belirli bir hassasiyet seviyesi istiyorsanız
 # ÖNERİ: Önce null (Otsu) deneyin, gerekirse manuel değer verin
+#classic_th: 0.7
 classic_th: null
 
 # ============================================================================
@@ -345,7 +346,7 @@ gaussian_lrm_sigma: 6.0
 #   - Model yok ama yükseklik verisi iyiyse: 0.3-0.4
 #   - Her ikisi de eşit kalitede: 0.5
 # ÖNERİ: 0.5 ile başlayın, sonuçlara göre ayarlayın
-alpha: 0.4
+alpha: 0.7
 
 # fuse_encoders: Çoklu encoder modunda hangi encoder'lar için fusion üretilecek
 # - "all"    : Tüm encoder'lar için ayrı fusion sonuçları üretir
@@ -443,7 +444,7 @@ yolo_weights: "yolo11s-seg.pt"
 #   - Dengeli sonuç istiyorsanız: 0.25-0.30
 #   - Sadece kesin tespitler istiyorsanız: 0.40-0.50
 # ÖNERİ: 0.25 ile başlayın, çok fazla/az tespit varsa ayarlayın
-yolo_conf: 0.25
+yolo_conf: 0.20
 
 # yolo_iou: NMS (Non-Maximum Suppression) IoU eşiği
 # - Değer aralığı: 0.0 - 1.0
@@ -564,7 +565,7 @@ tile: 1024
 #   - Orta overlap (256): Dengeli, önerilen (tile boyutunun ~%25'i)
 #   - Büyük overlap (512+): En iyi kalite ama çok yavaş
 # ÖNERİ: Tile boyutunun 1/4'ü kadar overlap kullanın (örn: tile=1024, overlap=256)
-overlap: 256
+overlap: 512
 
 # feather: Karo kenarlarında kosinüs yumuşatma (feathering)
 # - true: Karoların kenarlarına doğru tahminleri yumuşak geçiş ile karıştırır
