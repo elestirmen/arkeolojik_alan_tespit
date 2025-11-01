@@ -155,7 +155,8 @@ encoder: "resnet34"
 #   - Daha uzun çalışma süresi
 #   - Her encoder için ayrı model ağırlığı gerekebilir
 # ÖNERİ: Üretim için "all" veya 2-3 encoder kombinasyonu, test için "single"
-encoders: "none"
+#encoders: "none"
+encoders: "resnet34,resnet50,efficientnet-b3"
 
 
 # weights: TEK ENCODER için model ağırlık dosyası (.pth)
