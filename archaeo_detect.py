@@ -2488,6 +2488,7 @@ def vectorize_predictions(
     return out_path
 
 
+
 def parse_band_indexes(band_string: str) -> Tuple[int, int, int, int, int]:
     """Parse CSV band specification to integer tuple."""
     parts = [int(val.strip()) for val in band_string.split(",")]
