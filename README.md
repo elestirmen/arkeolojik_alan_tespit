@@ -1271,7 +1271,7 @@ in the Software without restriction...
 ## 📧 İletişim ve Destek
 
 - **Issues**: [GitHub Issues](https://github.com/your-username/arkeolojik_alan_tespit/issues)
-- **Email**: your.email@example.com
+- **Email**:ertugrularik@hotmail.com
 - **Dokümantasyon**: [Wiki](https://github.com/your-username/arkeolojik_alan_tespit/wiki)
 
 ---
@@ -1295,7 +1295,7 @@ Bu projeyi akademik çalışmanızda kullanırsanız lütfen alıntı yapın:
 ```bibtex
 @software{arkeolojik_alan_tespit,
   title = {Arkeolojik Alan Tespiti: Derin Öğrenme ve Klasik Görüntü İşleme},
-  author = {Your Name},
+  author = {Ahmet Ertuğrul Arık},
   year = {2025},
   url = {https://github.com/your-username/arkeolojik_alan_tespit}
 }
@@ -1332,7 +1332,7 @@ Bu projeyi akademik çalışmanızda kullanırsanız lütfen alıntı yapın:
 
 **⭐ Projeyi beğendiyseniz yıldız vermeyi unutmayın! ⭐**
 
-Geliştirici: [Your Name]  
+Geliştirici: [Ahmet Ertuğruk Arık]  
 Son Güncelleme: Ekim 2025
 
 </div>
