@@ -1311,26 +1311,11 @@ Bu projeyi akademik çalışmanızda kullanırsanız lütfen alıntı yapın:
 
 ---
 
-## 🗺️ Yol Haritası (Roadmap)
-
-### Versiyon 2.0 (Planlanıyor)
-- [ ] Web tabanlı GUI
-- [ ] Real-time processing
-- [ ] 3D görselleştirme
-- [ ] Otomatik model eğitimi
-- [ ] Cloud processing desteği
-
-### Versiyon 1.5 (Yakında)
-- [ ] Docker container
-- [ ] REST API
-- [ ] Batch processing GUI
-- [ ] Çoklu dil desteği
 
 ---
 
 <div align="center">
 
-**⭐ Projeyi beğendiyseniz yıldız vermeyi unutmayın! ⭐**
 
 Geliştirici: [Ahmet Ertuğruk Arık]  
 Son Güncelleme: Ekim 2025
