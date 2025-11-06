@@ -1259,7 +1259,7 @@ Bu proje [MIT Lisansı](LICENSE) altında lisanslanmıştır.
 ```
 MIT License
 
-Copyright (c) 2025 [Your Name]
+Copyright (c) 2025 [Ahmet Ertuğrul Arık]
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -1270,9 +1270,9 @@ in the Software without restriction...
 
 ## 📧 İletişim ve Destek
 
-- **Issues**: [GitHub Issues](https://github.com/your-username/arkeolojik_alan_tespit/issues)
+- **Issues**: [GitHub Issues](https://github.com/elestirmen/arkeolojik_alan_tespit/issues)
 - **Email**:ertugrularik@hotmail.com
-- **Dokümantasyon**: [Wiki](https://github.com/your-username/arkeolojik_alan_tespit/wiki)
+- **Dokümantasyon**: [Wiki](https://github.com/elestirmen/arkeolojik_alan_tespit/wiki)
 
 ---
 
