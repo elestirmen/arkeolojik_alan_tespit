@@ -1,8 +1,6 @@
 # ============================================================================
-# Arkeolojik Alan Tespiti - Bağımlılıklar
-# ============================================================================
-# Bu dosya projenin çalışması için gerekli Python paketlerini listeler.
-# Kurulum: pip install -r requirements.txt
+# Arkeolojik Alan Tespiti - Base (9 Kanallı Derin Öğrenme)
+# Bağımlılıklar
 # ============================================================================
 
 # Temel bilimsel hesaplama
@@ -25,9 +23,7 @@ geopandas>=0.12.0,<1.0.0
 shapely>=2.0.0,<3.0.0
 pyproj>=3.5.0,<4.0.0
 
-# Relief Visualization Toolbox (SVF/LRM/Openness türevleri için)
-# Python < 3.11 için eski rvt-py wheels kullanın
-# Python >= 3.11 için yeni rvt paket adını kullanın
+# Relief Visualization Toolbox
 rvt-py>=2.2.0; python_version < "3.11"
 rvt>=2.0.0; python_version >= "3.11"
 
@@ -35,7 +31,7 @@ rvt>=2.0.0; python_version >= "3.11"
 tqdm>=4.65.0,<5.0.0
 pyyaml>=6.0,<7.0.0
 
-# Opsiyonel: YOLO11 desteği için
+# Opsiyonel: YOLO11 desteği
 # ultralytics>=8.1.0,<9.0.0
 
 # Opsiyonel: Test için

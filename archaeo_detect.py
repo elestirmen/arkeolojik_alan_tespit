@@ -2765,7 +2765,9 @@ def get_cache_path(input_path: Path, cache_dir: Optional[str] = None) -> Path:
     if cache_dir:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
-        return cache_path / f"{input_path.stem}_derivatives.npz"
+        # Dosya adını uzantısız al ve .derivatives.npz ekle
+        # Örn: kesif_alani.tif -> kesif_alani.derivatives.npz
+        return cache_path / f"{input_path.stem}.derivatives.npz"
     return input_path.with_suffix(".derivatives.npz")
 
 
@@ -2839,6 +2841,9 @@ def validate_cache(
     NOT: tile ve overlap parametreleri cache geçerliliğini ETKİLEMEZ!
     RVT türevleri tüm raster için bir kez hesaplanır, tile/overlap sadece
     model inference sırasında kullanılır.
+    
+    NOT: Dosya yolu değişse bile, dosya adı ve mtime aynıysa cache geçerlidir.
+    Bu, dosyaların farklı dizinlere taşınması durumunda cache'in kullanılabilmesini sağlar.
     """
     required_keys = ["input_path", "input_mtime", "bands", "shape"]
     
@@ -2846,15 +2851,27 @@ def validate_cache(
         LOGGER.warning("Cache metadata eksik")
         return False
     
-    # Dosya değişmiş mi?
-    current_mtime = input_path.stat().st_mtime
-    if abs(metadata["input_mtime"] - current_mtime) > 1.0:
-        LOGGER.warning("Girdi dosyası değişmiş, cache geçersiz")
+    # Dosya adı kontrolü (yol değişse bile dosya adı aynı olmalı)
+    cached_path = Path(metadata["input_path"])
+    if cached_path.name != input_path.name:
+        LOGGER.warning(f"Cache dosya adı uyuşmuyor: cache'deki={cached_path.name}, mevcut={input_path.name}")
+        return False
+    
+    # Dosya değişmiş mi? (mtime kontrolü - dosya taşınsa bile mtime genelde aynı kalır)
+    try:
+        current_mtime = input_path.stat().st_mtime
+        cached_mtime = metadata["input_mtime"]
+        # 2 saniye tolerans (dosya sistemi zamanlama farkları için)
+        if abs(cached_mtime - current_mtime) > 2.0:
+            LOGGER.warning(f"Girdi dosyası değişmiş, cache geçersiz (mtime farkı: {abs(cached_mtime - current_mtime):.1f} saniye)")
+            return False
+    except (OSError, FileNotFoundError) as e:
+        LOGGER.warning(f"Girdi dosyası kontrol edilemedi: {e}")
         return False
     
     # Bant sırası aynı mı?
     if metadata["bands"] != list(bands):
-        LOGGER.warning("Bant sırası değişmiş, cache geçersiz")
+        LOGGER.warning(f"Bant sırası değişmiş, cache geçersiz (cache: {metadata['bands']}, mevcut: {list(bands)})")
         return False
     
     LOGGER.info("Cache geçerli ✓")

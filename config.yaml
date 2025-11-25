@@ -13,7 +13,7 @@
 #      Örnek: python archaeo_detect.py --th 0.7 --tile 512
 #
 # NOT: Tüm dosya yolları proje kök dizinine göre görecelidir.
-# Proje dizini: C:\d_surucusu\arkeolojik_alan_tespit
+# Proje dizini: C:\d_surucusu\arkeolojik_alan_tespit\archaeo_detect_base
 # ============================================================================
 
 
