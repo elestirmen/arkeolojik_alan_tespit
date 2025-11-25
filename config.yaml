@@ -727,6 +727,21 @@ label_connectivity: 8          # Bileşen etiketlemede bağlanırlık (4 veya 8)
 # ÖNERİ: GPU varsa ve bellek sıkıntısı yaşıyorsanız true yapın
 half: false  # CUDA yoksa otomatik float32'ye düşer; CUDA varsa performans için önerilir
 
+# device: Hesaplama cihazı seçimi
+# - null     : Otomatik (CUDA varsa GPU, yoksa CPU)
+# - "cuda"   : NVIDIA GPU kullan (CUDA destekli)
+# - "cuda:0" : İlk GPU'yu kullan
+# - "cuda:1" : İkinci GPU'yu kullan (çoklu GPU sistemlerinde)
+# - "cpu"    : CPU'yu zorla kullan
+# - "mps"    : Apple Silicon (M1/M2/M3) GPU (MacOS)
+# KULLANIM SENARYOLARI:
+#   - GPU'nuz varsa: null (otomatik en iyisini seçer)
+#   - Çoklu GPU sistemi: "cuda:0" veya "cuda:1"
+#   - GPU sorunlu veya yok: "cpu"
+#   - MacOS M1/M2: "mps"
+# ÖNERİ: null bırakın, sistem otomatik olarak en iyi cihazı seçer
+device: null
+
 # seed: Rastgelelik tohumu (reproducibility için)
 # - Tüm rastgele işlemler bu tohum ile başlatılır
 # - Aynı tohum = aynı sonuçlar (tekrarlanabilirlik)

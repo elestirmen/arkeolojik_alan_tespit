@@ -129,12 +129,12 @@ def install_gdal_warning_filter() -> None:
 
     def _handler(err_class: int, err_num: int, err_msg: str) -> None:
         if any(err_msg.startswith(prefix) for prefix in _SUPPRESSED_GDAL_MESSAGES):
-            LOGGER.debug("Suppressed GDAL warning: %s", err_msg)
+            LOGGER.debug("GDAL uyarısı bastırıldı: %s", err_msg)
             return
         try:
             gdal.CPLDefaultErrorHandler(err_class, err_num, err_msg)
         except AttributeError:  # pragma: no cover - safety for stripped bindings
-            LOGGER.warning("GDAL warning: %s", err_msg)
+            LOGGER.warning("GDAL uyarısı: %s", err_msg)
 
     gdal.PushErrorHandler(_handler)
     _GDAL_HANDLER_INSTALLED = True
@@ -398,12 +398,110 @@ class PipelineDefaults:
         default=False,
         metadata={"help": "Mevcut cache'i yoksay ve RVT türevlerini yeniden hesapla"},
     )
+    
+    # ===== CİHAZ SEÇİMİ =====
+    device: Optional[str] = field(
+        default=None,
+        metadata={"help": "Hesaplama cihazı: 'cuda', 'cpu', 'cuda:0', vb. None ise otomatik seçilir (CUDA varsa GPU)"},
+    )
+    
+    def __post_init__(self) -> None:
+        """Konfigürasyon değerlerini doğrula ve geçersiz değerlerde hata fırlat."""
+        errors: List[str] = []
+        
+        # Eşik değerleri kontrolü (0-1 aralığı)
+        if not 0.0 <= self.th <= 1.0:
+            errors.append(f"th değeri 0-1 arasında olmalı, verilen: {self.th}")
+        
+        if self.classic_th is not None and not 0.0 <= self.classic_th <= 1.0:
+            errors.append(f"classic_th değeri 0-1 arasında olmalı, verilen: {self.classic_th}")
+        
+        if not 0.0 <= self.alpha <= 1.0:
+            errors.append(f"alpha değeri 0-1 arasında olmalı, verilen: {self.alpha}")
+        
+        if not 0.0 <= self.yolo_conf <= 1.0:
+            errors.append(f"yolo_conf değeri 0-1 arasında olmalı, verilen: {self.yolo_conf}")
+        
+        if not 0.0 <= self.yolo_iou <= 1.0:
+            errors.append(f"yolo_iou değeri 0-1 arasında olmalı, verilen: {self.yolo_iou}")
+        
+        # Pozitif değer kontrolleri
+        if self.tile <= 0:
+            errors.append(f"tile pozitif olmalı, verilen: {self.tile}")
+        
+        if self.overlap < 0:
+            errors.append(f"overlap negatif olamaz, verilen: {self.overlap}")
+        
+        if self.overlap >= self.tile:
+            errors.append(f"overlap ({self.overlap}) tile'dan ({self.tile}) küçük olmalı")
+        
+        if self.yolo_imgsz <= 0:
+            errors.append(f"yolo_imgsz pozitif olmalı, verilen: {self.yolo_imgsz}")
+        
+        if self.yolo_tile is not None and self.yolo_tile <= 0:
+            errors.append(f"yolo_tile pozitif olmalı, verilen: {self.yolo_tile}")
+        
+        if self.norm_sample_tiles <= 0:
+            errors.append(f"norm_sample_tiles pozitif olmalı, verilen: {self.norm_sample_tiles}")
+        
+        if self.min_area < 0:
+            errors.append(f"min_area negatif olamaz, verilen: {self.min_area}")
+        
+        if self.simplify is not None and self.simplify < 0:
+            errors.append(f"simplify negatif olamaz, verilen: {self.simplify}")
+        
+        # Persentil değerleri kontrolü
+        if not 0.0 <= self.percentile_low <= 100.0:
+            errors.append(f"percentile_low 0-100 arasında olmalı, verilen: {self.percentile_low}")
+        
+        if not 0.0 <= self.percentile_high <= 100.0:
+            errors.append(f"percentile_high 0-100 arasında olmalı, verilen: {self.percentile_high}")
+        
+        if self.percentile_low >= self.percentile_high:
+            errors.append(f"percentile_low ({self.percentile_low}) percentile_high'dan ({self.percentile_high}) küçük olmalı")
+        
+        # Connectivity kontrolü
+        if self.label_connectivity not in (4, 8):
+            errors.append(f"label_connectivity 4 veya 8 olmalı, verilen: {self.label_connectivity}")
+        
+        # Verbose seviyesi
+        if self.verbose < 0 or self.verbose > 2:
+            errors.append(f"verbose 0-2 arasında olmalı, verilen: {self.verbose}")
+        
+        # Cihaz kontrolü
+        if self.device is not None:
+            valid_devices = {"cpu", "cuda", "mps"}
+            device_base = self.device.split(":")[0].lower()
+            if device_base not in valid_devices and not device_base.startswith("cuda"):
+                errors.append(f"device geçersiz: {self.device}. Geçerli değerler: 'cpu', 'cuda', 'cuda:0', 'mps'")
+        
+        # Sigma ve radii kontrolleri
+        if len(self.sigma_scales) == 0:
+            errors.append("sigma_scales en az bir değer içermeli")
+        if any(s <= 0 for s in self.sigma_scales):
+            errors.append("sigma_scales tüm değerleri pozitif olmalı")
+        
+        if len(self.morphology_radii) == 0:
+            errors.append("morphology_radii en az bir değer içermeli")
+        if any(r <= 0 for r in self.morphology_radii):
+            errors.append("morphology_radii tüm değerleri pozitif olmalı")
+        
+        if len(self.rvt_radii) == 0:
+            errors.append("rvt_radii en az bir değer içermeli")
+        if any(r <= 0 for r in self.rvt_radii):
+            errors.append("rvt_radii tüm değerleri pozitif olmalı")
+        
+        # Tüm hataları topla ve fırlat
+        if errors:
+            error_msg = "Konfigürasyon doğrulama hataları:\n" + "\n".join(f"  - {e}" for e in errors)
+            raise ValueError(error_msg)
 
 
 DEFAULTS = PipelineDefaults()
 
 
-def default_for(name: str):
+def default_for(name: str) -> Any:
+    """PipelineDefaults'tan verilen isimli varsayılan değeri döndür."""
     return getattr(DEFAULTS, name)
 
 
@@ -807,7 +905,7 @@ def compute_derivatives_with_rvt(
                     return arrays[0], arrays[1]
                 if len(arrays) == 1:
                     return arrays[0], arrays[0]
-                LOGGER.warning("RVT openness dict lacked array values; using zeros.")
+                LOGGER.warning("RVT openness dict değeri array içermiyor; sıfır kullanılıyor.")
             # sequence case
             if isinstance(res, (list, tuple)):
                 seq = list(res)
@@ -819,13 +917,13 @@ def compute_derivatives_with_rvt(
                 if len(seq) == 1:
                     arr = _as_float32_array(seq[0], "openness")
                     return arr, arr
-                LOGGER.warning("RVT openness sequence empty; using zeros.")
+                LOGGER.warning("RVT openness dizisi boş; sıfır kullanılıyor.")
             # single array case
             try:
                 arr = _as_float32_array(res, "openness")
                 return arr, arr
             except Exception:
-                LOGGER.warning("RVT openness returned unsupported type; using zeros.")
+                LOGGER.warning("RVT openness desteklenmeyen tip döndürdü; sıfır kullanılıyor.")
         # fallback if no openness available
         zeros = np.zeros_like(dtm_filled, dtype=np.float32)
         return zeros, zeros
@@ -897,7 +995,7 @@ def compute_derivatives_with_rvt(
             except Exception as e:  # pragma: no cover - defensive
                 raise e
     else:
-        LOGGER.warning("rvt.vis.slope missing; using gradient-based fallback.")
+        LOGGER.warning("rvt.vis.slope eksik; gradyan tabanlı fallback kullanılıyor.")
         # Compute slope in degrees: arctan(sqrt((dz/dx)^2 + (dz/dy)^2))
         # Use filled DTM to avoid NaNs breaking gradient
         gy, gx = np.gradient(dtm_filled.astype(np.float32), pixel_size, pixel_size)
@@ -1299,11 +1397,11 @@ def infer_tiled(
     def log_rgb_only_once() -> None:
         nonlocal rgb_only_log_emitted
         if rgb_only and not rgb_only_log_emitted:
-            LOGGER.info("RGB-only mode active: derivative channels are zero-filled; effective input is RGB.")
+            LOGGER.info("RGB-only modu aktif: türev kanalları sıfırla dolduruldu; efektif girdi sadece RGB.")
             rgb_only_log_emitted = True
 
     if mask_talls is not None and band_idx[3] <= 0:
-        LOGGER.warning("Tall-object masking requested but DSM band missing; disabling.")
+        LOGGER.warning("Yüksek obje maskeleme istendi ama DSM bandı eksik; devre dışı bırakılıyor.")
         mask_talls = None
 
     with rasterio.open(input_path) as src:
@@ -1423,7 +1521,7 @@ def infer_tiled(
                 fixed_lows = np.median(np.stack(lows_list, axis=0), axis=0)
                 fixed_highs = np.median(np.stack(highs_list, axis=0), axis=0)
             if global_norm and (fixed_lows is None or fixed_highs is None):
-                LOGGER.info("Global normalization skipped; falling back to per-tile normalization.")
+                LOGGER.info("Global normalizasyon atlandı; karo başına normalizasyona geçiliyor.")
 
         for window, row, col in progress_bar(
             generate_windows(width, height, tile, overlap),
@@ -1610,6 +1708,11 @@ def infer_tiled(
             prob_path=prob_path,
             mask_path=mask_path,
         )
+
+    # GPU belleğini temizle (bellek sızıntısını önle)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        LOGGER.debug("GPU belleği temizlendi")
 
     return InferenceOutputs(
         prob_path=prob_path,
@@ -1958,7 +2061,7 @@ def infer_yolo_tiled(
                 valid_global[row_slice, col_slice] |= valid_tile
                 
             except Exception as e:
-                LOGGER.warning("YOLO inference failed for tile at row=%d, col=%d: %s", row, col, e)
+                LOGGER.warning("YOLO inference başarısız oldu (satır=%d, sütun=%d): %s", row, col, e)
                 continue
         
         # Normalize accumulated probabilities
@@ -2045,6 +2148,11 @@ def infer_yolo_tiled(
         elif save_labels and not all_detections:
             LOGGER.info("YOLO11 hiç tespit bulamadı, etiketli çıktı yok")
         
+        # GPU belleğini temizle (bellek sızıntısını önle)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            LOGGER.debug("GPU belleği temizlendi (YOLO)")
+
         return YoloOutputs(
             prob_path=prob_path,
             mask_path=mask_path,
@@ -2313,7 +2421,7 @@ def vectorize_predictions(
 ) -> Optional[Path]:
     """Convert binary mask into polygons and write to GeoPackage."""
     if fiona is None and gpd is None:
-        LOGGER.warning("Vector output skipped; install geopandas or fiona for vectorisation.")
+        LOGGER.warning("Vektör çıktısı atlandı; vektörleştirme için geopandas veya fiona yükleyin.")
         return None
 
     # Küçük gürültüleri temizlemek için binary opening (hızlı!)
@@ -2329,7 +2437,7 @@ def vectorize_predictions(
         structure = np.ones((3, 3), dtype=int)
     labels, num_features = ndimage.label(cleaned_mask.astype(bool), structure=structure)
     if num_features == 0:
-        LOGGER.info("No features above threshold; skipping vectorisation.")
+        LOGGER.info("Eşik üstünde özellik bulunamadı; vektörleştirme atlanıyor.")
         return None
 
     LOGGER.info("Tespit edilen özellik sayısı: %d", num_features)
@@ -2961,6 +3069,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("half", "(use --no-half to force float32 even when CUDA is present)."),
     )
     parser.add_argument(
+        "--device",
+        type=str,
+        default=default_for("device"),
+        help=cli_help("device", "Örnek: 'cuda', 'cpu', 'cuda:0'. None ise otomatik seçilir."),
+    )
+    parser.add_argument(
         "--global-norm",
         action=argparse.BooleanOptionalAction,
         default=default_for("global_norm"),
@@ -3254,10 +3368,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         else:
             resolved_classic_modes = tuple(m.lower() for m in raw_modes)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    LOGGER.info("Using device: %s", device)
+    # Cihaz seçimi: CLI/config'den alınır veya otomatik belirlenir
+    if config.device:
+        device = torch.device(config.device)
+        if device.type == "cuda" and not torch.cuda.is_available():
+            LOGGER.warning("CUDA istendi ama kullanılamıyor; CPU'ya geçiliyor.")
+            device = torch.device("cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    LOGGER.info("Kullanılan cihaz: %s", device)
     if config.half and device.type != "cuda":
-        LOGGER.warning("--half requested but CUDA not available; running in float32.")
+        LOGGER.warning("--half istendi ama CUDA kullanılamıyor; float32 ile çalışılacak.")
 
     # Cache yönetimi - Multi-encoder için RVT türevlerini önceden hesapla
     precomputed_deriv: Optional[PrecomputedDerivatives] = None
