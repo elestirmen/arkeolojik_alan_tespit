@@ -138,7 +138,7 @@ class ArchaeologyDataset(Dataset):
         self,
         data_dir: Path,
         augment: bool = True,
-        file_format: str = "npy",
+        file_format: str = "npz",
     ):
         """
         Args:

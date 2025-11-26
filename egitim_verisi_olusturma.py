@@ -83,7 +83,8 @@ def create_training_tiles(
     max_nodata_ratio: float = 0.3,
     train_ratio: float = 0.8,
     normalize: bool = True,
-    save_format: str = "npy",
+    save_format: str = "npz",
+    balance_ratio: Optional[float] = 0.3,
 ) -> dict:
     """
     GeoTIFF'ten 12 kanallı eğitim tile'ları oluşturur.
@@ -101,6 +102,10 @@ def create_training_tiles(
         train_ratio: Eğitim/doğrulama bölme oranı
         normalize: Tile'ları normalize et
         save_format: Kayıt formatı ("npy" veya "npz")
+        balance_ratio: Pozitif/negatif dengeleme oranı (0-1). 
+                       None = dengeleme yok, tüm tile'lar kullanılır.
+                       Örn: 0.4 = %40 pozitif, %60 negatif.
+                       Önerilen: 0.4 (hafif dengeli)
         
     Returns:
         İstatistik sözlüğü
@@ -126,6 +131,12 @@ def create_training_tiles(
         "skipped_empty": 0,
         "positive_tiles": 0,
         "negative_tiles": 0,
+        "balanced_selection": balance_ratio is not None,
+        "original_positive_count": 0,
+        "original_negative_count": 0,
+        "selected_positive_count": 0,
+        "selected_negative_count": 0,
+        "discarded_negative_count": 0,
     }
     
     LOGGER.info("=" * 60)
@@ -138,6 +149,10 @@ def create_training_tiles(
     LOGGER.info(f"Örtüşme: {overlap}")
     LOGGER.info(f"Bant sırası: {bands}")
     LOGGER.info(f"TPI yarıçapları: {tpi_radii}")
+    if balance_ratio is not None:
+        LOGGER.info(f"Dengeli seçim: Aktif (hedef: %{balance_ratio*100:.0f} pozitif, %{(1-balance_ratio)*100:.0f} negatif)")
+    else:
+        LOGGER.info(f"Dengeli seçim: Kapalı (tüm tile'lar kullanılacak)")
     LOGGER.info("=" * 60)
     
     with rasterio.open(input_tif) as src, rasterio.open(mask_tif) as mask_src:
@@ -165,16 +180,82 @@ def create_training_tiles(
         total_windows = len(windows)
         LOGGER.info(f"Toplam potansiyel tile sayısı: {total_windows}")
         
+        # Dengeli seçim için önce pozitif/negatif tile'ları ayır
+        if balance_ratio is not None:
+            LOGGER.info("\nTile'lar pozitif/negatif olarak analiz ediliyor...")
+            positive_windows = []
+            negative_windows = []
+            
+            for row_off, col_off in tqdm(windows, desc="Analiz"):
+                window = Window(col_off, row_off, tile_size, tile_size)
+                
+                # Sadece maske kontrolü (hızlı)
+                try:
+                    mask = mask_src.read(1, window=window).astype(np.float32)
+                    positive_ratio = np.sum(mask > 0) / mask.size
+                    
+                    if positive_ratio >= min_positive_ratio:
+                        positive_windows.append((row_off, col_off))
+                    else:
+                        negative_windows.append((row_off, col_off))
+                except Exception:
+                    continue
+            
+            stats["original_positive_count"] = len(positive_windows)
+            stats["original_negative_count"] = len(negative_windows)
+            
+            LOGGER.info(f"Pozitif tile (içerik var): {len(positive_windows)}")
+            LOGGER.info(f"Negatif tile (sadece arka plan): {len(negative_windows)}")
+            
+            # Negatif tile'ları örnekle
+            if len(positive_windows) > 0:
+                target_negative_count = int(len(positive_windows) * (1 - balance_ratio) / balance_ratio)
+                target_negative_count = min(target_negative_count, len(negative_windows))
+                
+                np.random.seed(42)
+                if target_negative_count < len(negative_windows):
+                    sampled_indices = np.random.choice(
+                        len(negative_windows),
+                        size=target_negative_count,
+                        replace=False
+                    )
+                    selected_negative = [negative_windows[i] for i in sampled_indices]
+                    stats["discarded_negative_count"] = len(negative_windows) - target_negative_count
+                else:
+                    selected_negative = negative_windows
+                    stats["discarded_negative_count"] = 0
+                
+                stats["selected_positive_count"] = len(positive_windows)
+                stats["selected_negative_count"] = len(selected_negative)
+                
+                # Birleştir ve karıştır
+                all_windows = positive_windows + selected_negative
+                np.random.seed(42)
+                np.random.shuffle(all_windows)
+                
+                LOGGER.info(f"\nDengeli seçim sonucu:")
+                LOGGER.info(f"  Seçilen pozitif: {len(positive_windows)}")
+                LOGGER.info(f"  Seçilen negatif: {len(selected_negative)}")
+                LOGGER.info(f"  Atılan negatif: {stats['discarded_negative_count']}")
+                LOGGER.info(f"  Toplam seçilen: {len(all_windows)}")
+                if len(all_windows) > 0:
+                    actual_ratio = len(positive_windows) / len(all_windows)
+                    LOGGER.info(f"  Gerçek pozitif oranı: %{actual_ratio*100:.1f}")
+            else:
+                LOGGER.warning("Pozitif tile bulunamadı! Tüm tile'lar kullanılacak.")
+                all_windows = windows
+        else:
+            # Dengeli seçim yok, tüm tile'ları kullan
+            all_windows = windows
+        
         # Rastgele karıştır (train/val bölme için)
         np.random.seed(42)
-        np.random.shuffle(windows)
+        np.random.shuffle(all_windows)
         
-        train_count = int(len(windows) * train_ratio)
-        
-        all_tiles = []
+        train_count = int(len(all_windows) * train_ratio)
         
         LOGGER.info("\nTile'lar işleniyor...")
-        for idx, (row_off, col_off) in enumerate(tqdm(windows, desc="İşleniyor")):
+        for idx, (row_off, col_off) in enumerate(tqdm(all_windows, desc="İşleniyor")):
             window = Window(col_off, row_off, tile_size, tile_size)
             
             # Maske oku
@@ -312,6 +393,15 @@ def create_training_tiles(
     LOGGER.info(f"Negatif tile (arka plan): {stats['negative_tiles']}")
     LOGGER.info(f"Atlanan (nodata): {stats['skipped_nodata']}")
     LOGGER.info(f"Atlanan (boş): {stats['skipped_empty']}")
+    
+    if stats.get("balanced_selection", False):
+        LOGGER.info("\nDengeli Seçim İstatistikleri:")
+        LOGGER.info(f"  Orijinal pozitif: {stats.get('original_positive_count', 0)}")
+        LOGGER.info(f"  Orijinal negatif: {stats.get('original_negative_count', 0)}")
+        LOGGER.info(f"  Seçilen pozitif: {stats.get('selected_positive_count', 0)}")
+        LOGGER.info(f"  Seçilen negatif: {stats.get('selected_negative_count', 0)}")
+        LOGGER.info(f"  Atılan negatif: {stats.get('discarded_negative_count', 0)}")
+    
     LOGGER.info("=" * 60)
     LOGGER.info(f"Çıktı dizini: {output_dir}")
     LOGGER.info(f"  → Eğitim görüntüleri: {train_images_dir}")
@@ -449,8 +539,15 @@ def main():
         "--format",
         type=str,
         choices=["npy", "npz"],
-        default="npy",
+        default="npz",
         help="Kayıt formatı",
+    )
+    parser.add_argument(
+        "--balance-ratio",
+        type=float,
+        default=None,
+        help="Pozitif/negatif dengeleme oranı (0-1). Örn: 0.4 = %%40 pozitif, %%60 negatif. "
+             "None = dengeleme yok. Önerilen: 0.4 (hafif dengeli)",
     )
     
     args = parser.parse_args()
@@ -510,6 +607,7 @@ def main():
             train_ratio=args.train_ratio,
             normalize=not args.no_normalize,
             save_format=args.format,
+            balance_ratio=args.balance_ratio,
         )
     except Exception as e:
         LOGGER.error(f"Hata: {e}")
