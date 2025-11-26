@@ -24,6 +24,7 @@ This project combines **deep learning** and **classical image processing** metho
 - [⚡ Performance Optimization](#-performance-optimization)
 - [🐛 Troubleshooting](#-troubleshooting)
 - [❓ FAQ](#-faq)
+- [🎓 Model Training Guide](#-model-training-guide)
 - [🔬 Advanced Features](#-advanced-features)
 - [📚 Technical Details](#-technical-details)
 - [🤝 Contributing](#-contributing)
@@ -1106,15 +1107,67 @@ A: Yes, input CRS is preserved and transferred to output.
 
 ---
 
-## 🔬 Advanced Features
+## 🎓 Model Training Guide
 
-### Custom Model Training
+This section provides a comprehensive guide for training custom models with your own labeled data.
 
-The project includes two dedicated scripts for training custom models with 12-channel input:
+### 📋 Prerequisites
 
-#### Step 1: Create Training Data
+Before training, you need:
+- ✅ GeoTIFF files with RGB + DSM + DTM bands
+- ✅ Ground truth mask files (GeoTIFF format)
+  - Archaeological areas = 1 (white)
+  - Background = 0 (black)
+- ✅ Python environment with all dependencies installed
+- ✅ GPU recommended (but CPU training is possible)
 
-Use `egitim_verisi_olusturma.py` to generate 12-channel training tiles from your GeoTIFF files:
+### 🛠️ Step 1: Prepare Ground Truth Masks
+
+Create binary mask files where:
+- **Value 1 (white)**: Archaeological sites/structures
+- **Value 0 (black)**: Background/non-archaeological areas
+
+**Example using QGIS:**
+1. Load your RGB orthophoto
+2. Create a new polygon layer
+3. Digitize archaeological features
+4. Export as GeoTIFF with single band (0/1 values)
+
+**Example using Python:**
+```python
+import rasterio
+import numpy as np
+from rasterio.transform import from_bounds
+
+# Create a simple binary mask
+# (Replace with your actual digitization workflow)
+mask = np.zeros((height, width), dtype=np.uint8)
+# Set archaeological areas to 1
+mask[archaeological_areas] = 1
+
+# Save as GeoTIFF
+with rasterio.open('ground_truth.tif', 'w',
+                   driver='GTiff',
+                   height=height, width=width,
+                   count=1, dtype=mask.dtype,
+                   crs=crs, transform=transform) as dst:
+    dst.write(mask, 1)
+```
+
+### 📦 Step 2: Create Training Data
+
+Use `egitim_verisi_olusturma.py` to generate 12-channel training tiles:
+
+#### Basic Usage
+
+```bash
+python egitim_verisi_olusturma.py \
+  --input kesif_alani.tif \
+  --mask ground_truth.tif \
+  --output training_data
+```
+
+#### Advanced Options
 
 ```bash
 python egitim_verisi_olusturma.py \
@@ -1122,36 +1175,83 @@ python egitim_verisi_olusturma.py \
   --mask ground_truth.tif \
   --output training_data \
   --tile-size 256 \
-  --overlap 64
+  --overlap 64 \
+  --train-ratio 0.8 \
+  --min-positive 0.01 \
+  --max-nodata 0.3
 ```
 
+**Parameters Explained:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--input` | Required | Input GeoTIFF (RGB + DSM + DTM) |
+| `--mask` | Required | Ground truth mask (binary GeoTIFF) |
+| `--output` | `training_data` | Output directory |
+| `--tile-size` | `256` | Tile size in pixels |
+| `--overlap` | `64` | Overlap between tiles |
+| `--train-ratio` | `0.8` | Train/validation split ratio |
+| `--min-positive` | `0.0` | Minimum positive pixel ratio (filter empty tiles) |
+| `--max-nodata` | `0.3` | Maximum nodata ratio (filter invalid tiles) |
+| `--format` | `npy` | File format (`npy` or `npz`) |
+
+**What Happens:**
+
+1. **Band Reading**: Reads RGB, DSM, DTM from input GeoTIFF
+2. **RVT Calculation**: Computes SVF, Openness, LRM, Slope
+3. **Advanced Features**: Calculates Curvature (Plan + Profile) and TPI
+4. **Tile Generation**: Creates overlapping tiles with specified size
+5. **Normalization**: Applies robust percentile-based normalization
+6. **Train/Val Split**: Automatically splits tiles into train/validation sets
+7. **Metadata Export**: Saves dataset information to `metadata.json`
+
 **Output Structure:**
+
 ```
 training_data/
 ├── train/
-│   ├── images/    # 12-channel tiles (.npy)
-│   └── masks/     # Ground truth masks (.npy)
+│   ├── images/
+│   │   ├── tile_00000_00000.npy  # 12-channel array (12, 256, 256)
+│   │   ├── tile_00000_00192.npy
+│   │   └── ...
+│   └── masks/
+│       ├── tile_00000_00000.npy  # Binary mask (256, 256)
+│       ├── tile_00000_00192.npy
+│       └── ...
 ├── val/
 │   ├── images/
 │   └── masks/
 └── metadata.json  # Dataset information
 ```
 
-**Channel Structure (12 channels):**
-- [0-2]: RGB
-- [3]: SVF (Sky-View Factor)
-- [4]: Positive Openness
-- [5]: Negative Openness
-- [6]: LRM (Local Relief Model)
-- [7]: Slope
-- [8]: nDSM
-- [9]: Plan Curvature
-- [10]: Profile Curvature
-- [11]: TPI (Topographic Position Index)
+**Channel Order (12 channels):**
 
-#### Step 2: Train Model
+```
+[0]  Red
+[1]  Green
+[2]  Blue
+[3]  SVF (Sky-View Factor)
+[4]  Positive Openness
+[5]  Negative Openness
+[6]  LRM (Local Relief Model)
+[7]  Slope
+[8]  nDSM (normalized DSM)
+[9]  Plan Curvature
+[10] Profile Curvature
+[11] TPI (Topographic Position Index)
+```
+
+### 🚀 Step 3: Train the Model
 
 Use `training.py` to train your custom model:
+
+#### Basic Training
+
+```bash
+python training.py --data training_data
+```
+
+#### Advanced Training with Custom Settings
 
 ```bash
 python training.py \
@@ -1160,54 +1260,200 @@ python training.py \
   --encoder resnet34 \
   --epochs 50 \
   --batch-size 8 \
-  --lr 1e-4
+  --lr 1e-4 \
+  --loss combined \
+  --patience 10
 ```
 
-**Features:**
-- ✅ CBAM Attention support (enabled by default)
-- ✅ Multiple loss functions (BCE, Dice, Combined, Focal)
-- ✅ Mixed precision training (AMP)
-- ✅ Early stopping
-- ✅ Model checkpointing
-- ✅ Training history logging
+**Parameters Explained:**
 
-**Using Trained Model:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--data` | `training_data` | Training data directory |
+| `--arch` | `Unet` | Architecture (Unet, UnetPlusPlus, DeepLabV3Plus, etc.) |
+| `--encoder` | `resnet34` | Encoder (resnet34, resnet50, efficientnet-b3, etc.) |
+| `--epochs` | `50` | Number of training epochs |
+| `--batch-size` | `8` | Batch size (adjust based on GPU memory) |
+| `--lr` | `1e-4` | Learning rate |
+| `--loss` | `combined` | Loss function (bce, dice, combined, focal) |
+| `--patience` | `10` | Early stopping patience |
+| `--no-attention` | - | Disable CBAM Attention |
+| `--no-amp` | - | Disable mixed precision training |
+| `--workers` | `4` | DataLoader worker threads |
+| `--output` | `checkpoints` | Checkpoint directory |
 
-After training, use your model with:
+**Training Features:**
+
+- ✅ **CBAM Attention**: Enabled by default, dynamically weights channels
+- ✅ **Multiple Loss Functions**: BCE, Dice, Combined, Focal
+- ✅ **Mixed Precision**: FP16 training for faster training (GPU)
+- ✅ **Early Stopping**: Prevents overfitting
+- ✅ **Model Checkpointing**: Saves best model automatically
+- ✅ **Training History**: JSON file with loss/metrics over epochs
+- ✅ **Data Augmentation**: Random flips and rotations
+
+**Training Output:**
+
+```
+checkpoints/
+├── best_Unet_resnet34_12ch_attention.pth  # Best model checkpoint
+└── training_history.json                  # Training metrics
+```
+
+**Monitoring Training:**
+
+The script prints progress for each epoch:
+```
+Epoch   1/50 | Train Loss: 0.4523 | Val Loss: 0.3891 | Val IoU: 0.6234 | LR: 1.00e-04 | Süre: 45.2s
+  → En iyi model kaydedildi: best_Unet_resnet34_12ch_attention.pth
+```
+
+### 📊 Step 4: Evaluate and Use Trained Model
+
+#### Using Trained Model for Inference
 
 ```bash
-python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
+python archaeo_detect.py \
+  --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
+  --input new_area.tif \
+  --th 0.6
 ```
 
-Or in `config.yaml`:
+#### Configure in config.yaml
+
 ```yaml
 weights: "checkpoints/best_Unet_resnet34_12ch_attention.pth"
 zero_shot_imagenet: false
+encoder: "resnet34"
 ```
 
-#### Manual Training (Advanced)
+### 💡 Training Tips
 
-For custom training loops:
+#### 1. Data Quality
 
-```python
-import torch
-import segmentation_models_pytorch as smp
-from archaeo_detect import AttentionWrapper
+- ✅ **High-quality masks**: Accurate ground truth is crucial
+- ✅ **Balanced dataset**: Include both positive and negative examples
+- ✅ **Diverse examples**: Cover different structure types and terrain conditions
+- ✅ **Adequate coverage**: At least 1000+ tiles recommended
 
-# Create model with 12 channels
-base_model = smp.Unet(
-    encoder_name="resnet34",
-    encoder_weights="imagenet",
-    in_channels=12,  # Updated: 12 channels
-    classes=1,
-    activation=None,
-)
+#### 2. Hyperparameter Tuning
 
-# Add CBAM Attention
-model = AttentionWrapper(base_model, in_channels=12, reduction=4)
+**Learning Rate:**
+- Start with `1e-4`
+- If loss doesn't decrease: try `5e-5` or `1e-5`
+- If loss oscillates: reduce learning rate
 
-# Training loop...
+**Batch Size:**
+- GPU memory permitting: larger batches (16-32) often better
+- Limited GPU: reduce batch size, increase gradient accumulation
+
+**Loss Function:**
+- `combined`: Good starting point (BCE + Dice)
+- `focal`: Useful for imbalanced datasets
+- `dice`: Focuses on overlap, good for small structures
+
+#### 3. Model Architecture Selection
+
+| Architecture | Speed | Accuracy | Use Case |
+|-------------|-------|----------|----------|
+| **Unet** | Fast | Good | General purpose, recommended |
+| **UnetPlusPlus** | Medium | Excellent | High accuracy needed |
+| **DeepLabV3Plus** | Medium | Excellent | Multi-scale features |
+| **FPN** | Fast | Good | Fast inference needed |
+
+#### 4. Encoder Selection
+
+| Encoder | Parameters | Speed | Accuracy |
+|---------|-----------|-------|----------|
+| **resnet34** | ~21M | Fast | Good (recommended start) |
+| **resnet50** | ~25M | Medium | Better |
+| **efficientnet-b3** | ~12M | Fast | Excellent |
+| **densenet121** | ~8M | Medium | Good |
+
+#### 5. Common Issues and Solutions
+
+**Problem: Loss not decreasing**
+- Solution: Lower learning rate, check data quality, verify masks
+
+**Problem: Overfitting (train loss << val loss)**
+- Solution: Increase dropout, use data augmentation, reduce model complexity
+
+**Problem: GPU out of memory**
+- Solution: Reduce batch size, use smaller tiles, enable mixed precision
+
+**Problem: Training too slow**
+- Solution: Enable mixed precision (`--no-amp` flag removed), use GPU, increase batch size
+
+### 📈 Expected Results
+
+With good quality training data:
+- **IoU (Intersection over Union)**: 0.6-0.8 typical
+- **F1 Score**: 0.7-0.9 typical
+- **Training Time**: ~2-5 hours for 50 epochs (GPU)
+- **Model Size**: 50-200 MB depending on encoder
+
+### 🔄 Complete Training Workflow Example
+
+```bash
+# 1. Prepare your data
+# (Create ground truth masks in QGIS or similar)
+
+# 2. Generate training tiles
+python egitim_verisi_olusturma.py \
+  --input area1.tif \
+  --mask area1_mask.tif \
+  --output training_data \
+  --tile-size 256
+
+# 3. Train model
+python training.py \
+  --data training_data \
+  --arch Unet \
+  --encoder resnet34 \
+  --epochs 50 \
+  --batch-size 16
+
+# 4. Use trained model
+python archaeo_detect.py \
+  --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
+  --input new_area.tif \
+  --enable-fusion
 ```
+
+---
+
+## 🔬 Advanced Features
+
+### Custom Model Training
+
+> **📖 For detailed training guide, see [Model Training Guide](#-model-training-guide) section above.**
+
+The project includes two dedicated scripts for training custom models:
+
+- **`egitim_verisi_olusturma.py`**: Creates 12-channel training tiles from GeoTIFF + ground truth masks
+- **`training.py`**: Trains U-Net models with CBAM Attention support
+
+**Quick Start:**
+
+```bash
+# 1. Create training data
+python egitim_verisi_olusturma.py --input area.tif --mask mask.tif --output training_data
+
+# 2. Train model
+python training.py --data training_data --epochs 50
+
+# 3. Use trained model
+python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
+```
+
+**Key Features:**
+- ✅ 12-channel input (RGB + RVT + Curvature + TPI)
+- ✅ CBAM Attention (channel + spatial)
+- ✅ Multiple loss functions (BCE, Dice, Combined, Focal)
+- ✅ Mixed precision training
+- ✅ Early stopping and checkpointing
+
+For complete documentation, examples, and troubleshooting, see the [Model Training Guide](#-model-training-guide) section.
 
 ### Adding Custom Encoders
 
