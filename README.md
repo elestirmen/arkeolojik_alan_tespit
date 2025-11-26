@@ -46,6 +46,8 @@ This project combines **deep learning** and **classical image processing** metho
 - ✅ **Ensemble Learning**: Combines results from multiple encoders for more reliable detection
 - ✅ **Multi-Scale Analysis**: Detects structures of different sizes
 - ✅ **🆕 Labeled Object Detection**: Automatic labeling of 80 different object classes (trees, buildings, vehicles, etc.) with YOLO11
+- ✅ **🆕 12-Channel Input**: Advanced topographic features including Curvature and TPI for enhanced detection
+- ✅ **🆕 CBAM Attention**: Channel and spatial attention mechanism for dynamic feature weighting
 
 ### 🔧 Technical Features
 - 🚀 **Tile-Based Processing**: Memory-efficient processing for large images
@@ -99,6 +101,24 @@ python archaeo_detect.py
 ```
 
 🎉 **Congratulations!** The system has started. Results will be created in the current directory.
+
+### 🎓 Training Your Own Model (Optional)
+
+If you have labeled data (ground truth masks), you can train a custom model:
+
+```bash
+# Step 1: Create training data from GeoTIFF + ground truth mask
+python egitim_verisi_olusturma.py \
+  --input kesif_alani.tif \
+  --mask ground_truth.tif \
+  --output training_data
+
+# Step 2: Train the model
+python training.py --data training_data --epochs 50
+
+# Step 3: Use your trained model
+python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
+```
 
 ---
 
@@ -567,10 +587,12 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
    - Local Relief Model (LRM)
    - Slope
 
-2. **9-Channel Tensor Creation**
+2. **12-Channel Tensor Creation** (Updated!)
    - 3 x RGB
    - 1 x nDSM (DSM - DTM)
-   - 5 x RVT derivatives
+   - 5 x RVT derivatives (SVF, Pos/Neg Openness, LRM, Slope)
+   - 2 x Curvature (Plan + Profile) - NEW!
+   - 1 x TPI (Topographic Position Index) - NEW!
 
 3. **Normalization**
    - Global or local percentile-based
@@ -1056,7 +1078,7 @@ A: Yes, satellite imagery and LiDAR data are supported. Important thing is that 
 ### 🔧 Technical Questions
 
 **Q: How many bands are required?**  
-A: Minimum 3 bands (RGB). Optimum 5 bands (RGB + DSM + DTM). 9 channels are automatically created with RVT derivatives.
+A: Minimum 3 bands (RGB). Optimum 5 bands (RGB + DSM + DTM). **12 channels** are automatically created with RVT derivatives, Curvature, and TPI calculations.
 
 **Q: How much space do cache files take?**  
 A: Typically 10-50 MB. Depends on input file size. Can be larger (several GB) for high-resolution data.
@@ -1069,7 +1091,7 @@ A:
 4. Use high-quality data
 
 **Q: How do I train my own model?**  
-A: You can train using PyTorch and segmentation_models_pytorch. Use trained model with `--weights` parameter.
+A: The project includes dedicated training scripts! See the [Custom Model Training](#custom-model-training) section below for step-by-step instructions using `egitim_verisi_olusturma.py` and `training.py`.
 
 ### 📊 Data Questions
 
@@ -1088,37 +1110,103 @@ A: Yes, input CRS is preserved and transferred to output.
 
 ### Custom Model Training
 
-Training with your own data:
+The project includes two dedicated scripts for training custom models with 12-channel input:
+
+#### Step 1: Create Training Data
+
+Use `egitim_verisi_olusturma.py` to generate 12-channel training tiles from your GeoTIFF files:
+
+```bash
+python egitim_verisi_olusturma.py \
+  --input kesif_alani.tif \
+  --mask ground_truth.tif \
+  --output training_data \
+  --tile-size 256 \
+  --overlap 64
+```
+
+**Output Structure:**
+```
+training_data/
+├── train/
+│   ├── images/    # 12-channel tiles (.npy)
+│   └── masks/     # Ground truth masks (.npy)
+├── val/
+│   ├── images/
+│   └── masks/
+└── metadata.json  # Dataset information
+```
+
+**Channel Structure (12 channels):**
+- [0-2]: RGB
+- [3]: SVF (Sky-View Factor)
+- [4]: Positive Openness
+- [5]: Negative Openness
+- [6]: LRM (Local Relief Model)
+- [7]: Slope
+- [8]: nDSM
+- [9]: Plan Curvature
+- [10]: Profile Curvature
+- [11]: TPI (Topographic Position Index)
+
+#### Step 2: Train Model
+
+Use `training.py` to train your custom model:
+
+```bash
+python training.py \
+  --data training_data \
+  --arch Unet \
+  --encoder resnet34 \
+  --epochs 50 \
+  --batch-size 8 \
+  --lr 1e-4
+```
+
+**Features:**
+- ✅ CBAM Attention support (enabled by default)
+- ✅ Multiple loss functions (BCE, Dice, Combined, Focal)
+- ✅ Mixed precision training (AMP)
+- ✅ Early stopping
+- ✅ Model checkpointing
+- ✅ Training history logging
+
+**Using Trained Model:**
+
+After training, use your model with:
+
+```bash
+python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
+```
+
+Or in `config.yaml`:
+```yaml
+weights: "checkpoints/best_Unet_resnet34_12ch_attention.pth"
+zero_shot_imagenet: false
+```
+
+#### Manual Training (Advanced)
+
+For custom training loops:
 
 ```python
 import torch
 import segmentation_models_pytorch as smp
+from archaeo_detect import AttentionWrapper
 
-# Create model
-model = smp.Unet(
+# Create model with 12 channels
+base_model = smp.Unet(
     encoder_name="resnet34",
     encoder_weights="imagenet",
-    in_channels=9,  # RGB + nDSM + 5 RVT derivatives
-    classes=1,      # Binary segmentation
-    activation='sigmoid'
+    in_channels=12,  # Updated: 12 channels
+    classes=1,
+    activation=None,
 )
 
-# Training loop
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-criterion = torch.nn.BCEWithLogitsLoss()
+# Add CBAM Attention
+model = AttentionWrapper(base_model, in_channels=12, reduction=4)
 
-for epoch in range(num_epochs):
-    for batch in train_loader:
-        images, masks = batch
-        outputs = model(images)
-        loss = criterion(outputs, masks)
-        
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-# Save model
-torch.save(model.state_dict(), 'my_trained_model.pth')
+# Training loop...
 ```
 
 ### Adding Custom Encoders
@@ -1204,12 +1292,15 @@ archaeo_detect.py
 ├── Preprocessing
 │   ├── Band reading
 │   ├── RVT derivatives (rvt-py)
+│   ├── Curvature calculation (Plan + Profile)
+│   ├── TPI calculation (multi-scale)
 │   ├── nDSM calculation
 │   └── Normalization
 ├── Detection
 │   ├── Deep Learning (PyTorch + SMP)
 │   │   ├── U-Net
 │   │   ├── DeepLabV3+
+│   │   ├── CBAM Attention (optional)
 │   │   └── Other architectures
 │   ├── Classical Methods
 │   │   ├── RVT (SVF, Openness, LRM)
@@ -1239,6 +1330,28 @@ archaeo_detect.py
 | NumPy | 1.24+ | Numerical operations |
 | SciPy | 1.10+ | Scientific computing |
 
+### Channel Architecture
+
+**12-Channel Input Structure:**
+
+| Channel | Feature | Description | Archaeological Use |
+|---------|---------|-------------|-------------------|
+| 0-2 | RGB | Red, Green, Blue | Color/texture anomalies |
+| 3 | SVF | Sky-View Factor | Tumuli, mounds |
+| 4 | Pos. Openness | Positive Openness | Raised structures |
+| 5 | Neg. Openness | Negative Openness | Ditches, depressions |
+| 6 | LRM | Local Relief Model | Local topographic anomalies |
+| 7 | Slope | Terrain slope | Terraces, walls |
+| 8 | nDSM | Normalized DSM | Surface height |
+| 9 | Plan Curvature | Horizontal curvature | Ridge/ditch separation |
+| 10 | Profile Curvature | Vertical curvature | Terraces, steps |
+| 11 | TPI | Topographic Position Index | Mounds/depressions |
+
+**CBAM Attention:**
+- **Channel Attention**: Dynamically weights feature channels (e.g., SVF and TPI for tumuli, Curvature for ditches)
+- **Spatial Attention**: Focuses on important regions (structure boundaries, centers)
+- **Benefits**: Improves detection accuracy, reduces false positives, adapts to different structure types
+
 ### Algorithm Details
 
 #### RVT (Relief Visualization Toolbox)
@@ -1264,6 +1377,33 @@ H = [∂²f/∂x²    ∂²f/∂x∂y]
 ```
 
 Ridge/valley detection via eigenvalue analysis.
+
+#### Curvature Calculation
+
+**Plan Curvature (Horizontal):**
+- Measures curvature along contour lines
+- Positive values: Ridges, mounds (convex)
+- Negative values: Valleys, ditches (concave)
+- Formula: `Kh = -[(fxx * q) - (2 * fxy * fx * fy) + (fyy * p)] / [(p + q)^1.5]`
+
+**Profile Curvature (Vertical):**
+- Measures curvature along slope direction
+- Positive values: Convex surfaces (accelerating flow)
+- Negative values: Concave surfaces (decelerating flow)
+- Useful for detecting terraces and steps
+
+#### TPI (Topographic Position Index)
+
+Multi-scale TPI calculation:
+```
+TPI = center_elevation - mean(neighbor_elevations)
+```
+
+- **Positive TPI**: Higher than surroundings → Mounds, tumuli, hills
+- **Negative TPI**: Lower than surroundings → Ditches, depressions, valleys
+- **Near zero**: Flat areas or slopes
+
+Multi-scale approach uses multiple radii (e.g., 5, 15, 30 pixels) and averages results to detect structures of different sizes.
 
 #### Fusion Algorithm
 
