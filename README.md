@@ -1156,7 +1156,7 @@ with rasterio.open('ground_truth.tif', 'w',
 
 ### 📦 Step 2: Create Training Data
 
-Use `egitim_verisi_olusturma.py` to generate 12-channel training tiles:
+Use `egitim_verisi_olusturma.py` to generate 12-channel training tiles from your GeoTIFF files and ground truth masks.
 
 #### Basic Usage
 
@@ -1167,7 +1167,7 @@ python egitim_verisi_olusturma.py \
   --output training_data
 ```
 
-#### Advanced Options
+#### Complete Example with All Options
 
 ```bash
 python egitim_verisi_olusturma.py \
@@ -1178,72 +1178,290 @@ python egitim_verisi_olusturma.py \
   --overlap 64 \
   --train-ratio 0.8 \
   --min-positive 0.01 \
-  --max-nodata 0.3
+  --max-nodata 0.3 \
+  --balance-ratio 0.4 \
+  --format npz \
+  --bands 1,2,3,4,5 \
+  --tpi-radii 5,15,30
 ```
 
-**Parameters Explained:**
+#### All Parameters Explained
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--input` | Required | Input GeoTIFF (RGB + DSM + DTM) |
-| `--mask` | Required | Ground truth mask (binary GeoTIFF) |
-| `--output` | `training_data` | Output directory |
-| `--tile-size` | `256` | Tile size in pixels |
-| `--overlap` | `64` | Overlap between tiles |
-| `--train-ratio` | `0.8` | Train/validation split ratio |
-| `--min-positive` | `0.0` | Minimum positive pixel ratio (filter empty tiles) |
-| `--max-nodata` | `0.3` | Maximum nodata ratio (filter invalid tiles) |
-| `--format` | `npy` | File format (`npy` or `npz`) |
+| Parameter | Default | Description | When to Use |
+|-----------|---------|-------------|-------------|
+| `--input`, `-i` | **Required** | Input GeoTIFF file path (RGB + DSM + DTM bands) | Always required |
+| `--mask`, `-m` | **Required** | Ground truth mask file path (binary GeoTIFF: 0=background, 1=archaeological) | Always required |
+| `--output`, `-o` | `training_data` | Output directory for training tiles | Change if you want different name |
+| `--tile-size`, `-t` | `256` | Tile size in pixels (256, 512, etc.) | 256 for most cases, 512 for larger structures |
+| `--overlap` | `64` | Overlap between tiles in pixels | Increase for better coverage (e.g., 128 for 512 tiles) |
+| `--train-ratio` | `0.8` | Train/validation split ratio (0.0-1.0) | 0.8 = 80% train, 20% validation (standard) |
+| `--min-positive` | `0.0` | Minimum positive pixel ratio to include tile (0.0-1.0) | 0.01 = filter tiles with <1% archaeological pixels |
+| `--max-nodata` | `0.3` | Maximum nodata ratio to include tile (0.0-1.0) | 0.3 = exclude tiles with >30% nodata |
+| `--balance-ratio` | `None` | Positive/negative balance ratio (0.0-1.0) | 0.4 = 40% positive, 60% negative (recommended for imbalanced data) |
+| `--format` | `npz` | File format: `npy` (faster) or `npz` (compressed, smaller) | `npz` saves disk space (~50-70% smaller) |
+| `--bands`, `-b` | `1,2,3,4,5` | Band order: R,G,B,DSM,DTM | Change if your bands are in different order |
+| `--tpi-radii` | `5,15,30` | TPI radii in pixels (comma-separated) | Adjust for different structure sizes |
+| `--no-normalize` | `False` | Disable normalization (not recommended) | Only if you want raw values |
 
-**What Happens:**
+#### Detailed Workflow
 
-1. **Band Reading**: Reads RGB, DSM, DTM from input GeoTIFF
-2. **RVT Calculation**: Computes SVF, Openness, LRM, Slope
-3. **Advanced Features**: Calculates Curvature (Plan + Profile) and TPI
-4. **Tile Generation**: Creates overlapping tiles with specified size
-5. **Normalization**: Applies robust percentile-based normalization
-6. **Train/Val Split**: Automatically splits tiles into train/validation sets
-7. **Metadata Export**: Saves dataset information to `metadata.json`
+**Step-by-Step Process:**
 
-**Output Structure:**
+1. **Input Validation**
+   - Checks if input GeoTIFF and mask files exist
+   - Verifies they have the same dimensions and CRS
+   - Validates band count and data types
+
+2. **Band Reading**
+   - Reads RGB bands (typically bands 1-3)
+   - Reads DSM (Digital Surface Model, band 4)
+   - Reads DTM (Digital Terrain Model, band 5)
+   - Handles nodata values and missing bands
+
+3. **RVT Derivative Calculation**
+   - **SVF (Sky-View Factor)**: Calculates horizon visibility (tumuli detection)
+   - **Positive Openness**: Measures upward visibility (mounds)
+   - **Negative Openness**: Measures downward visibility (ditches)
+   - **LRM (Local Relief Model)**: Highlights local topographic anomalies
+   - **Slope**: Calculates terrain steepness (terraces, walls)
+
+4. **Advanced Feature Calculation**
+   - **Plan Curvature**: Horizontal curvature (ridge/ditch separation)
+   - **Profile Curvature**: Vertical curvature (terrace detection)
+   - **TPI (Topographic Position Index)**: Multi-scale elevation comparison (mounds/depressions)
+
+5. **nDSM Calculation**
+   - Computes normalized DSM: `nDSM = DSM - DTM`
+   - Used for masking tall objects (trees, buildings)
+
+6. **Tile Generation**
+   - Divides input image into overlapping tiles
+   - Handles edge cases (partial tiles at boundaries)
+   - Filters tiles based on `--min-positive` and `--max-nodata` criteria
+
+7. **Balanced Sampling** (if `--balance-ratio` specified)
+   - Separates tiles into positive (contains archaeological pixels) and negative (background only)
+   - Samples negative tiles to achieve target ratio
+   - Prevents class imbalance in training data
+
+8. **Normalization**
+   - Applies robust percentile-based normalization (2%-98% range)
+   - Normalizes each channel independently
+   - Handles outliers and extreme values
+
+9. **Train/Validation Split**
+   - Randomly splits tiles into train and validation sets
+   - Maintains same positive/negative ratio in both sets
+   - Uses seed for reproducibility
+
+10. **File Saving**
+    - Saves 12-channel image tiles (`.npz` or `.npy` format)
+    - Saves corresponding binary masks
+    - Creates directory structure: `train/images/`, `train/masks/`, `val/images/`, `val/masks/`
+
+11. **Metadata Export**
+    - Saves `metadata.json` with dataset statistics
+    - Includes tile counts, positive ratios, channel information
+    - Useful for tracking dataset characteristics
+
+#### Output Structure
+
+After running the script, you'll get the following directory structure:
 
 ```
 training_data/
 ├── train/
 │   ├── images/
-│   │   ├── tile_00000_00000.npy  # 12-channel array (12, 256, 256)
-│   │   ├── tile_00000_00192.npy
-│   │   └── ...
+│   │   ├── tile_00000_00000.npz  # 12-channel array (12, 256, 256)
+│   │   ├── tile_00000_00192.npz   # Shape: (12, 256, 256)
+│   │   ├── tile_00000_00384.npz
+│   │   └── ...                    # More tiles
 │   └── masks/
-│       ├── tile_00000_00000.npy  # Binary mask (256, 256)
-│       ├── tile_00000_00192.npy
-│       └── ...
+│       ├── tile_00000_00000.npz    # Binary mask (256, 256)
+│       ├── tile_00000_00192.npz   # Values: 0 (background) or 1 (archaeological)
+│       ├── tile_00000_00384.npz
+│       └── ...                    # Corresponding masks
 ├── val/
 │   ├── images/
+│   │   ├── tile_01234_00000.npz   # Validation images
+│   │   └── ...
 │   └── masks/
-└── metadata.json  # Dataset information
+│       ├── tile_01234_00000.npz   # Validation masks
+│       └── ...
+└── metadata.json                  # Dataset statistics and info
+```
+
+**File Format Details:**
+
+- **`.npz` format (default)**: Compressed NumPy archive
+  - Smaller file size (~50-70% reduction)
+  - Slower read/write (still very fast)
+  - Recommended for disk space savings
+  
+- **`.npy` format**: Uncompressed NumPy array
+  - Faster read/write
+  - Larger file size
+  - Use if disk space is not a concern
+
+**Loading Files:**
+
+```python
+import numpy as np
+
+# Load .npz file
+data = np.load('tile_00000_00000.npz')
+image = data['image']  # Shape: (12, 256, 256)
+mask = np.load('tile_00000_00000.npz')['mask']  # Shape: (256, 256)
+
+# Load .npy file (if format was npy)
+image = np.load('tile_00000_00000.npy')  # Shape: (12, 256, 256)
+mask = np.load('tile_00000_00000.npy')   # Shape: (256, 256)
+```
+
+**Metadata.json Contents:**
+
+```json
+{
+  "dataset_info": {
+    "input_file": "kesif_alani.tif",
+    "mask_file": "ground_truth.tif",
+    "tile_size": 256,
+    "overlap": 64,
+    "train_ratio": 0.8,
+    "format": "npz",
+    "created_at": "2025-01-15T10:30:00"
+  },
+  "statistics": {
+    "total_tiles": 1250,
+    "train_tiles": 1000,
+    "val_tiles": 250,
+    "positive_tiles": 450,
+    "negative_tiles": 800,
+    "positive_ratio": 0.36,
+    "actual_positive_ratio": 0.40
+  },
+  "channels": {
+    "count": 12,
+    "order": [
+      "Red", "Green", "Blue", "SVF", "Positive Openness",
+      "Negative Openness", "LRM", "Slope", "nDSM",
+      "Plan Curvature", "Profile Curvature", "TPI"
+    ]
+  }
+}
 ```
 
 **Channel Order (12 channels):**
 
+| Index | Channel | Description | Archaeological Use |
+|-------|---------|-------------|---------------------|
+| 0 | Red | RGB Red band | Color/texture anomalies |
+| 1 | Green | RGB Green band | Vegetation patterns |
+| 2 | Blue | RGB Blue band | Soil color variations |
+| 3 | SVF | Sky-View Factor | Tumuli, mounds (horizon visibility) |
+| 4 | Pos. Openness | Positive Openness | Raised structures (upward visibility) |
+| 5 | Neg. Openness | Negative Openness | Ditches, depressions (downward visibility) |
+| 6 | LRM | Local Relief Model | Local topographic anomalies |
+| 7 | Slope | Terrain slope | Terraces, walls, steps |
+| 8 | nDSM | Normalized DSM | Surface height (DSM - DTM) |
+| 9 | Plan Curvature | Horizontal curvature | Ridge/ditch separation |
+| 10 | Profile Curvature | Vertical curvature | Terraces, steps, flow direction |
+| 11 | TPI | Topographic Position Index | Mounds/depressions relative to surroundings |
+
+#### Practical Examples
+
+**Example 1: Balanced Dataset for Imbalanced Data**
+
+If your ground truth has very few archaeological pixels (<5%), use balanced sampling:
+
+```bash
+python egitim_verisi_olusturma.py \
+  --input area.tif \
+  --mask mask.tif \
+  --output training_data \
+  --balance-ratio 0.4 \
+  --min-positive 0.01
 ```
-[0]  Red
-[1]  Green
-[2]  Blue
-[3]  SVF (Sky-View Factor)
-[4]  Positive Openness
-[5]  Negative Openness
-[6]  LRM (Local Relief Model)
-[7]  Slope
-[8]  nDSM (normalized DSM)
-[9]  Plan Curvature
-[10] Profile Curvature
-[11] TPI (Topographic Position Index)
+
+This will:
+- Keep all tiles with archaeological content (positive tiles)
+- Sample negative tiles to achieve 40% positive, 60% negative ratio
+- Filter out tiles with <1% archaeological pixels
+
+**Example 2: Large Structures (512x512 tiles)**
+
+For detecting large archaeological complexes:
+
+```bash
+python egitim_verisi_olusturma.py \
+  --input area.tif \
+  --mask mask.tif \
+  --output training_data \
+  --tile-size 512 \
+  --overlap 128 \
+  --min-positive 0.05
 ```
+
+**Example 3: Multiple Areas**
+
+Combine multiple areas into one dataset:
+
+```bash
+# Area 1
+python egitim_verisi_olusturma.py \
+  --input area1.tif \
+  --mask area1_mask.tif \
+  --output training_data_area1
+
+# Area 2
+python egitim_verisi_olusturma.py \
+  --input area2.tif \
+  --mask area2_mask.tif \
+  --output training_data_area2
+
+# Then manually combine or use separate datasets
+```
+
+**Example 4: Custom Band Order**
+
+If your GeoTIFF has bands in different order (e.g., B,G,R,DSM,DTM):
+
+```bash
+python egitim_verisi_olusturma.py \
+  --input area.tif \
+  --mask mask.tif \
+  --bands 3,2,1,4,5 \
+  --output training_data
+```
+
+#### Troubleshooting Data Preparation
+
+**Problem: "No valid tiles found"**
+- **Cause**: `--min-positive` too high or `--max-nodata` too low
+- **Solution**: Lower `--min-positive` (e.g., 0.0) or increase `--max-nodata` (e.g., 0.5)
+
+**Problem: "Memory error"**
+- **Cause**: Input file too large
+- **Solution**: Process in smaller chunks or reduce tile size
+
+**Problem: "Mask and input dimensions don't match"**
+- **Cause**: Different resolutions or extents
+- **Solution**: Resample mask to match input using GDAL:
+  ```bash
+  gdalwarp -tr 1.0 1.0 -r nearest mask.tif mask_resampled.tif
+  ```
+
+**Problem: "Too many negative tiles"**
+- **Cause**: Imbalanced dataset (common in archaeological data)
+- **Solution**: Use `--balance-ratio 0.4` to balance positive/negative tiles
+
+**Problem: "RVT calculation too slow"**
+- **Cause**: Large input files, complex terrain
+- **Solution**: This is normal for first run. Subsequent runs with same input will be faster if you reuse the script (it uses caching internally)
 
 ### 🚀 Step 3: Train the Model
 
-Use `training.py` to train your custom model:
+Use `training.py` to train your custom U-Net model with 12-channel input and CBAM Attention.
 
 #### Basic Training
 
@@ -1251,7 +1469,17 @@ Use `training.py` to train your custom model:
 python training.py --data training_data
 ```
 
-#### Advanced Training with Custom Settings
+This will use default settings:
+- Architecture: U-Net
+- Encoder: ResNet34
+- Epochs: 50
+- Batch size: 8
+- Learning rate: 1e-4
+- Loss: Combined (BCE + Dice)
+- CBAM Attention: Enabled
+- Mixed Precision: Enabled (FP16)
+
+#### Complete Training Example
 
 ```bash
 python training.py \
@@ -1262,50 +1490,216 @@ python training.py \
   --batch-size 8 \
   --lr 1e-4 \
   --loss combined \
-  --patience 10
+  --patience 10 \
+  --workers 4 \
+  --output checkpoints \
+  --seed 42
 ```
 
-**Parameters Explained:**
+#### All Parameters Explained
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--data` | `training_data` | Training data directory |
-| `--arch` | `Unet` | Architecture (Unet, UnetPlusPlus, DeepLabV3Plus, etc.) |
-| `--encoder` | `resnet34` | Encoder (resnet34, resnet50, efficientnet-b3, etc.) |
-| `--epochs` | `50` | Number of training epochs |
-| `--batch-size` | `8` | Batch size (adjust based on GPU memory) |
-| `--lr` | `1e-4` | Learning rate |
-| `--loss` | `combined` | Loss function (bce, dice, combined, focal) |
-| `--patience` | `10` | Early stopping patience |
-| `--no-attention` | - | Disable CBAM Attention |
-| `--no-amp` | - | Disable mixed precision training |
-| `--workers` | `4` | DataLoader worker threads |
-| `--output` | `checkpoints` | Checkpoint directory |
+| Parameter | Default | Description | Recommendations |
+|-----------|---------|-------------|-----------------|
+| `--data`, `-d` | `training_data` | Training data directory (from Step 2) | Path to your `training_data` folder |
+| `--arch`, `-a` | `Unet` | Model architecture | `Unet` (fast, good), `UnetPlusPlus` (better accuracy), `DeepLabV3Plus` (multi-scale) |
+| `--encoder`, `-e` | `resnet34` | Encoder backbone | `resnet34` (balanced), `resnet50` (better), `efficientnet-b3` (efficient) |
+| `--epochs` | `50` | Number of training epochs | Start with 50, increase if loss still decreasing |
+| `--batch-size`, `-b` | `8` | Batch size | Increase if GPU memory allows (16-32 better) |
+| `--lr` | `1e-4` | Learning rate | Start with 1e-4, reduce if loss oscillates |
+| `--loss` | `combined` | Loss function | `combined` (BCE+Dice), `focal` (imbalanced data), `dice` (small objects) |
+| `--patience` | `10` | Early stopping patience | Stop if no improvement for N epochs |
+| `--no-attention` | `False` | Disable CBAM Attention | Only disable if you want to test without attention |
+| `--no-amp` | `False` | Disable mixed precision (FP16) | Disable only if you encounter numerical issues |
+| `--workers` | `4` | DataLoader worker threads | Increase for faster data loading (4-8 typical) |
+| `--output`, `-o` | `checkpoints` | Checkpoint directory | Where to save trained models |
+| `--seed` | `42` | Random seed | For reproducibility |
 
-**Training Features:**
+#### Training Features
 
-- ✅ **CBAM Attention**: Enabled by default, dynamically weights channels
-- ✅ **Multiple Loss Functions**: BCE, Dice, Combined, Focal
-- ✅ **Mixed Precision**: FP16 training for faster training (GPU)
-- ✅ **Early Stopping**: Prevents overfitting
-- ✅ **Model Checkpointing**: Saves best model automatically
-- ✅ **Training History**: JSON file with loss/metrics over epochs
-- ✅ **Data Augmentation**: Random flips and rotations
+**1. CBAM Attention (Enabled by Default)**
+- **Channel Attention**: Dynamically weights feature channels
+  - Emphasizes important channels (e.g., SVF for tumuli, Curvature for ditches)
+- **Spatial Attention**: Focuses on important spatial regions
+  - Highlights structure boundaries and centers
+- **Benefits**: Improves accuracy, reduces false positives, adapts to different structure types
 
-**Training Output:**
+**2. Multiple Loss Functions**
+
+| Loss Function | Formula | Best For |
+|--------------|---------|----------|
+| `bce` | Binary Cross-Entropy | General purpose |
+| `dice` | Dice Loss = 1 - (2\|A∩B\|)/(\|A\|+\|B\|) | Small objects, overlap-focused |
+| `combined` | BCE + Dice | **Recommended** - balances both |
+| `focal` | Focal Loss (α-balanced) | **Imbalanced datasets** - focuses on hard examples |
+
+**3. Mixed Precision Training (FP16)**
+- Uses half-precision (FP16) for faster training
+- ~2x speedup on modern GPUs
+- Automatic loss scaling prevents underflow
+- Disable with `--no-amp` if you encounter issues
+
+**4. Early Stopping**
+- Monitors validation loss
+- Stops training if no improvement for `--patience` epochs
+- Prevents overfitting
+- Saves best model automatically
+
+**5. Data Augmentation**
+- Random horizontal flip (50% probability)
+- Random vertical flip (50% probability)
+- Random 90° rotations (0°, 90°, 180°, 270°)
+- Applied only to training set, not validation
+
+**6. Model Checkpointing**
+- Saves best model based on validation IoU
+- Model name format: `best_{arch}_{encoder}_12ch_attention.pth`
+- Example: `best_Unet_resnet34_12ch_attention.pth`
+
+**7. Training History**
+- Saves `training_history.json` with:
+  - Loss values per epoch (train/val)
+  - IoU scores per epoch
+  - Learning rate schedule
+  - Training time per epoch
+
+#### Training Output Structure
 
 ```
 checkpoints/
 ├── best_Unet_resnet34_12ch_attention.pth  # Best model checkpoint
-└── training_history.json                  # Training metrics
+└── training_history.json                  # Training metrics (JSON)
 ```
 
-**Monitoring Training:**
+**Training History JSON Format:**
 
-The script prints progress for each epoch:
+```json
+{
+  "config": {
+    "arch": "Unet",
+    "encoder": "resnet34",
+    "epochs": 50,
+    "batch_size": 8,
+    "lr": 0.0001,
+    "loss": "combined",
+    "attention": true
+  },
+  "history": {
+    "train_loss": [0.4523, 0.3891, 0.3456, ...],
+    "val_loss": [0.3891, 0.3456, 0.3123, ...],
+    "val_iou": [0.6234, 0.6789, 0.7123, ...],
+    "learning_rate": [0.0001, 0.0001, 0.0001, ...],
+    "epoch_time": [45.2, 43.8, 44.1, ...]
+  },
+  "best_epoch": 15,
+  "best_val_iou": 0.7891,
+  "total_time": "2h 15m 30s"
+}
 ```
+
+#### Monitoring Training Progress
+
+**Console Output:**
+
+```
+12 Kanallı Arkeolojik Tespit Modeli Eğitimi
+==========================================
+Veri dizini: training_data
+Mimari: Unet
+Encoder: resnet34
+Epoch sayısı: 50
+Batch boyutu: 8
+Learning rate: 0.0001
+Loss fonksiyonu: combined
+CBAM Attention: Aktif
+Mixed Precision: Aktif
+
+Veri yükleme...
+  Train: 1000 tile
+  Val: 250 tile
+
+Model oluşturuluyor...
+  Giriş kanalları: 12
+  Çıkış kanalları: 1
+  Parametre sayısı: 21,234,567
+
+Eğitim başlıyor...
 Epoch   1/50 | Train Loss: 0.4523 | Val Loss: 0.3891 | Val IoU: 0.6234 | LR: 1.00e-04 | Süre: 45.2s
   → En iyi model kaydedildi: best_Unet_resnet34_12ch_attention.pth
+
+Epoch   2/50 | Train Loss: 0.3891 | Val Loss: 0.3456 | Val IoU: 0.6789 | LR: 1.00e-04 | Süre: 43.8s
+  → En iyi model kaydedildi: best_Unet_resnet34_12ch_attention.pth
+
+...
+
+Epoch  15/50 | Train Loss: 0.2345 | Val Loss: 0.2123 | Val IoU: 0.7891 | LR: 1.00e-04 | Süre: 44.5s
+  → En iyi model kaydedildi: best_Unet_resnet34_12ch_attention.pth
+
+...
+
+Early stopping: En iyi model 15. epoch'ta (Val IoU: 0.7891)
+Eğitim tamamlandı!
+Toplam süre: 2h 15m 30s
+```
+
+**Key Metrics Explained:**
+
+- **Train Loss**: Training loss (lower is better)
+- **Val Loss**: Validation loss (lower is better, should track train loss)
+- **Val IoU**: Validation Intersection over Union (higher is better, 0.6-0.8 typical)
+- **LR**: Current learning rate
+- **Süre**: Time per epoch
+
+#### Training Scenarios
+
+**Scenario 1: Quick Test Run**
+
+```bash
+python training.py \
+  --data training_data \
+  --epochs 5 \
+  --batch-size 16
+```
+
+**Scenario 2: High Accuracy (More Epochs)**
+
+```bash
+python training.py \
+  --data training_data \
+  --arch UnetPlusPlus \
+  --encoder resnet50 \
+  --epochs 100 \
+  --batch-size 8 \
+  --patience 15
+```
+
+**Scenario 3: Imbalanced Dataset**
+
+```bash
+python training.py \
+  --data training_data \
+  --loss focal \
+  --lr 5e-5 \
+  --batch-size 16
+```
+
+**Scenario 4: Limited GPU Memory**
+
+```bash
+python training.py \
+  --data training_data \
+  --batch-size 4 \
+  --workers 2 \
+  --no-amp
+```
+
+**Scenario 5: Fast Training (Large Batch)**
+
+```bash
+python training.py \
+  --data training_data \
+  --batch-size 32 \
+  --workers 8 \
+  --encoder efficientnet-b3
 ```
 
 ### 📊 Step 4: Evaluate and Use Trained Model
@@ -1327,96 +1721,422 @@ zero_shot_imagenet: false
 encoder: "resnet34"
 ```
 
-### 💡 Training Tips
+### 💡 Training Tips and Best Practices
 
-#### 1. Data Quality
+#### 1. Data Quality Guidelines
 
-- ✅ **High-quality masks**: Accurate ground truth is crucial
-- ✅ **Balanced dataset**: Include both positive and negative examples
-- ✅ **Diverse examples**: Cover different structure types and terrain conditions
-- ✅ **Adequate coverage**: At least 1000+ tiles recommended
+**✅ High-Quality Masks:**
+- **Accurate digitization**: Precise boundaries are crucial
+- **Consistent labeling**: Same structure types labeled consistently
+- **Complete coverage**: All visible archaeological features included
+- **Avoid noise**: Don't include ambiguous areas
 
-#### 2. Hyperparameter Tuning
+**✅ Balanced Dataset:**
+- **Positive examples**: Archaeological structures (tumuli, ditches, walls, etc.)
+- **Negative examples**: Background terrain (fields, forests, roads)
+- **Recommended ratio**: 30-50% positive, 50-70% negative (use `--balance-ratio` if needed)
+- **Diverse negatives**: Include various terrain types, not just empty fields
 
-**Learning Rate:**
-- Start with `1e-4`
-- If loss doesn't decrease: try `5e-5` or `1e-5`
-- If loss oscillates: reduce learning rate
+**✅ Diverse Examples:**
+- **Different structure types**: Tumuli, ditches, walls, mounds, terraces
+- **Various sizes**: Small (5-10m) to large (50-100m+) structures
+- **Different terrain**: Flat, hilly, forested, agricultural areas
+- **Different seasons**: If possible, include data from different times
 
-**Batch Size:**
-- GPU memory permitting: larger batches (16-32) often better
-- Limited GPU: reduce batch size, increase gradient accumulation
+**✅ Adequate Coverage:**
+- **Minimum**: 500-1000 tiles (for initial testing)
+- **Recommended**: 2000-5000 tiles (for production models)
+- **Large datasets**: 10000+ tiles (for best accuracy)
+- **Validation set**: Should be 15-25% of total data
 
-**Loss Function:**
-- `combined`: Good starting point (BCE + Dice)
-- `focal`: Useful for imbalanced datasets
-- `dice`: Focuses on overlap, good for small structures
+#### 2. Hyperparameter Tuning Guide
+
+**Learning Rate (`--lr`):**
+
+| Scenario | Learning Rate | When to Use |
+|----------|---------------|-------------|
+| **Initial training** | `1e-4` | Default, good starting point |
+| **Loss not decreasing** | `5e-5` or `1e-5` | Reduce if loss plateaus |
+| **Loss oscillating** | `5e-5` | Reduce if loss jumps around |
+| **Fine-tuning** | `1e-5` or `5e-6` | When continuing from checkpoint |
+| **Large batch (>32)** | `2e-4` or `3e-4` | Can use higher LR with large batches |
+
+**Batch Size (`--batch-size`):**
+
+| GPU Memory | Batch Size | Notes |
+|------------|------------|-------|
+| **4 GB** | 4-8 | Minimum viable |
+| **8 GB** | 8-16 | Comfortable |
+| **12 GB** | 16-24 | Good performance |
+| **16 GB+** | 24-32 | Optimal |
+
+**Tips:**
+- Larger batches → more stable gradients → better convergence
+- If OOM error: reduce batch size or use `--no-amp`
+- Batch size affects effective learning rate (larger batch = can use higher LR)
+
+**Loss Function (`--loss`):**
+
+| Loss Function | When to Use | Advantages |
+|---------------|-------------|------------|
+| `combined` | **Default** - Most cases | Balances pixel-level and overlap metrics |
+| `focal` | Imbalanced datasets (<30% positive) | Focuses on hard examples, reduces class imbalance impact |
+| `dice` | Small objects, overlap-focused | Emphasizes intersection over union |
+| `bce` | Simple baseline | Standard binary classification loss |
+
+**Epochs and Patience:**
+
+| Dataset Size | Epochs | Patience | Notes |
+|--------------|--------|----------|-------|
+| **Small (<1000 tiles)** | 50-100 | 10-15 | May need more epochs |
+| **Medium (1000-5000)** | 50-80 | 10-15 | Standard |
+| **Large (>5000)** | 30-50 | 5-10 | Usually converges faster |
 
 #### 3. Model Architecture Selection
 
-| Architecture | Speed | Accuracy | Use Case |
-|-------------|-------|----------|----------|
-| **Unet** | Fast | Good | General purpose, recommended |
-| **UnetPlusPlus** | Medium | Excellent | High accuracy needed |
-| **DeepLabV3Plus** | Medium | Excellent | Multi-scale features |
-| **FPN** | Fast | Good | Fast inference needed |
+| Architecture | Speed | Accuracy | Memory | Use Case |
+|-------------|-------|----------|--------|----------|
+| **Unet** | ⚡⚡⚡ Fast | ⭐⭐⭐ Good | 💾 Low | **Recommended start** - General purpose |
+| **UnetPlusPlus** | ⚡⚡ Medium | ⭐⭐⭐⭐ Excellent | 💾💾 Medium | High accuracy needed, dense connections |
+| **DeepLabV3Plus** | ⚡⚡ Medium | ⭐⭐⭐⭐ Excellent | 💾💾 Medium | Multi-scale features, ASPP module |
+| **FPN** | ⚡⚡⚡ Fast | ⭐⭐⭐ Good | 💾 Low | Fast inference, feature pyramid |
+| **PSPNet** | ⚡⚡ Medium | ⭐⭐⭐⭐ Excellent | 💾💾 Medium | Pyramid pooling, multi-scale |
+| **MAnet** | ⚡⚡ Medium | ⭐⭐⭐⭐ Excellent | 💾💾 Medium | Multi-attention mechanism |
+| **Linknet** | ⚡⚡⚡ Fast | ⭐⭐⭐ Good | 💾 Low | Efficient decoder, fast |
 
-#### 4. Encoder Selection
+**Recommendation:**
+- **Start with Unet + ResNet34**: Fast, reliable, good baseline
+- **Upgrade to UnetPlusPlus + ResNet50**: If you need better accuracy
+- **Try DeepLabV3Plus**: If structures vary greatly in size
 
-| Encoder | Parameters | Speed | Accuracy |
-|---------|-----------|-------|----------|
-| **resnet34** | ~21M | Fast | Good (recommended start) |
-| **resnet50** | ~25M | Medium | Better |
-| **efficientnet-b3** | ~12M | Fast | Excellent |
-| **densenet121** | ~8M | Medium | Good |
+#### 4. Encoder Selection Guide
+
+| Encoder | Parameters | Speed | Accuracy | Memory | Best For |
+|---------|-----------|-------|----------|--------|----------|
+| **resnet34** | ~21M | ⚡⚡⚡ Fast | ⭐⭐⭐ Good | 💾 Low | **Recommended start** - Balanced |
+| **resnet50** | ~25M | ⚡⚡ Medium | ⭐⭐⭐⭐ Better | 💾💾 Medium | Better accuracy, more parameters |
+| **resnet101** | ~44M | ⚡ Slow | ⭐⭐⭐⭐⭐ Best | 💾💾💾 High | Maximum accuracy, slower |
+| **efficientnet-b0** | ~5M | ⚡⚡⚡⚡ Very Fast | ⭐⭐ Fair | 💾 Very Low | Mobile/edge devices |
+| **efficientnet-b3** | ~12M | ⚡⚡⚡ Fast | ⭐⭐⭐⭐ Excellent | 💾 Low | **Recommended** - Efficient |
+| **efficientnet-b5** | ~30M | ⚡⚡ Medium | ⭐⭐⭐⭐⭐ Excellent | 💾💾 Medium | High accuracy, efficient |
+| **densenet121** | ~8M | ⚡⚡ Medium | ⭐⭐⭐ Good | 💾💾 Medium | Dense connections |
+| **vgg16** | ~15M | ⚡⚡ Medium | ⭐⭐⭐ Good | 💾💾 Medium | Classic architecture |
+
+**Recommendation:**
+- **Start**: ResNet34 (balanced)
+- **Better accuracy**: ResNet50 or EfficientNet-B3
+- **Efficiency**: EfficientNet-B3 (best speed/accuracy tradeoff)
+- **Maximum accuracy**: ResNet101 or EfficientNet-B5
 
 #### 5. Common Issues and Solutions
 
-**Problem: Loss not decreasing**
-- Solution: Lower learning rate, check data quality, verify masks
+**Problem: Loss Not Decreasing**
 
-**Problem: Overfitting (train loss << val loss)**
-- Solution: Increase dropout, use data augmentation, reduce model complexity
+**Symptoms:**
+- Loss stays constant or increases
+- Val IoU doesn't improve
 
-**Problem: GPU out of memory**
-- Solution: Reduce batch size, use smaller tiles, enable mixed precision
+**Solutions:**
+1. **Lower learning rate**: Try `5e-5` or `1e-5`
+2. **Check data quality**: Verify masks are correct, check for label errors
+3. **Verify data loading**: Ensure images and masks match correctly
+4. **Check normalization**: Data should be normalized (default: yes)
+5. **Try different loss**: Switch to `focal` if dataset is imbalanced
+6. **Increase batch size**: Larger batches stabilize training
 
-**Problem: Training too slow**
-- Solution: Enable mixed precision (`--no-amp` flag removed), use GPU, increase batch size
+**Problem: Overfitting (Train Loss << Val Loss)**
 
-### 📈 Expected Results
+**Symptoms:**
+- Train loss decreases but val loss increases
+- Train IoU >> Val IoU (e.g., 0.9 vs 0.6)
 
-With good quality training data:
-- **IoU (Intersection over Union)**: 0.6-0.8 typical
-- **F1 Score**: 0.7-0.9 typical
-- **Training Time**: ~2-5 hours for 50 epochs (GPU)
-- **Model Size**: 50-200 MB depending on encoder
+**Solutions:**
+1. **More data**: Increase training dataset size
+2. **Data augmentation**: Already enabled, but verify it's working
+3. **Reduce model complexity**: Use ResNet34 instead of ResNet50
+4. **Early stopping**: Reduce `--patience` to stop earlier
+5. **Regularization**: Model already includes dropout, but you can add more
+6. **Reduce learning rate**: Lower LR can help generalization
+
+**Problem: GPU Out of Memory (OOM)**
+
+**Symptoms:**
+```
+RuntimeError: CUDA out of memory. Tried to allocate X GB
+```
+
+**Solutions:**
+1. **Reduce batch size**: Try `--batch-size 4` or `2`
+2. **Disable mixed precision**: Use `--no-amp` (slower but uses less memory)
+3. **Reduce workers**: Use `--workers 2` or `1`
+4. **Use smaller encoder**: Switch to EfficientNet-B0 or ResNet18
+5. **Process in chunks**: Not applicable here, but consider smaller tiles in data prep
+
+**Problem: Training Too Slow**
+
+**Symptoms:**
+- Each epoch takes >5 minutes
+- Total training time >10 hours
+
+**Solutions:**
+1. **Enable mixed precision**: Remove `--no-amp` flag (default enabled)
+2. **Increase batch size**: Larger batches = fewer iterations per epoch
+3. **Increase workers**: Use `--workers 8` for faster data loading
+4. **Use GPU**: Ensure CUDA is available (`torch.cuda.is_available()`)
+5. **Use efficient encoder**: Switch to EfficientNet-B3
+6. **Reduce tile size**: Smaller tiles = faster processing (but may reduce accuracy)
+
+**Problem: Validation Loss Oscillates**
+
+**Symptoms:**
+- Val loss jumps up and down
+- No clear improvement trend
+
+**Solutions:**
+1. **Lower learning rate**: Try `5e-5` or `1e-5`
+2. **Increase batch size**: More stable gradients
+3. **Check validation set**: Ensure it's representative and not too small
+4. **Reduce learning rate schedule**: Model uses constant LR, consider manual reduction
+
+**Problem: Model Predicts Everything as Background**
+
+**Symptoms:**
+- All predictions are 0 (no archaeological sites detected)
+- Very low positive predictions
+
+**Solutions:**
+1. **Check class imbalance**: Use `--loss focal` for imbalanced data
+2. **Lower threshold**: In inference, use `--th 0.3` instead of 0.5
+3. **Check masks**: Verify ground truth has positive pixels
+4. **Use balanced sampling**: In data prep, use `--balance-ratio 0.4`
+5. **Check normalization**: Ensure data is properly normalized
+
+**Problem: Model Predicts Everything as Archaeological**
+
+**Symptoms:**
+- All predictions are 1 (everything detected as archaeological)
+- Very high false positive rate
+
+**Solutions:**
+1. **Increase threshold**: In inference, use `--th 0.7` or higher
+2. **More negative examples**: Add more background tiles to training data
+3. **Check data quality**: Ensure masks don't have labeling errors
+4. **Use balanced sampling**: In data prep, use `--balance-ratio 0.3` (more negatives)
+
+#### 6. Training Workflow Best Practices
+
+**Step 1: Start Small**
+```bash
+# Quick test run
+python training.py --data training_data --epochs 5 --batch-size 8
+```
+
+**Step 2: Baseline Training**
+```bash
+# Standard training
+python training.py --data training_data --epochs 50
+```
+
+**Step 3: Optimize**
+```bash
+# If results are good, try better architecture
+python training.py --data training_data --arch UnetPlusPlus --encoder resnet50
+```
+
+**Step 4: Fine-tune**
+```bash
+# Continue from best checkpoint with lower LR
+python training.py --data training_data --lr 5e-5 --epochs 30
+```
+
+**Step 5: Evaluate**
+- Check `training_history.json` for trends
+- Test on validation set
+- Visualize predictions on sample tiles
+
+### 📈 Expected Results and Performance
+
+**With Good Quality Training Data:**
+
+| Metric | Typical Range | Excellent | Notes |
+|--------|---------------|-----------|-------|
+| **Val IoU** | 0.6-0.8 | >0.8 | Intersection over Union |
+| **Val F1 Score** | 0.7-0.9 | >0.9 | Harmonic mean of precision/recall |
+| **Val Precision** | 0.7-0.9 | >0.9 | Low false positives |
+| **Val Recall** | 0.6-0.8 | >0.8 | Low false negatives |
+| **Training Time** | 2-5 hours | - | 50 epochs, GPU, 2000 tiles |
+| **Model Size** | 50-200 MB | - | Depends on encoder |
+
+**Performance by Architecture:**
+
+| Architecture | Val IoU | Training Time | Inference Speed |
+|-------------|---------|---------------|-----------------|
+| Unet + ResNet34 | 0.65-0.75 | 2-3 hours | Fast |
+| UnetPlusPlus + ResNet50 | 0.75-0.85 | 4-6 hours | Medium |
+| DeepLabV3Plus + EfficientNet-B3 | 0.70-0.80 | 3-4 hours | Medium |
+
+**Factors Affecting Results:**
+
+- ✅ **Data quality**: Accurate masks → better results
+- ✅ **Dataset size**: More tiles → better generalization
+- ✅ **Class balance**: Balanced dataset → more stable training
+- ✅ **Diversity**: Various terrain types → better generalization
+- ✅ **Hyperparameters**: Proper tuning → optimal performance
 
 ### 🔄 Complete Training Workflow Example
 
-```bash
-# 1. Prepare your data
-# (Create ground truth masks in QGIS or similar)
+**Full End-to-End Example:**
 
-# 2. Generate training tiles
+#### Step 1: Prepare Ground Truth Masks
+
+Create binary masks in QGIS:
+1. Load RGB orthophoto
+2. Create polygon layer
+3. Digitize archaeological features
+4. Export as GeoTIFF (single band, 0/1 values)
+
+#### Step 2: Generate Training Data
+
+```bash
+# Basic data generation
 python egitim_verisi_olusturma.py \
   --input area1.tif \
   --mask area1_mask.tif \
   --output training_data \
-  --tile-size 256
+  --tile-size 256 \
+  --overlap 64 \
+  --balance-ratio 0.4
 
-# 3. Train model
+# Expected output:
+# training_data/
+# ├── train/ (1000 tiles)
+# ├── val/ (250 tiles)
+# └── metadata.json
+```
+
+**Check metadata.json:**
+```bash
+cat training_data/metadata.json
+```
+
+#### Step 3: Train Model
+
+```bash
+# Initial training
 python training.py \
   --data training_data \
   --arch Unet \
   --encoder resnet34 \
   --epochs 50 \
-  --batch-size 16
+  --batch-size 16 \
+  --lr 1e-4 \
+  --loss combined
 
-# 4. Use trained model
+# Expected output:
+# checkpoints/
+# ├── best_Unet_resnet34_12ch_attention.pth
+# └── training_history.json
+```
+
+**Monitor training:**
+- Watch console output for loss and IoU trends
+- Check `training_history.json` for detailed metrics
+- Early stopping will save best model automatically
+
+#### Step 4: Evaluate Model
+
+**Check training history:**
+```python
+import json
+
+with open('checkpoints/training_history.json') as f:
+    history = json.load(f)
+
+print(f"Best Val IoU: {history['history']['val_iou'][history['best_epoch']]:.4f}")
+print(f"Best epoch: {history['best_epoch']}")
+```
+
+#### Step 5: Use Trained Model
+
+```bash
+# Inference with trained model
 python archaeo_detect.py \
   --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
   --input new_area.tif \
+  --th 0.6 \
+  --enable-fusion \
+  --encoder resnet34
+
+# Or configure in config.yaml
+```
+
+**config.yaml:**
+```yaml
+weights: "checkpoints/best_Unet_resnet34_12ch_attention.pth"
+zero_shot_imagenet: false
+encoder: "resnet34"
+enable_attention: true
+```
+
+#### Step 6: Iterate and Improve
+
+**If results are not satisfactory:**
+
+1. **Add more training data**
+   ```bash
+   # Generate more tiles from additional areas
+   python egitim_verisi_olusturma.py --input area2.tif --mask area2_mask.tif --output training_data_area2
+   # Manually combine or retrain with more data
+   ```
+
+2. **Try different architecture**
+   ```bash
+   python training.py --data training_data --arch UnetPlusPlus --encoder resnet50
+   ```
+
+3. **Fine-tune hyperparameters**
+   ```bash
+   python training.py --data training_data --lr 5e-5 --loss focal --batch-size 32
+   ```
+
+### 📊 Real-World Example: Kapadokya Region
+
+**Scenario:** Detecting old settlement remains in Kapadokya region
+
+**Step 1: Data Preparation**
+```bash
+python egitim_verisi_olusturma.py \
+  --input kapadokya_area.tif \
+  --mask kapadokya_mask.tif \
+  --output kapadokya_training \
+  --tile-size 256 \
+  --balance-ratio 0.4 \
+  --min-positive 0.01
+```
+
+**Step 2: Training**
+```bash
+python training.py \
+  --data kapadokya_training \
+  --arch Unet \
+  --encoder resnet34 \
+  --epochs 50 \
+  --batch-size 16 \
+  --loss combined
+```
+
+**Step 3: Results**
+- Val IoU: 0.72
+- Val F1: 0.81
+- Training time: 3h 15m
+- Model: `best_Unet_resnet34_12ch_attention.pth` (67 MB)
+
+**Step 4: Inference**
+```bash
+python archaeo_detect.py \
+  --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
+  --input new_kapadokya_area.tif \
+  --th 0.65 \
   --enable-fusion
 ```
 
