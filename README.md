@@ -1,164 +1,166 @@
-# 🏛️ Arkeolojik Alan Tespiti (Derin Öğrenme + Klasik Görüntü İşleme)
+# 🏛️ Archaeological Site Detection (Deep Learning + Classical Image Processing)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **LiDAR ve çok bantlı uydu görüntülerinden arkeolojik yapıları otomatik tespit eden gelişmiş bir yapay zeka sistemi**
+> **Advanced AI system for automatic detection of archaeological structures from LiDAR and multi-band satellite imagery**
 
-Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (tümülüs, hendek, höyük, duvar kalıntıları vb.) tespit etmek için **derin öğrenme** ve **klasik görüntü işleme** yöntemlerini birleştirir.
-
----
-
-## 📑 İçindekiler
-
-- [✨ Özellikler](#-özellikler)
-- [🎯 Ne İşe Yarar?](#-ne-işe-yarar)
-- [🚀 Hızlı Başlangıç](#-hızlı-başlangıç)
-- [📦 Kurulum](#-kurulum)
-- [🎮 Kullanım](#-kullanım)
-- [⚙️ Yapılandırma](#️-yapılandırma)
-- [📂 Çıktı Dosyaları](#-çıktı-dosyaları)
-- [🔬 Nasıl Çalışır?](#-nasıl-çalışır)
-- [💡 Kullanım Senaryoları](#-kullanım-senaryoları)
-- [🎨 Sonuçları Görselleştirme](#-sonuçları-görselleştirme)
-- [⚡ Performans Optimizasyonu](#-performans-optimizasyonu)
-- [🐛 Sorun Giderme](#-sorun-giderme)
-- [❓ Sık Sorulan Sorular (SSS)](#-sık-sorulan-sorular-sss)
-- [🔬 İleri Düzey Özellikler](#-i̇leri-düzey-özellikler)
-- [📚 Teknik Detaylar](#-teknik-detaylar)
-- [🤝 Katkıda Bulunma](#-katkıda-bulunma)
-- [📄 Lisans](#-lisans)
+This project combines **deep learning** and **classical image processing** methods to detect archaeological traces (tumuli, ditches, mounds, wall remains, etc.) from multi-band GeoTIFF data (RGB, DSM, DTM).
 
 ---
 
-## ✨ Özellikler
+## 📑 Table of Contents
 
-### 🧠 Dört Güçlü Yöntem
-- **Derin Öğrenme (Deep Learning)**: U-Net, DeepLabV3+ ve diğer modern segmentasyon mimarileri
-- **YOLO11 (YENİ!)**: Ultralytics YOLO11 ile hızlı nesne tespit ve segmentasyon + etiketli arazi envanteri 🏷️
-  - ⚠️ **Not:** Kuş bakışı görüntüler için fine-tuning gerekir (YOLO11_NADIR_TRAINING.md)
-- **Klasik Görüntü İşleme**: RVT (Relief Visualization Toolbox), Hessian matrisi, Morfolojik operatörler
-- **Hibrit Fusion**: Her yöntemin güçlü yönlerini birleştiren akıllı füzyon
-
-### 🎯 Akıllı Tespit Özellikleri
-- ✅ **Çoklu Encoder Desteği**: ResNet, EfficientNet, VGG, DenseNet, MobileNet ve daha fazlası
-- ✅ **Zero-Shot Öğrenme**: Eğitilmiş model olmadan bile ImageNet ağırlıkları ile çalışabilir
-- ✅ **Ensemble Learning**: Birden fazla encoder'ın sonuçlarını birleştirerek daha güvenilir tespit
-- ✅ **Çok Ölçekli Analiz**: Farklı boyutlardaki yapıları tespit edebilme
-- ✅ **🆕 Etiketli Nesne Tespiti**: YOLO11 ile 80 farklı nesne sınıfını (ağaç, bina, araç, vb.) otomatik etiketleme
-
-### 🔧 Teknik Özellikler
-- 🚀 **Karo Tabanlı İşleme**: Büyük görüntüler için bellek verimli işleme
-- 🎨 **Dikişsiz Mozaikleme**: Cosine feathering ile karo sınırlarında görüntü bozulması yok
-- 📊 **Robust Normalizasyon**: Global veya lokal persentil tabanlı normalizasyon
-- ⚡ **Önbellek Sistemi**: RVT hesaplamalarını önbelleğe alarak 10-100x hızlanma
-- 🎯 **Akıllı Maskeleme**: Yüksek yapıları (ağaç, bina) otomatik filtreleme
-- 📐 **Vektörleştirme**: Sonuçları GIS uyumlu poligonlara dönüştürme
-
-### 🌐 GIS Entegrasyonu
-- 📁 GeoPackage (.gpkg) formatında vektör çıktı
-- 🗺️ Coğrafi koordinat sistemi (CRS) korunur
-- 📏 Alan hesaplama ve filtreleme
-- 🎯 QGIS, ArcGIS gibi yazılımlarla uyumlu
+- [✨ Features](#-features)
+- [🎯 What It Does](#-what-it-does)
+- [🚀 Quick Start](#-quick-start)
+- [📦 Installation](#-installation)
+- [🎮 Usage](#-usage)
+- [⚙️ Configuration](#️-configuration)
+- [📂 Output Files](#-output-files)
+- [🔬 How It Works](#-how-it-works)
+- [💡 Use Cases](#-use-cases)
+- [🎨 Visualization](#-visualization)
+- [⚡ Performance Optimization](#-performance-optimization)
+- [🐛 Troubleshooting](#-troubleshooting)
+- [❓ FAQ](#-faq)
+- [🔬 Advanced Features](#-advanced-features)
+- [📚 Technical Details](#-technical-details)
+- [🤝 Contributing](#-contributing)
+- [📄 License](#-license)
 
 ---
 
-## 🎯 Ne İşe Yarar?
+## ✨ Features
 
-Bu sistem aşağıdaki arkeolojik özellikleri tespit edebilir:
+### 🧠 Four Powerful Methods
+- **Deep Learning**: U-Net, DeepLabV3+ and other modern segmentation architectures
+- **YOLO11 (NEW!)**: Fast object detection and segmentation with Ultralytics YOLO11 + labeled terrain inventory 🏷️
+  - ⚠️ **Note:** Fine-tuning required for nadir (bird's-eye) imagery (see YOLO11_NADIR_TRAINING.md)
+- **Classical Image Processing**: RVT (Relief Visualization Toolbox), Hessian matrix, Morphological operators
+- **Hybrid Fusion**: Smart fusion combining strengths of each method
 
-| Yapı Tipi | Açıklama | Tespit Yöntemi |
-|-----------|----------|----------------|
-| 🏔️ **Tümülüsler** | Yükseltilmiş mezar höyükleri | RVT + Hessian + DL |
-| 🏛️ **Höyükler** | Yerleşim höyükleri | Tüm yöntemler |
-| 🧱 **Duvar Kalıntıları** | Çizgisel yapı izleri | Hessian + DL |
-| ⭕ **Halka Hendekler** | Dairesel savunma yapıları | Morfolojik + DL |
-| 🏰 **Kale Kalıntıları** | Büyük yapı kompleksleri | Fusion (en etkili) |
-| 🏺 **Yerleşim İzleri** | Düzensiz topografik anomaliler | Klasik + DL |
-| 🛤️ **Antik Yollar** | Çizgisel yükseklik değişimleri | Hessian + RVT |
+### 🎯 Smart Detection Features
+- ✅ **Multi-Encoder Support**: ResNet, EfficientNet, VGG, DenseNet, MobileNet and more
+- ✅ **Zero-Shot Learning**: Works even without trained models using ImageNet weights
+- ✅ **Ensemble Learning**: Combines results from multiple encoders for more reliable detection
+- ✅ **Multi-Scale Analysis**: Detects structures of different sizes
+- ✅ **🆕 Labeled Object Detection**: Automatic labeling of 80 different object classes (trees, buildings, vehicles, etc.) with YOLO11
+
+### 🔧 Technical Features
+- 🚀 **Tile-Based Processing**: Memory-efficient processing for large images
+- 🎨 **Seamless Mosaicking**: No artifacts at tile boundaries with cosine feathering
+- 📊 **Robust Normalization**: Global or local percentile-based normalization
+- ⚡ **Cache System**: 10-100x speedup by caching RVT calculations
+- 🎯 **Smart Masking**: Automatic filtering of tall structures (trees, buildings)
+- 📐 **Vectorization**: Converts results to GIS-compatible polygons
+
+### 🌐 GIS Integration
+- 📁 Vector output in GeoPackage (.gpkg) format
+- 🗺️ Geographic coordinate system (CRS) preserved
+- 📏 Area calculation and filtering
+- 🎯 Compatible with QGIS, ArcGIS and similar software
 
 ---
 
-## 🚀 Hızlı Başlangıç
+## 🎯 What It Does
 
-### 5 Dakikada Çalıştırın!
+This system can detect the following archaeological features:
+
+| Structure Type | Description | Detection Method |
+|----------------|-------------|------------------|
+| 🏔️ **Tumuli** | Raised burial mounds | RVT + Hessian + DL |
+| 🏛️ **Mounds** | Settlement mounds | All methods |
+| 🧱 **Wall Remains** | Linear structure traces | Hessian + DL |
+| ⭕ **Ring Ditches** | Circular defensive structures | Morphological + DL |
+| 🏰 **Fortress Remains** | Large structure complexes | Fusion (most effective) |
+| 🏺 **Settlement Traces** | Irregular topographic anomalies | Classical + DL |
+| 🛤️ **Ancient Roads** | Linear elevation changes | Hessian + RVT |
+
+---
+
+## 🚀 Quick Start
+
+### Run in 5 Minutes!
 
 ```bash
-# 1. Depoyu klonlayın
-git clone https://github.com/your-username/arkeolojik_alan_tespit.git
-cd arkeolojik_alan_tespit
+# 1. Clone the repository
+git clone https://github.com/your-username/archaeological-site-detection.git
+cd archaeological-site-detection
 
-# 2. Gerekli paketleri yükleyin
+# 2. Install required packages
 pip install -r requirements.txt
 
-# 3. Verilerinizi hazırlayın (kesif_alani.tif adında bir GeoTIFF)
-# RGB, DSM, DTM bantlarını içeren tek bir dosya olmalı
+# 3. Prepare your data (a GeoTIFF named kesif_alani.tif)
+# Should contain RGB, DSM, DTM bands in a single file
 
-# 4. Çalıştırın!
+# 4. Run it!
 python archaeo_detect.py
 ```
 
-🎉 **Tebrikler!** Sistem çalışmaya başladı. Sonuçlar mevcut dizinde oluşturulacaktır.
+🎉 **Congratulations!** The system has started. Results will be created in the current directory.
 
 ---
 
-## 📦 Kurulum
+## 📦 Installation
 
-### Sistem Gereksinimleri
+### System Requirements
 
-| Gereksinim | Minimum | Önerilen |
-|------------|---------|----------|
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
 | **Python** | 3.10+ | 3.11+ |
 | **RAM** | 8 GB | 16 GB+ |
-| **Disk Alanı** | 2 GB | 5 GB+ |
-| **GPU** | Yok (CPU ile çalışır) | NVIDIA CUDA destekli GPU |
+| **Disk Space** | 2 GB | 5 GB+ |
+| **GPU** | None (works with CPU) | NVIDIA CUDA-capable GPU |
 
-### Adım Adım Kurulum
+### Step-by-Step Installation
 
-#### 1️⃣ Python ve Pip Kontrolü
+#### 1️⃣ Check Python and Pip
 
 ```bash
-python --version  # Python 3.10 veya üstü olmalı
-pip --version     # pip kurulu olmalı
+python --version  # Should be Python 3.10 or higher
+pip --version     # pip should be installed
 ```
 
-#### 2️⃣ Sanal Ortam Oluşturma (Önerilen)
+#### 2️⃣ Create Virtual Environment (Recommended)
 
 ```bash
 # Windows
-python -m venv venv
-venv\Scripts\activate
+python -m venv .venv310
+.venv310\Scripts\activate
 
 # Linux/Mac
-python -m venv venv
-source venv/bin/activate
+python -m venv .venv310
+source .venv310/bin/activate
 ```
 
-#### 3️⃣ Gerekli Paketlerin Yüklenmesi
+**Note:** The project includes a `.venv310` directory. If you move the project folder, make sure to update the virtual environment paths in `.venv310/Scripts/activate.bat` and `.venv310/Scripts/activate`.
+
+#### 3️⃣ Install Required Packages
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**requirements.txt içeriği:**
-- `torch>=2.0.0` - PyTorch (derin öğrenme)
-- `torchvision>=0.15.0` - Görüntü işleme
-- `segmentation-models-pytorch>=0.3.2` - Segmentasyon modelleri
-- `rasterio>=1.3.0` - Raster veri okuma/yazma
-- `fiona>=1.9.0` - Vektör veri işleme
-- `geopandas>=0.12.0` - Coğrafi veri analizi
-- `opencv-python>=4.7.0` - Görüntü işleme
-- `scikit-image>=0.20.0` - İleri düzey görüntü işleme
-- `scipy>=1.10.0` - Bilimsel hesaplama
-- `numpy>=1.24.0` - Sayısal işlemler
-- `rvt-py>=1.2.0` - Relief Visualization Toolbox
-- `pyyaml>=6.0` - YAML yapılandırma dosyaları
+**requirements.txt contents:**
+- `torch>=2.0.0` - PyTorch (deep learning)
+- `torchvision>=0.15.0` - Image processing
+- `segmentation-models-pytorch>=0.3.2` - Segmentation models
+- `rasterio>=1.3.0` - Raster data read/write
+- `fiona>=1.9.0` - Vector data processing
+- `geopandas>=0.12.0` - Geographic data analysis
+- `opencv-python>=4.7.0` - Image processing
+- `scikit-image>=0.20.0` - Advanced image processing
+- `scipy>=1.10.0` - Scientific computing
+- `numpy>=1.24.0` - Numerical operations
+- `rvt-py>=1.2.0` (Python < 3.11) or `rvt>=2.0.0` (Python >= 3.11) - Relief Visualization Toolbox
+- `pyyaml>=6.0` - YAML configuration files
 
-#### 4️⃣ GDAL Kurulumu (Opsiyonel ama Önerilen)
+#### 4️⃣ GDAL Installation (Optional but Recommended)
 
 **Windows:**
 ```bash
-# OSGeo4W veya Conda ile
+# Via OSGeo4W or Conda
 conda install -c conda-forge gdal
 ```
 
@@ -173,62 +175,62 @@ sudo apt-get install gdal-bin python3-gdal
 brew install gdal
 ```
 
-#### 5️⃣ GPU Desteği (Opsiyonel)
+#### 5️⃣ GPU Support (Optional)
 
-NVIDIA GPU'nuz varsa CUDA kurulumu:
+If you have an NVIDIA GPU, install CUDA:
 
 ```bash
-# CUDA 11.8 için
+# For CUDA 11.8
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
-# CUDA 12.1 için
+# For CUDA 12.1
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```
 
-GPU kontrolü:
+GPU check:
 ```python
 import torch
-print(torch.cuda.is_available())  # True olmalı
+print(torch.cuda.is_available())  # Should be True
 ```
 
 ---
 
-## 🎮 Kullanım
+## 🎮 Usage
 
-### Temel Kullanım
+### Basic Usage
 
-#### Varsayılan Ayarlarla Çalıştırma
+#### Running with Default Settings
 
 ```bash
 python archaeo_detect.py
 ```
 
-Bu komut `config.yaml` dosyasındaki ayarları kullanır ve girdi olarak tanımlanmış GeoTIFF dosyasını işler.
+This command uses settings from the `config.yaml` file and processes the GeoTIFF file defined as input.
 
-#### Komut Satırı Parametreleri ile Çalıştırma
+#### Running with Command-Line Parameters
 
 ```bash
-# Eşik değerini değiştir
+# Change threshold value
 python archaeo_detect.py --th 0.7
 
-# Karo boyutunu ayarla
+# Adjust tile size
 python archaeo_detect.py --tile 512 --overlap 128
 
-# Verbose modu aç (detaylı log)
+# Enable verbose mode (detailed log)
 python archaeo_detect.py -v
 
-# Farklı bir girdi dosyası kullan
-python archaeo_detect.py --input yeni_alan.tif
+# Use a different input file
+python archaeo_detect.py --input new_area.tif
 
-# Birden fazla parametre
+# Multiple parameters
 python archaeo_detect.py --th 0.7 --tile 1024 --enable-fusion -v
 ```
 
-### Yaygın Kullanım Örnekleri
+### Common Usage Examples
 
-#### 🔰 Örnek 1: İlk Defa Kullanım (Zero-Shot)
+#### 🔰 Example 1: First-Time Use (Zero-Shot)
 
-Eğitilmiş model olmadan, sadece ImageNet ağırlıkları ile:
+Without trained models, using only ImageNet weights:
 
 ```bash
 python archaeo_detect.py \
@@ -239,9 +241,9 @@ python archaeo_detect.py \
   -v
 ```
 
-#### 🎯 Örnek 2: Sadece Klasik Yöntem (Hızlı)
+#### 🎯 Example 2: Classical Method Only (Fast)
 
-GPU yoksa veya hızlı test için:
+If no GPU or for quick testing:
 
 ```bash
 python archaeo_detect.py \
@@ -251,9 +253,9 @@ python archaeo_detect.py \
   --cache-derivatives
 ```
 
-#### 🚀 Örnek 3: Ensemble (Çoklu Encoder)
+#### 🚀 Example 3: Ensemble (Multi-Encoder)
 
-En yüksek doğruluk için birden fazla encoder:
+For highest accuracy with multiple encoders:
 
 ```bash
 python archaeo_detect.py \
@@ -266,9 +268,9 @@ python archaeo_detect.py \
   -v
 ```
 
-#### 🎨 Örnek 4: Özel Eğitilmiş Model ile
+#### 🎨 Example 4: With Custom Trained Model
 
-Kendi eğittiğiniz model ile:
+With your own trained model:
 
 ```bash
 python archaeo_detect.py \
@@ -280,9 +282,9 @@ python archaeo_detect.py \
   --alpha 0.7
 ```
 
-#### 📊 Örnek 5: Büyük Alan Analizi (Optimize)
+#### 📊 Example 5: Large Area Analysis (Optimized)
 
-Geniş bir bölge için optimize edilmiş ayarlar:
+Optimized settings for a wide area:
 
 ```bash
 python archaeo_detect.py \
@@ -296,52 +298,52 @@ python archaeo_detect.py \
   -v
 ```
 
-### Komut Satırı Parametreleri (Tam Liste)
+### Command-Line Parameters (Full List)
 
 ```bash
 python archaeo_detect.py --help
 ```
 
-**Önemli Parametreler:**
+**Important Parameters:**
 
-| Parametre | Açıklama | Örnek |
-|-----------|----------|-------|
-| `--input` | Girdi GeoTIFF dosyası | `--input alan.tif` |
-| `--th` | DL eşik değeri (0-1) | `--th 0.7` |
-| `--tile` | Karo boyutu (piksel) | `--tile 1024` |
-| `--overlap` | Bindirme miktarı | `--overlap 256` |
-| `--encoder` | Tek encoder seçimi | `--encoder resnet34` |
-| `--encoders` | Çoklu encoder modu | `--encoders all` |
-| `--alpha` | Fusion ağırlığı | `--alpha 0.6` |
-| `--enable-fusion` | Fusion'ı etkinleştir | (bayrak) |
-| `--cache-derivatives` | Önbelleği kullan | (bayrak) |
-| `-v` veya `--verbose` | Detaylı log | (bayrak) |
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `--input` | Input GeoTIFF file | `--input area.tif` |
+| `--th` | DL threshold (0-1) | `--th 0.7` |
+| `--tile` | Tile size (pixels) | `--tile 1024` |
+| `--overlap` | Overlap amount | `--overlap 256` |
+| `--encoder` | Single encoder selection | `--encoder resnet34` |
+| `--encoders` | Multi-encoder mode | `--encoders all` |
+| `--alpha` | Fusion weight | `--alpha 0.6` |
+| `--enable-fusion` | Enable fusion | (flag) |
+| `--cache-derivatives` | Use cache | (flag) |
+| `-v` or `--verbose` | Detailed log | (flag) |
 
 ---
 
-## ⚙️ Yapılandırma
+## ⚙️ Configuration
 
-### config.yaml Dosyası
+### config.yaml File
 
-Sistem davranışı `config.yaml` dosyası ile kontrol edilir. Bu dosya **çok detaylı açıklamalarla** zenginleştirilmiştir.
+System behavior is controlled by the `config.yaml` file. This file is **richly documented** with detailed explanations.
 
-#### Ana Bölümler:
+#### Main Sections:
 
-1. **Girdi/Çıktı**: Dosya yolları ve bant seçimi
-2. **Yöntem Seçimi**: Hangi yöntemlerin kullanılacağı
-3. **Derin Öğrenme**: Model mimarisi ve encoder ayarları
-4. **Klasik Yöntemler**: RVT, Hessian, Morfoloji parametreleri
-5. **Fusion**: Hibrit birleştirme ayarları
-6. **Karo İşleme**: Bellek ve performans optimizasyonu
-7. **Normalizasyon**: Veri ön işleme
-8. **Maskeleme**: Yüksek yapıları filtreleme
-9. **Vektörleştirme**: GIS çıktı formatı
-10. **Performans**: Hız ve bellek optimizasyonu
-11. **Önbellek**: Hızlandırma sistemi
+1. **Input/Output**: File paths and band selection
+2. **Method Selection**: Which methods to use
+3. **Deep Learning**: Model architecture and encoder settings
+4. **Classical Methods**: RVT, Hessian, Morphology parameters
+5. **Fusion**: Hybrid combination settings
+6. **Tile Processing**: Memory and performance optimization
+7. **Normalization**: Data preprocessing
+8. **Masking**: Filtering tall structures
+9. **Vectorization**: GIS output format
+10. **Performance**: Speed and memory optimization
+11. **Cache**: Acceleration system
 
-#### Hızlı Yapılandırma Senaryoları:
+#### Quick Configuration Scenarios:
 
-**Senaryo 1: Sadece Derin Öğrenme**
+**Scenario 1: Deep Learning Only**
 ```yaml
 enable_deep_learning: true
 enable_classic: false
@@ -350,7 +352,7 @@ encoder: "resnet34"
 zero_shot_imagenet: true
 ```
 
-**Senaryo 2: Sadece Klasik Yöntem**
+**Scenario 2: Classical Method Only**
 ```yaml
 enable_deep_learning: false
 enable_classic: true
@@ -359,7 +361,7 @@ classic_modes: "combo"
 cache_derivatives: true
 ```
 
-**Senaryo 3: Hibrit (En İyi Sonuç)**
+**Scenario 3: Hybrid (Best Results)**
 ```yaml
 enable_deep_learning: true
 enable_classic: true
@@ -369,56 +371,56 @@ encoders: "all"
 cache_derivatives: true
 ```
 
-### Veri Hazırlama
+### Data Preparation
 
-#### Girdi Dosyası Gereksinimleri:
+#### Input File Requirements:
 
-✅ **GeoTIFF formatı** (.tif veya .tiff)  
-✅ **Çok bantlı** (en az 3 bant: RGB)  
-✅ **Aynı grid** (tüm bantlar aynı çözünürlük ve kapsam)  
-✅ **Coğrafi referans** (CRS/EPSG kodu)
+✅ **GeoTIFF format** (.tif or .tiff)  
+✅ **Multi-band** (at least 3 bands: RGB)  
+✅ **Same grid** (all bands same resolution and extent)  
+✅ **Geographic reference** (CRS/EPSG code)
 
-#### Önerilen Bant Yapısı:
+#### Recommended Band Structure:
 
-| Bant # | İçerik | Açıklama |
-|--------|--------|----------|
-| 1 | Red (Kırmızı) | RGB'nin R bileşeni |
-| 2 | Green (Yeşil) | RGB'nin G bileşeni |
-| 3 | Blue (Mavi) | RGB'nin B bileşeni |
-| 4 | DSM | Sayısal Yüzey Modeli (yükseklik) |
-| 5 | DTM | Sayısal Arazi Modeli (zemin yüksekliği) |
+| Band # | Content | Description |
+|--------|---------|-------------|
+| 1 | Red | RGB's R component |
+| 2 | Green | RGB's G component |
+| 3 | Blue | RGB's B component |
+| 4 | DSM | Digital Surface Model (elevation) |
+| 5 | DTM | Digital Terrain Model (ground elevation) |
 
-#### Veri Oluşturma Örneği (GDAL):
+#### Data Creation Example (GDAL):
 
 ```bash
-# Ayrı RGB ve yükseklik dosyalarını birleştirme
+# Combine separate RGB and elevation files
 gdal_merge.py -separate -o combined.tif \
   red.tif green.tif blue.tif dsm.tif dtm.tif
 
-# Yeniden örnekleme (farklı çözünürlükleri eşitleme)
+# Resampling (equalizing different resolutions)
 gdalwarp -tr 1.0 1.0 -r bilinear input.tif output.tif
 
-# Koordinat sistemi atama
+# Assign coordinate system
 gdal_edit.py -a_srs EPSG:32635 output.tif
 ```
 
 ---
 
-## 📂 Çıktı Dosyaları
+## 📂 Output Files
 
-Sistem çalıştırıldığında aşağıdaki dosyalar oluşturulur:
+When the system runs, the following files are created:
 
-### 📊 Raster Çıktılar (GeoTIFF)
+### 📊 Raster Outputs (GeoTIFF)
 
-#### 1️⃣ Derin Öğrenme Çıktıları
+#### 1️⃣ Deep Learning Outputs
 
-**Tek Encoder:**
+**Single Encoder:**
 ```
-kesif_alani_prob.tif     → Olasılık haritası (0.0-1.0 arası sürekli değerler)
-kesif_alani_mask.tif     → İkili maske (0: arkeolojik değil, 1: arkeolojik alan)
+kesif_alani_prob.tif     → Probability map (continuous values 0.0-1.0)
+kesif_alani_mask.tif     → Binary mask (0: not archaeological, 1: archaeological area)
 ```
 
-**Çoklu Encoder:**
+**Multi-Encoder:**
 ```
 kesif_alani_resnet34_prob.tif
 kesif_alani_resnet34_mask.tif
@@ -428,94 +430,110 @@ kesif_alani_efficientnet-b3_prob.tif
 kesif_alani_efficientnet-b3_mask.tif
 ```
 
-#### 2️⃣ Klasik Yöntem Çıktıları
+#### 2️⃣ Classical Method Outputs
 
 ```
-kesif_alani_classic_prob.tif     → Birleştirilmiş klasik olasılık
-kesif_alani_classic_mask.tif     → Klasik ikili maske
+kesif_alani_classic_prob.tif     → Combined classical probability
+kesif_alani_classic_mask.tif     → Classical binary mask
 ```
 
-**Ara Dosyalar (classic_save_intermediate: true):**
+**Intermediate Files (classic_save_intermediate: true):**
 ```
-kesif_alani_classic_rvtlog_prob.tif    → Sadece RVT yöntemi
-kesif_alani_classic_hessian_prob.tif   → Sadece Hessian yöntemi
-kesif_alani_classic_morph_prob.tif     → Sadece Morfoloji yöntemi
+kesif_alani_classic_rvtlog_prob.tif    → RVT method only
+kesif_alani_classic_hessian_prob.tif   → Hessian method only
+kesif_alani_classic_morph_prob.tif     → Morphology method only
 ```
 
-#### 3️⃣ Fusion Çıktıları
+#### 3️⃣ Fusion Outputs
 
 ```
 kesif_alani_fused_resnet34_prob.tif
 kesif_alani_fused_resnet34_mask.tif
 ```
 
-### 📍 Vektör Çıktılar (GeoPackage)
+### 📍 Vector Outputs (GeoPackage)
 
 ```
-kesif_alani_mask.gpkg                → DL vektör poligonlar
-kesif_alani_classic_mask.gpkg        → Klasik vektör poligonlar
-kesif_alani_fused_resnet34_mask.gpkg → Fusion vektör poligonlar
+kesif_alani_mask.gpkg                → DL vector polygons
+kesif_alani_classic_mask.gpkg        → Classical vector polygons
+kesif_alani_fused_resnet34_mask.gpkg → Fusion vector polygons
 ```
 
-**GeoPackage Özellikleri:**
-- Poligon geometrisi
-- Alan bilgisi (m² cinsinden)
-- CRS bilgisi korunur
-- QGIS/ArcGIS'te doğrudan açılabilir
+**GeoPackage Features:**
+- Polygon geometry
+- Area information (in m²)
+- CRS information preserved
+- Can be opened directly in QGIS/ArcGIS
 
-### 💾 Önbellek Dosyaları
+### 💾 Cache Files
 
+**Cache Directory Structure:**
 ```
-kesif_alani.derivatives.npz    → RVT türevleri önbelleği
+cache/
+├── kesif_alani.derivatives.npz    → RVT derivatives cache
+└── karlik_vadi.derivatives.npz   → RVT derivatives cache
 ```
 
-Bu dosya RVT hesaplamalarını saklar ve sonraki çalıştırmalarda 10-100x hızlanma sağlar.
+**Cache System:**
+- RVT calculations are cached in `.npz` format
+- Cache files are stored in the `cache/` directory (configurable via `cache_dir` in config.yaml)
+- Cache validation checks file name and modification time
+- **Important:** Cache files are reusable even if the project folder is moved (file name-based validation)
+- Provides 10-100x speedup on subsequent runs
+- Cache files are typically 10-50 MB, but can be larger for high-resolution data
 
-### 📋 Dosya Adlandırma Mantığı
+**Cache Configuration:**
+```yaml
+cache_derivatives: true      # Enable caching
+cache_dir: "cache/"          # Cache directory (relative to project root)
+recalculate_cache: false     # Don't recalculate if cache exists
+```
 
-Çıktı dosyaları otomatik olarak şu formatta adlandırılır:
+### 📋 File Naming Logic
+
+Output files are automatically named in the following format:
 
 ```
 <prefix>_[method]_[encoder]_[params]_[type].ext
 ```
 
-Örnek:
+Example:
 ```
 kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
 ```
 
-**Parametreler:**
-- `th`: Eşik değeri
-- `tile`: Karo boyutu
-- `alpha`: Fusion oranı
-- `minarea`: Minimum alan
-- Ve diğerleri...
+**Parameters:**
+- `th`: Threshold value
+- `tile`: Tile size
+- `alpha`: Fusion ratio
+- `minarea`: Minimum area
+- And others...
 
 ---
 
-## 🔬 Nasıl Çalışır?
+## 🔬 How It Works
 
-### İş Akışı Genel Bakış
+### Workflow Overview
 
 ```
 ┌─────────────────────┐
-│  GeoTIFF Girdi      │
+│  GeoTIFF Input      │
 │ (RGB, DSM, DTM)     │
 └──────────┬──────────┘
            │
            ▼
 ┌─────────────────────┐
-│  Veri Ön İşleme     │
-│  - Bant okuma       │
-│  - Normalizasyon    │
-│  - Maskeleme        │
+│  Data Preprocessing │
+│  - Band reading     │
+│  - Normalization    │
+│  - Masking          │
 └──────────┬──────────┘
            │
      ┌─────┴─────┐
      ▼           ▼
 ┌─────────┐ ┌──────────┐
-│ Derin   │ │ Klasik   │
-│ Öğrenme │ │ Yöntemler│
+│ Deep    │ │ Classical│
+│ Learning│ │ Methods  │
 │ (U-Net) │ │ (RVT)    │
 └────┬────┘ └────┬─────┘
      │           │
@@ -523,104 +541,104 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
            ▼
    ┌───────────────┐
    │    Fusion     │
-   │  (Birleştir)  │
+   │  (Combine)    │
    └───────┬───────┘
            │
            ▼
    ┌───────────────┐
-   │  Eşikleme     │
+   │  Thresholding │
    │  (Prob → Mask)│
    └───────┬───────┘
            │
            ▼
    ┌───────────────┐
-   │ Vektörleştirme│
+   │ Vectorization │
    │  (GeoPackage) │
    └───────────────┘
 ```
 
-### 1️⃣ Derin Öğrenme Yöntemi
+### 1️⃣ Deep Learning Method
 
-**Adımlar:**
+**Steps:**
 
-1. **RVT Türevleri Hesaplama**
+1. **RVT Derivatives Calculation**
    - Sky-View Factor (SVF)
-   - Openness (Pozitif & Negatif)
+   - Openness (Positive & Negative)
    - Local Relief Model (LRM)
-   - Slope (Eğim)
+   - Slope
 
-2. **9 Kanallı Tensör Oluşturma**
+2. **9-Channel Tensor Creation**
    - 3 x RGB
    - 1 x nDSM (DSM - DTM)
-   - 5 x RVT türevleri
+   - 5 x RVT derivatives
 
-3. **Normalizasyon**
-   - Global veya lokal persentil bazlı
-   - 2%-98% aralığına ölçekleme
+3. **Normalization**
+   - Global or local percentile-based
+   - Scaling to 2%-98% range
 
-4. **Karo Bazlı İşleme**
-   - Büyük görüntü küçük karolara bölünür
-   - Her karo U-Net'e verilir
-   - Olasılık haritası üretilir
+4. **Tile-Based Processing**
+   - Large image divided into small tiles
+   - Each tile fed to U-Net
+   - Probability map generated
 
-5. **Feathering (Yumuşatma)**
-   - Karolar arası geçişler yumuşatılır
-   - Dikişsiz mozaik oluşturulur
+5. **Feathering (Smoothing)**
+   - Transitions between tiles smoothed
+   - Seamless mosaic created
 
-6. **Eşikleme**
-   - Olasılık > eşik → Maske = 1
-   - Olasılık ≤ eşik → Maske = 0
+6. **Thresholding**
+   - Probability > threshold → Mask = 1
+   - Probability ≤ threshold → Mask = 0
 
-### 2️⃣ Klasik Görüntü İşleme
+### 2️⃣ Classical Image Processing
 
-**Üç Alt Yöntem:**
+**Three Sub-Methods:**
 
 **A) RVT (Relief Visualization)**
-- SVF, Openness hesaplamaları
-- Kabartı görselleştirme
-- Tümülüs ve höyükler için ideal
+- SVF, Openness calculations
+- Relief visualization
+- Ideal for tumuli and mounds
 
-**B) Hessian Matrisi**
-- İkinci türev analizi
-- Ridge (çıkıntı) ve valley (çukur) tespiti
-- Duvar ve hendek izleri için etkili
+**B) Hessian Matrix**
+- Second derivative analysis
+- Ridge and valley detection
+- Effective for walls and ditches
 
-**C) Morfolojik Operatörler**
-- Açma (opening), kapatma (closing)
-- Top-hat dönüşümleri
-- Yerel doku özellikleri
+**C) Morphological Operators**
+- Opening, closing
+- Top-hat transformations
+- Local texture features
 
-**Birleştirme:**
-- Her yöntem 0-1 arası skor üretir
-- Skorlar ortalaması alınır (combo modu)
-- Otsu veya manuel eşikleme uygulanır
+**Combination:**
+- Each method produces 0-1 score
+- Scores averaged (combo mode)
+- Otsu or manual thresholding applied
 
-### 3️⃣ Fusion (Hibrit Birleştirme)
+### 3️⃣ Fusion (Hybrid Combination)
 
-**Formül:**
+**Formula:**
 ```
 P_fused = α × P_deep_learning + (1 - α) × P_classic
 ```
 
-**Avantajlar:**
-- Derin öğrenme: Karmaşık paternler
-- Klasik: Güvenilir yükseklik özellikleri
-- Fusion: Her ikisinin güçlü yönleri
+**Advantages:**
+- Deep learning: Complex patterns
+- Classical: Reliable elevation features
+- Fusion: Strengths of both
 
-**Örnek:**
-- α = 0.5: Eşit ağırlık
-- α = 0.7: DL'ye öncelik
-- α = 0.3: Klasik'e öncelik
+**Example:**
+- α = 0.5: Equal weight
+- α = 0.7: Priority to DL
+- α = 0.3: Priority to classical
 
 ---
 
-## 💡 Kullanım Senaryoları
+## 💡 Use Cases
 
-### 📍 Senaryo 1: Yeni Bir Bölge Keşfi
+### 📍 Scenario 1: New Area Discovery
 
-**Durum:** Hiç araştırılmamış bir bölgede ilk tarama
+**Situation:** First scan of an unexplored area
 
-**Önerilen Ayarlar:**
+**Recommended Settings:**
 ```bash
 python archaeo_detect.py \
   --encoders all \
@@ -634,17 +652,17 @@ python archaeo_detect.py \
   -v
 ```
 
-**Neden bu ayarlar?**
-- Çoklu encoder: Maksimum tespit hassasiyeti
-- Düşük eşik: Tüm adayları yakala
-- Düşük min_area: Küçük yapıları kaçırma
-- Cache: Tekrar analiz için hızlandırma
+**Why these settings?**
+- Multi-encoder: Maximum detection sensitivity
+- Low threshold: Catch all candidates
+- Low min_area: Don't miss small structures
+- Cache: Speedup for repeated analysis
 
-### 🎯 Senaryo 2: Bilinen Alan Detaylı Analiz
+### 🎯 Scenario 2: Detailed Analysis of Known Area
 
-**Durum:** Daha önce tespit edilmiş bir alanın detaylı incelenmesi
+**Situation:** Detailed examination of a previously detected area
 
-**Önerilen Ayarlar:**
+**Recommended Settings:**
 ```bash
 python archaeo_detect.py \
   --encoder efficientnet-b3 \
@@ -657,16 +675,16 @@ python archaeo_detect.py \
   -v
 ```
 
-**Neden bu ayarlar?**
-- Özel model: Bölgeye özgü eğitilmiş model
-- Yüksek eşik: Sadece güvenilir tespitler
-- Simplify: Temiz poligonlar
+**Why these settings?**
+- Custom model: Region-specific trained model
+- High threshold: Only reliable detections
+- Simplify: Clean polygons
 
-### ⚡ Senaryo 3: Hızlı Ön Değerlendirme
+### ⚡ Scenario 3: Quick Preliminary Assessment
 
-**Durum:** Hızlıca bir fikir edinmek için
+**Situation:** To quickly get an idea
 
-**Önerilen Ayarlar:**
+**Recommended Settings:**
 ```bash
 python archaeo_detect.py \
   --no-enable-deep-learning \
@@ -677,16 +695,16 @@ python archaeo_detect.py \
   --cache-derivatives
 ```
 
-**Neden bu ayarlar?**
-- Sadece klasik: En hızlı yöntem
-- Küçük karo: Daha az bellek
-- Vektör yok: Zaman tasarrufu
+**Why these settings?**
+- Classical only: Fastest method
+- Small tiles: Less memory
+- No vector: Time saving
 
-### 🔬 Senaryo 4: Araştırma ve Karşılaştırma
+### 🔬 Scenario 4: Research and Comparison
 
-**Durum:** Farklı yöntemleri karşılaştırmalı analiz
+**Situation:** Comparative analysis of different methods
 
-**Önerilen Ayarlar:**
+**Recommended Settings:**
 ```bash
 python archaeo_detect.py \
   --encoders all \
@@ -698,93 +716,93 @@ python archaeo_detect.py \
   -v
 ```
 
-**Neden bu ayarlar?**
-- Tüm yöntemler aktif
-- Ara dosyalar: Her yöntemin katkısını gör
-- Tüm fusion: Her kombinasyonu dene
+**Why these settings?**
+- All methods active
+- Intermediate files: See each method's contribution
+- All fusion: Try every combination
 
 ---
 
-## 🎨 Sonuçları Görselleştirme
+## 🎨 Visualization
 
-### QGIS'te Görüntüleme
+### Viewing in QGIS
 
-#### 1️⃣ Olasılık Haritalarını Yükleme
-
-```
-Katman → Katman Ekle → Raster Katman
-```
-
-**Önerilen Renk Şeması:**
-- 0.0-0.3: Mavi (Düşük olasılık)
-- 0.3-0.5: Sarı (Orta olasılık)
-- 0.5-0.7: Turuncu (Yüksek olasılık)
-- 0.7-1.0: Kırmızı (Çok yüksek olasılık)
-
-#### 2️⃣ Vektör Poligonları Görüntüleme
+#### 1️⃣ Loading Probability Maps
 
 ```
-Katman → Katman Ekle → Vektör Katman → GeoPackage seç
+Layer → Add Layer → Add Raster Layer
 ```
 
-**Stil Önerileri:**
-- Dolgu: Yarı şeffaf kırmızı (opacity: 50%)
-- Çizgi: Kalın kırmızı (2 piksel)
-- Etiket: Alan değeri (m²)
+**Recommended Color Scheme:**
+- 0.0-0.3: Blue (Low probability)
+- 0.3-0.5: Yellow (Medium probability)
+- 0.5-0.7: Orange (High probability)
+- 0.7-1.0: Red (Very high probability)
 
-#### 3️⃣ Temel Harita ile Overlay
+#### 2️⃣ Viewing Vector Polygons
+
+```
+Layer → Add Layer → Add Vector Layer → Select GeoPackage
+```
+
+**Style Suggestions:**
+- Fill: Semi-transparent red (opacity: 50%)
+- Line: Thick red (2 pixels)
+- Label: Area value (m²)
+
+#### 3️⃣ Overlay with Base Map
 
 ```python
 # QGIS Python Console
 from qgis.core import QgsRasterLayer
 
-# Ortofoto ekle
-ortho = QgsRasterLayer('kesif_alani.tif', 'Ortofoto')
+# Add orthophoto
+ortho = QgsRasterLayer('kesif_alani.tif', 'Orthophoto')
 QgsProject.instance().addMapLayer(ortho)
 
-# Maske ekle (yarı şeffaf)
-mask = QgsRasterLayer('kesif_alani_mask.tif', 'Tespit')
+# Add mask (semi-transparent)
+mask = QgsRasterLayer('kesif_alani_mask.tif', 'Detection')
 QgsProject.instance().addMapLayer(mask)
 mask.renderer().setOpacity(0.6)
 ```
 
-### Python ile Görselleştirme
+### Python Visualization
 
 ```python
 import rasterio
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-# Olasılık haritasını oku
+# Read probability map
 with rasterio.open('kesif_alani_prob.tif') as src:
     prob = src.read(1)
 
-# Özel renk paleti
+# Custom color palette
 colors = ['blue', 'cyan', 'yellow', 'orange', 'red']
 cmap = LinearSegmentedColormap.from_list('archaeo', colors)
 
-# Görselleştir
+# Visualize
 plt.figure(figsize=(12, 10))
 plt.imshow(prob, cmap=cmap, vmin=0, vmax=1)
-plt.colorbar(label='Arkeolojik Alan Olasılığı')
-plt.title('Arkeolojik Alan Tespit Sonuçları')
-plt.xlabel('X (piksel)')
-plt.ylabel('Y (piksel)')
+plt.colorbar(label='Archaeological Site Probability')
+plt.title('Archaeological Site Detection Results')
+plt.xlabel('X (pixels)')
+plt.ylabel('Y (pixels)')
 plt.tight_layout()
-plt.savefig('sonuc_gorsel.png', dpi=300)
+plt.savefig('result_visualization.png', dpi=300)
 plt.show()
 ```
 
-### Web Tabanlı Görselleştirme
+### Web-Based Visualization
 
 ```python
 import folium
 import geopandas as gpd
 
-# Vektörü oku
+# Read vector
 gdf = gpd.read_file('kesif_alani_mask.gpkg')
 
-# Harita oluştur
+# Create map
 m = folium.Map(
     location=[gdf.geometry.centroid.y.mean(), 
               gdf.geometry.centroid.x.mean()],
@@ -792,7 +810,7 @@ m = folium.Map(
     tiles='OpenStreetMap'
 )
 
-# Poligonları ekle
+# Add polygons
 for idx, row in gdf.iterrows():
     folium.GeoJson(
         row.geometry,
@@ -802,42 +820,42 @@ for idx, row in gdf.iterrows():
             'weight': 2,
             'fillOpacity': 0.5
         },
-        tooltip=f"Alan: {row.get('area', 0):.1f} m²"
+        tooltip=f"Area: {row.get('area', 0):.1f} m²"
     ).add_to(m)
 
-# Kaydet
-m.save('interaktif_harita.html')
-print("Harita oluşturuldu: interaktif_harita.html")
+# Save
+m.save('interactive_map.html')
+print("Map created: interactive_map.html")
 ```
 
 ---
 
-## ⚡ Performans Optimizasyonu
+## ⚡ Performance Optimization
 
-### GPU Kullanımı
+### GPU Usage
 
-#### CUDA Kontrolü
+#### CUDA Check
 ```python
 import torch
-print(f"CUDA Kullanılabilir: {torch.cuda.is_available()}")
-print(f"CUDA Versiyon: {torch.version.cuda}")
-print(f"GPU Sayısı: {torch.cuda.device_count()}")
+print(f"CUDA Available: {torch.cuda.is_available()}")
+print(f"CUDA Version: {torch.version.cuda}")
+print(f"GPU Count: {torch.cuda.device_count()}")
 if torch.cuda.is_available():
-    print(f"GPU Adı: {torch.cuda.get_device_name(0)}")
+    print(f"GPU Name: {torch.cuda.get_device_name(0)}")
 ```
 
-#### GPU ile Hızlandırma
+#### GPU Acceleration
 ```bash
-# Mixed precision (FP16) ile 2x hızlanma
+# 2x speedup with mixed precision (FP16)
 python archaeo_detect.py --half
 
-# Büyük karolarla GPU'yu doldur
+# Fill GPU with large tiles
 python archaeo_detect.py --tile 2048 --overlap 512
 ```
 
-### Bellek Optimizasyonu
+### Memory Optimization
 
-#### Düşük Bellek Durumu
+#### Low Memory Situation
 ```bash
 python archaeo_detect.py \
   --tile 512 \
@@ -846,7 +864,7 @@ python archaeo_detect.py \
   --enable-classic
 ```
 
-#### Yüksek Bellek Durumu
+#### High Memory Situation
 ```bash
 python archaeo_detect.py \
   --tile 4096 \
@@ -855,72 +873,79 @@ python archaeo_detect.py \
   --encoders all
 ```
 
-### Önbellek Stratejisi
+### Cache Strategy
 
 ```bash
-# İlk çalıştırma: Önbellek oluştur
+# First run: Create cache
 python archaeo_detect.py --cache-derivatives
 
-# Sonraki çalıştırmalar: 10-100x daha hızlı!
-# Önbellek otomatik kullanılır
+# Subsequent runs: 10-100x faster!
+# Cache is automatically used
 
-# Parametreleri değiştirirken önbelleği yeniden hesapla
+# Recalculate cache when changing parameters
 python archaeo_detect.py --recalculate-cache
 ```
 
-### Paralel İşleme
+**Cache Benefits:**
+- RVT derivatives are calculated once and cached
+- Cache files stored in `cache/` directory
+- Cache validation is flexible: works even if project folder is moved
+- File name and modification time are checked for validation
+- Significant time savings on repeated runs
 
-Birden fazla alan varsa paralel çalıştırma:
+### Parallel Processing
+
+For multiple areas, run in parallel:
 
 ```bash
 # Bash script
-for file in alan1.tif alan2.tif alan3.tif; do
+for file in area1.tif area2.tif area3.tif; do
   python archaeo_detect.py --input $file &
 done
 wait
 ```
 
-### Performans Karşılaştırması
+### Performance Comparison
 
-| Yapılandırma | İşlem Süresi | Bellek Kullanımı | Kalite |
-|--------------|--------------|------------------|--------|
-| **Minimum** (CPU, 512 tile) | ~30 dk | 4 GB | Düşük |
-| **Dengeli** (GPU, 1024 tile) | ~5 dk | 8 GB | Orta |
-| **Maksimum** (GPU, 2048 tile, ensemble) | ~15 dk | 16 GB | Yüksek |
+| Configuration | Processing Time | Memory Usage | Quality |
+|---------------|----------------|--------------|---------|
+| **Minimum** (CPU, 512 tile) | ~30 min | 4 GB | Low |
+| **Balanced** (GPU, 1024 tile) | ~5 min | 8 GB | Medium |
+| **Maximum** (GPU, 2048 tile, ensemble) | ~15 min | 16 GB | High |
 
-*10 km² alan için tahmini süreler (1m çözünürlük)*
+*Estimated times for 10 km² area (1m resolution)*
 
 ---
 
-## 🐛 Sorun Giderme
+## 🐛 Troubleshooting
 
-### Yaygın Hatalar ve Çözümleri
+### Common Errors and Solutions
 
-#### ❌ Hata 1: CUDA Out of Memory
+#### ❌ Error 1: CUDA Out of Memory
 
 ```
 RuntimeError: CUDA out of memory. Tried to allocate X GB
 ```
 
-**Çözümler:**
+**Solutions:**
 ```bash
-# Çözüm 1: Karo boyutunu küçült
+# Solution 1: Reduce tile size
 python archaeo_detect.py --tile 512
 
-# Çözüm 2: Mixed precision kullan
+# Solution 2: Use mixed precision
 python archaeo_detect.py --half
 
-# Çözüm 3: CPU kullan
+# Solution 3: Use CPU
 python archaeo_detect.py --device cpu
 ```
 
-#### ❌ Hata 2: RVT Import Hatası
+#### ❌ Error 2: RVT Import Error
 
 ```
 ModuleNotFoundError: No module named 'rvt'
 ```
 
-**Çözüm:**
+**Solution:**
 ```bash
 # Python 3.10
 pip install rvt-py
@@ -928,133 +953,157 @@ pip install rvt-py
 # Python 3.11+
 pip install rvt
 
-# Veya conda
+# Or via conda
 conda install -c conda-forge rvt
 ```
 
-#### ❌ Hata 3: Boş Çıktı
+#### ❌ Error 3: Empty Output
 
 ```
 Warning: No detections found
 ```
 
-**Çözümler:**
-1. Eşik değerini düşür:
+**Solutions:**
+1. Lower threshold value:
    ```bash
    python archaeo_detect.py --th 0.3 --classic-th 0.3
    ```
 
-2. Minimum alanı düşür:
+2. Lower minimum area:
    ```bash
    python archaeo_detect.py --min-area 20
    ```
 
-3. Verbose modda kontrol et:
+3. Check in verbose mode:
    ```bash
    python archaeo_detect.py -v
    ```
 
-#### ❌ Hata 4: Klasik Yöntem Çalışmıyor
+#### ❌ Error 4: Classical Method Not Working
 
 ```
 Error: DTM band not found
 ```
 
-**Çözüm:**
-`config.yaml` dosyasında bantları kontrol edin:
+**Solution:**
+Check bands in `config.yaml`:
 ```yaml
-bands: "1,2,3,4,5"  # 5. bant DTM olmalı
-# DTM yoksa:
-bands: "1,2,3,4,0"  # DTM yerine 0 kullanın
+bands: "1,2,3,4,5"  # Band 5 should be DTM
+# If no DTM:
+bands: "1,2,3,4,0"  # Use 0 instead of DTM
 ```
 
-#### ❌ Hata 5: Karo Sınırlarında Çizgiler
+#### ❌ Error 5: Lines at Tile Boundaries
 
-**Çözüm:**
+**Solution:**
 ```bash
-# Overlap artır ve feathering etkinleştir
+# Increase overlap and enable feathering
 python archaeo_detect.py --overlap 512 --feather
 ```
 
-### Debug Modu
+#### ❌ Error 6: Cache Not Being Used
 
-Detaylı hata ayıklama için:
+**Symptoms:** System recalculates RVT derivatives even when cache files exist
+
+**Solutions:**
+1. Check cache directory path in `config.yaml`:
+   ```yaml
+   cache_dir: "cache/"  # Should match your cache directory
+   ```
+
+2. Verify cache file naming:
+   - Cache files should be named: `<input_name>.derivatives.npz`
+   - Example: `kesif_alani.derivatives.npz` for input `kesif_alani.tif`
+
+3. Check cache validation:
+   - Cache validation checks file name and modification time
+   - If input file was moved, cache should still work (file name-based validation)
+   - If input file was modified, cache will be recalculated
+
+4. Enable verbose mode to see cache status:
+   ```bash
+   python archaeo_detect.py --cache-derivatives -v
+   ```
+
+### Debug Mode
+
+For detailed debugging:
 
 ```bash
 python archaeo_detect.py --verbose 2 2>&1 | tee debug_log.txt
 ```
 
-Bu komut tüm debug mesajlarını hem ekrana hem de `debug_log.txt` dosyasına yazar.
+This command writes all debug messages to both screen and `debug_log.txt` file.
 
 ---
 
-## ❓ Sık Sorulan Sorular (SSS)
+## ❓ FAQ
 
-### 🤔 Genel Sorular
+### 🤔 General Questions
 
-**S: Eğitilmiş bir modelim yok, yine de kullanabilir miyim?**  
-C: Evet! `zero_shot_imagenet: true` ayarı ile ImageNet ağırlıklarını kullanabilirsiniz. Ayrıca klasik yöntemler model gerektirmez.
+**Q: I don't have a trained model, can I still use it?**  
+A: Yes! Use `zero_shot_imagenet: true` to use ImageNet weights. Also, classical methods don't require models.
 
-**S: GPU'um yok, CPU ile çalışır mı?**  
-C: Evet, ancak daha yavaş olur. Klasik yöntemleri tercih edin veya küçük karo boyutu kullanın.
+**Q: I don't have a GPU, will it work with CPU?**  
+A: Yes, but it will be slower. Prefer classical methods or use small tile size.
 
-**S: Hangi yöntem en iyi sonucu verir?**  
-C: Genellikle **fusion** (DL + Klasik) en iyi sonuçları verir. Ancak veri kalitenize ve bölgenize göre değişir.
+**Q: Which method gives the best results?**  
+A: Generally **fusion** (DL + Classical) gives the best results. However, it varies based on your data quality and region.
 
-**S: Uydu görüntüleri ile çalışır mı?**  
-C: Evet, uydu görüntüleri ve LiDAR verileri desteklenir. Önemli olan çok bantlı GeoTIFF formatında olması.
+**Q: Does it work with satellite imagery?**  
+A: Yes, satellite imagery and LiDAR data are supported. Important thing is that it's in multi-band GeoTIFF format.
 
-### 🔧 Teknik Sorular
+### 🔧 Technical Questions
 
-**S: Kaç bant gerekli?**  
-C: Minimum 3 bant (RGB). Optimum 5 bant (RGB + DSM + DTM). 9 kanal RVT türevleri ile otomatik oluşturulur.
+**Q: How many bands are required?**  
+A: Minimum 3 bands (RGB). Optimum 5 bands (RGB + DSM + DTM). 9 channels are automatically created with RVT derivatives.
 
-**S: Önbellek dosyası ne kadar yer kaplar?**  
-C: Genellikle 10-50 MB. Girdi dosyası boyutuna bağlıdır.
+**Q: How much space do cache files take?**  
+A: Typically 10-50 MB. Depends on input file size. Can be larger (several GB) for high-resolution data.
 
-**S: Sonuçları nasıl iyileştirebilirim?**  
-C: 
-1. Çoklu encoder kullanın (ensemble)
-2. Fusion'ı etkinleştirin
-3. Eşik değerlerini optimize edin
-4. Yüksek kaliteli veri kullanın
+**Q: How can I improve results?**  
+A: 
+1. Use multiple encoders (ensemble)
+2. Enable fusion
+3. Optimize threshold values
+4. Use high-quality data
 
-**S: Kendi modelimi nasıl eğitirim?**  
-C: PyTorch ve segmentation_models_pytorch kullanarak eğitebilirsiniz. Eğitilmiş modeli `--weights` parametresi ile kullanın.
+**Q: How do I train my own model?**  
+A: You can train using PyTorch and segmentation_models_pytorch. Use trained model with `--weights` parameter.
 
-### 📊 Veri Soruları
+### 📊 Data Questions
 
-**S: Minimum alan çözünürlüğü nedir?**  
-C: Önerilen: 0.5-2 metre/piksel. Daha düşük çözünürlükte küçük yapılar tespit edilemeyebilir.
+**Q: What is the minimum area resolution?**  
+A: Recommended: 0.5-2 meters/pixel. At lower resolution, small structures may not be detected.
 
-**S: Maksimum dosya boyutu var mı?**  
-C: Hayır, karo sistemi sayesinde çok büyük dosyalar işlenebilir. Test edilmiş: 50 GB+
+**Q: Is there a maximum file size?**  
+A: No, thanks to tile system, very large files can be processed. Tested: 50 GB+
 
-**S: Farklı CRS'ler destekleniyor mu?**  
-C: Evet, girdi CRS'i korunur ve çıktıya aktarılır.
+**Q: Are different CRS supported?**  
+A: Yes, input CRS is preserved and transferred to output.
 
 ---
 
-## 🔬 İleri Düzey Özellikler
+## 🔬 Advanced Features
 
-### Özel Model Eğitimi
+### Custom Model Training
 
-Kendi verilerinizle model eğitimi:
+Training with your own data:
 
 ```python
 import torch
 import segmentation_models_pytorch as smp
 
-# Model oluştur
+# Create model
 model = smp.Unet(
     encoder_name="resnet34",
     encoder_weights="imagenet",
-    in_channels=9,  # RGB + nDSM + 5 RVT türevi
+    in_channels=9,  # RGB + nDSM + 5 RVT derivatives
     classes=1,      # Binary segmentation
     activation='sigmoid'
 )
 
-# Eğitim döngüsü
+# Training loop
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 criterion = torch.nn.BCEWithLogitsLoss()
 
@@ -1068,26 +1117,26 @@ for epoch in range(num_epochs):
         loss.backward()
         optimizer.step()
 
-# Modeli kaydet
+# Save model
 torch.save(model.state_dict(), 'my_trained_model.pth')
 ```
 
-### Özel Encoder Ekleme
+### Adding Custom Encoders
 
-Yeni bir encoder eklemek için:
+To add a new encoder:
 
 ```python
-# archaeo_detect.py içinde
+# In archaeo_detect.py
 SUPPORTED_ENCODERS = [
     'resnet34', 'resnet50',
     'efficientnet-b3',
-    'your_custom_encoder'  # Yeni encoder ekle
+    'your_custom_encoder'  # Add new encoder
 ]
 ```
 
-### API Kullanımı
+### API Usage
 
-Script'i Python kodundan çağırma:
+Calling the script from Python code:
 
 ```python
 import subprocess
@@ -1101,12 +1150,12 @@ result = subprocess.run([
 
 print(result.stdout)
 if result.returncode != 0:
-    print("Hata:", result.stderr)
+    print("Error:", result.stderr)
 ```
 
-### Batch İşleme
+### Batch Processing
 
-Çoklu dosya işleme scripti:
+Script for processing multiple files:
 
 ```python
 import os
@@ -1118,7 +1167,7 @@ output_dir = Path('results')
 output_dir.mkdir(exist_ok=True)
 
 for tif_file in input_dir.glob('*.tif'):
-    print(f"İşleniyor: {tif_file.name}")
+    print(f"Processing: {tif_file.name}")
     
     subprocess.run([
         'python', 'archaeo_detect.py',
@@ -1129,68 +1178,68 @@ for tif_file in input_dir.glob('*.tif'):
         '-v'
     ])
     
-print("Tüm dosyalar işlendi!")
+print("All files processed!")
 ```
 
-### Performans Profilleme
+### Performance Profiling
 
-İşlem sürelerini analiz etme:
+Analyzing processing times:
 
 ```bash
 python -m cProfile -o profile.stats archaeo_detect.py
 
-# Sonuçları görüntüle
+# View results
 python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumulative'); p.print_stats(20)"
 ```
 
 ---
 
-## 📚 Teknik Detaylar
+## 📚 Technical Details
 
-### Sistem Mimarisi
+### System Architecture
 
 ```
 archaeo_detect.py
-├── Veri Yükleme (rasterio)
-├── Ön İşleme
-│   ├── Bant okuma
-│   ├── RVT türevleri (rvt-py)
-│   ├── nDSM hesaplama
-│   └── Normalizasyon
-├── Tespit
-│   ├── Derin Öğrenme (PyTorch + SMP)
+├── Data Loading (rasterio)
+├── Preprocessing
+│   ├── Band reading
+│   ├── RVT derivatives (rvt-py)
+│   ├── nDSM calculation
+│   └── Normalization
+├── Detection
+│   ├── Deep Learning (PyTorch + SMP)
 │   │   ├── U-Net
 │   │   ├── DeepLabV3+
-│   │   └── Diğer mimariler
-│   ├── Klasik Yöntemler
+│   │   └── Other architectures
+│   ├── Classical Methods
 │   │   ├── RVT (SVF, Openness, LRM)
-│   │   ├── Hessian Matrisi
-│   │   └── Morfoloji (scikit-image)
-│   └── Fusion (Hibrit)
-├── Son İşleme
-│   ├── Eşikleme
-│   ├── Morfological post-processing
-│   └── Alan filtreleme
-└── Çıktı
+│   │   ├── Hessian Matrix
+│   │   └── Morphology (scikit-image)
+│   └── Fusion (Hybrid)
+├── Post-Processing
+│   ├── Thresholding
+│   ├── Morphological post-processing
+│   └── Area filtering
+└── Output
     ├── Raster (GeoTIFF)
-    └── Vektör (GeoPackage)
+    └── Vector (GeoPackage)
 ```
 
-### Kullanılan Kütüphaneler
+### Libraries Used
 
-| Kütüphane | Versiyon | Amaç |
-|-----------|----------|------|
-| PyTorch | 2.0+ | Derin öğrenme framework |
-| SMP | 0.3.2+ | Segmentasyon modelleri |
-| Rasterio | 1.3+ | Raster veri I/O |
-| GeoPandas | 0.12+ | Vektör veri işleme |
-| OpenCV | 4.7+ | Görüntü işleme |
-| scikit-image | 0.20+ | İleri görüntü işleme |
-| RVT-py | 1.2+ | Relief visualization |
-| NumPy | 1.24+ | Sayısal işlemler |
-| SciPy | 1.10+ | Bilimsel hesaplama |
+| Library | Version | Purpose |
+|---------|---------|---------|
+| PyTorch | 2.0+ | Deep learning framework |
+| SMP | 0.3.2+ | Segmentation models |
+| Rasterio | 1.3+ | Raster data I/O |
+| GeoPandas | 0.12+ | Vector data processing |
+| OpenCV | 4.7+ | Image processing |
+| scikit-image | 0.20+ | Advanced image processing |
+| RVT-py | 1.2+ (Python < 3.11) or RVT 2.0+ (Python >= 3.11) | Relief visualization |
+| NumPy | 1.24+ | Numerical operations |
+| SciPy | 1.10+ | Scientific computing |
 
-### Algoritma Detayları
+### Algorithm Details
 
 #### RVT (Relief Visualization Toolbox)
 
@@ -1198,7 +1247,7 @@ archaeo_detect.py
 ```
 SVF = (1/n) * Σ(max(0, cos(α_i)))
 ```
-Burada `α_i` her yöndeki horizon açısıdır.
+Where `α_i` is the horizon angle in each direction.
 
 **Openness:**
 ```
@@ -1206,24 +1255,24 @@ Openness_positive = (1/n) * Σ(90° - α_i)
 Openness_negative = (1/n) * Σ(α_i - 90°)
 ```
 
-#### Hessian Matrisi
+#### Hessian Matrix
 
-İkinci türev matrisi:
+Second derivative matrix:
 ```
 H = [∂²f/∂x²    ∂²f/∂x∂y]
     [∂²f/∂y∂x   ∂²f/∂y²]
 ```
 
-Eigenvalue analizi ile ridge/valley tespiti.
+Ridge/valley detection via eigenvalue analysis.
 
-#### Fusion Algoritması
+#### Fusion Algorithm
 
 ```python
 def fusion(p_dl, p_classic, alpha):
     """
-    p_dl: Derin öğrenme olasılığı (0-1)
-    p_classic: Klasik yöntem olasılığı (0-1)
-    alpha: Ağırlık faktörü (0-1)
+    p_dl: Deep learning probability (0-1)
+    p_classic: Classical method probability (0-1)
+    alpha: Weight factor (0-1)
     """
     p_fused = alpha * p_dl + (1 - alpha) * p_classic
     return np.clip(p_fused, 0, 1)
@@ -1231,30 +1280,30 @@ def fusion(p_dl, p_classic, alpha):
 
 ---
 
-## 🤝 Katkıda Bulunma
+## 🤝 Contributing
 
-Projeye katkıda bulunmak isterseniz:
+To contribute to the project:
 
-1. **Fork** edin
-2. Feature branch oluşturun (`git checkout -b feature/yeni-ozellik`)
-3. Değişikliklerinizi commit edin (`git commit -m 'Yeni özellik: ...'`)
-4. Branch'inizi push edin (`git push origin feature/yeni-ozellik`)
-5. **Pull Request** açın
+1. **Fork** the repository
+2. Create a feature branch (`git checkout -b feature/new-feature`)
+3. Commit your changes (`git commit -m 'New feature: ...'`)
+4. Push your branch (`git push origin feature/new-feature`)
+5. Open a **Pull Request**
 
-### Katkı Alanları
+### Contribution Areas
 
-- 🐛 Bug düzeltmeleri
-- ✨ Yeni özellikler
-- 📝 Dokümantasyon iyileştirmeleri
-- 🌍 Çeviri (i18n)
-- 🧪 Test senaryoları
-- 🎨 Görselleştirme araçları
+- 🐛 Bug fixes
+- ✨ New features
+- 📝 Documentation improvements
+- 🌍 Translations (i18n)
+- 🧪 Test scenarios
+- 🎨 Visualization tools
 
 ---
 
-## 📄 Lisans
+## 📄 License
 
-Bu proje [MIT Lisansı](LICENSE) altında lisanslanmıştır.
+This project is licensed under the [MIT License](LICENSE).
 
 ```
 MIT License
@@ -1268,17 +1317,17 @@ in the Software without restriction...
 
 ---
 
-## 📧 İletişim ve Destek
+## 📧 Contact and Support
 
-- **Issues**: [GitHub Issues](https://github.com/elestirmen/arkeolojik_alan_tespit/issues)
-- **Email**:ertugrularik@hotmail.com
-- **Dokümantasyon**: [Wiki](https://github.com/elestirmen/arkeolojik_alan_tespit/wiki)
+- **Issues**: [GitHub Issues](https://github.com/elestirmen/archaeological-site-detection/issues)
+- **Email**: ertugrularik@hotmail.com
+- **Documentation**: [Wiki](https://github.com/elestirmen/archaeological-site-detection/wiki)
 
 ---
 
-## 🙏 Teşekkürler
+## 🙏 Acknowledgments
 
-Bu proje aşağıdaki açık kaynak projelerden yararlanmıştır:
+This project benefits from the following open-source projects:
 
 - [Segmentation Models PyTorch](https://github.com/qubvel/segmentation_models.pytorch)
 - [RVT-py](https://github.com/EarthObservation/RVT_py)
@@ -1288,36 +1337,32 @@ Bu proje aşağıdaki açık kaynak projelerden yararlanmıştır:
 
 ---
 
-## 📖 Alıntı (Citation)
+## 📖 Citation
 
-Bu projeyi akademik çalışmanızda kullanırsanız lütfen alıntı yapın:
+If you use this project in your academic work, please cite:
 
 ```bibtex
-@software{arkeolojik_alan_tespit,
-  title = {Arkeolojik Alan Tespiti: Derin Öğrenme ve Klasik Görüntü İşleme},
+@software{archaeological_site_detection,
+  title = {Archaeological Site Detection: Deep Learning and Classical Image Processing},
   author = {Ahmet Ertuğrul Arık},
   year = {2025},
-  url = {https://github.com/your-username/arkeolojik_alan_tespit}
+  url = {https://github.com/your-username/archaeological-site-detection}
 }
 ```
 
 ---
 
-## 📊 Proje İstatistikleri
+## 📊 Project Statistics
 
-![GitHub stars](https://img.shields.io/github/stars/your-username/arkeolojik_alan_tespit?style=social)
-![GitHub forks](https://img.shields.io/github/forks/your-username/arkeolojik_alan_tespit?style=social)
-![GitHub watchers](https://img.shields.io/github/watchers/your-username/arkeolojik_alan_tespit?style=social)
-
----
-
+![GitHub stars](https://img.shields.io/github/stars/your-username/archaeological-site-detection?style=social)
+![GitHub forks](https://img.shields.io/github/forks/your-username/archaeological-site-detection?style=social)
+![GitHub watchers](https://img.shields.io/github/watchers/your-username/archaeological-site-detection?style=social)
 
 ---
 
 <div align="center">
 
-
-Geliştirici: [Ahmet Ertuğruk Arık]  
-Son Güncelleme: Ekim 2025
+Developer: [Ahmet Ertuğrul Arık]  
+Last Update: October 2025
 
 </div>
