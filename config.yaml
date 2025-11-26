@@ -327,6 +327,93 @@ gaussian_lrm_sigma: 6.0
 
 
 # ============================================================================
+# BÖLÜM 4.5: GELİŞMİŞ TOPOGRAFİK ANALİZ (YENİ KANALLAR)
+# ============================================================================
+# Bu bölüm, arkeolojik tespit doğruluğunu artıran gelişmiş topografik
+# kanalları kontrol eder. Varsayılan olarak aktiftir (önerilir).
+
+# enable_curvature: Plan ve Profile Curvature kanallarını hesapla
+# - true: DTM'den eğrilik kanalları hesaplanır (+2 kanal)
+# - false: Eğrilik kanalları devre dışı (9 kanal modunda kalır)
+# NASIL ÇALIŞIR:
+#   Plan Curvature: Yatay eğrilik - kontür çizgileri boyunca
+#     • Pozitif: Sırt/tepe (dışbükey) → Tümülüsler
+#     • Negatif: Vadi/hendek (içbükey) → Savunma hendekleri
+#   Profile Curvature: Dikey eğrilik - eğim yönünde
+#     • Dışbükey yüzeyler, teraslar, basamaklar
+# ARKEOLOJİK KULLANIM:
+#   ✓ Tümülüs ve höyük tepelerini tanıma
+#   ✓ Savunma hendeği ve su kanallarını tespit
+#   ✓ Teraslanmış tarım alanlarını belirleme
+# ÖNERİ: Mutlaka true yapın, çok etkili bir kanaldır
+enable_curvature: true
+
+# enable_tpi: Multi-scale TPI (Topographic Position Index) kanalını hesapla
+# - true: Çok ölçekli TPI hesaplanır (+1 kanal)
+# - false: TPI kanalı devre dışı
+# NASIL ÇALIŞIR:
+#   TPI = merkez_yükseklik - ortalama(komşu_yükseklikleri)
+#   • Pozitif TPI: Çevreden yüksek → Höyük, tümülüs, tepe
+#   • Negatif TPI: Çevreden alçak → Hendek, çukur, vadi
+#   • Sıfıra yakın: Düz alan veya yamaç
+# ÇOK ÖLÇEKLİ YAKLAŞIM:
+#   Farklı yarıçaplarda hesaplanıp ortalaması alınır
+#   → Küçük ve büyük yapıları aynı anda yakalar
+# ARKEOLOJİK KULLANIM:
+#   ✓ Höyük ve tümülüsleri çevreden ayırt etme
+#   ✓ Çukur yapıları (kuyu, çöp çukuru) tespit
+#   ✓ Topografik anomalileri vurgulama
+# ÖNERİ: true yapın, höyük tespitinde çok etkili
+enable_tpi: true
+
+# tpi_radii: TPI hesaplama yarıçapları (piksel cinsinden)
+# - Her yarıçap için ayrı TPI hesaplanır, sonra ortalaması alınır
+# - Küçük yarıçap: Küçük yapılar (duvar kalıntısı, küçük çukur)
+# - Orta yarıçap: Tipik tümülüsler (5-15m çap)
+# - Büyük yarıçap: Geniş höyükler, yerleşim tepeleri
+# VARSAYILAN: [5, 15, 30] → Çoğu durum için dengeli
+# AYARLAMA İPUÇLARI:
+#   - Küçük yapılar arıyorsanız: [3, 7, 15]
+#   - Büyük höyükler arıyorsanız: [10, 25, 50]
+#   - Çok detaylı analiz: [3, 5, 10, 20, 40]
+tpi_radii: [5, 15, 30]
+
+
+# ============================================================================
+# BÖLÜM 4.6: CBAM ATTENTION MEKANİZMASI
+# ============================================================================
+# CBAM (Convolutional Block Attention Module), modelin hangi kanalların
+# ve hangi bölgelerin önemli olduğunu otomatik olarak öğrenmesini sağlar.
+
+# enable_attention: CBAM Attention modülünü etkinleştir
+# - true: Model giriş katmanına CBAM eklenir
+# - false: Standart model (attention yok)
+# NASIL ÇALIŞIR:
+#   1. Kanal Dikkat: Her kanalın (RGB, SVF, Curvature vb.) önemini ağırlıklandırır
+#   2. Mekansal Dikkat: Görüntünün hangi bölgelerine odaklanılacağını belirler
+# AVANTAJLAR:
+#   ✓ Farklı yapı tipleri için farklı kanallar ön plana çıkar
+#     → Tümülüs için SVF ve TPI, hendek için Curvature
+#   ✓ Gürültülü bölgeleri otomatik olarak azaltır
+#   ✓ Yapı sınırlarına ve merkezlerine odaklanır
+# DEZAVANTAJLAR:
+#   - Çok hafif performans kaybı (~%5 yavaşlama)
+#   - Eğitilmiş model yoksa sınırlı fayda (zero-shot modunda)
+# ÖNERİ: true yapın, genel olarak performansı artırır
+enable_attention: true
+
+# attention_reduction: Attention için kanal azaltma oranı
+# - Değer: 2, 4, 8 gibi pozitif tam sayı
+# - Düşük değer: Daha fazla hesaplama, daha hassas attention
+# - Yüksek değer: Daha hızlı, daha kaba attention
+# NASIL ÇALIŞIR:
+#   12 kanal / 4 = 3 ara kanal → Sıkıştırılmış temsil → 12 kanala geri genişletme
+# VARSAYILAN: 4 → Çoğu durum için dengeli
+# ÖNERİ: Varsayılan 4'ü kullanın
+attention_reduction: 4
+
+
+# ============================================================================
 # BÖLÜM 5: FUSION (BİRLEŞTİRME) AYARLARI
 # ============================================================================
 # Fusion etkinse (enable_fusion: true), derin öğrenme ve klasik yöntem

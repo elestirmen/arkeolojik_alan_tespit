@@ -271,6 +271,30 @@ class PipelineDefaults:
         metadata={"help": "LRM fallback hesaplama için Gaussian sigma değeri"},
     )
     
+    # ===== GELİŞMİŞ TOPOGRAFİK ANALİZ AYARLARI (YENİ KANALLAR) =====
+    enable_curvature: bool = field(
+        default=True,
+        metadata={"help": "Plan ve Profile Curvature kanallarını hesapla (hendek/tepe ayrımı için)"},
+    )
+    enable_tpi: bool = field(
+        default=True,
+        metadata={"help": "Multi-scale TPI (Topographic Position Index) kanalını hesapla (höyük/çukur tespiti için)"},
+    )
+    tpi_radii: Tuple[int, ...] = field(
+        default=(5, 15, 30),
+        metadata={"help": "TPI hesaplama yarıçapları (piksel); farklı boyutlardaki yapılar için"},
+    )
+    
+    # ===== ATTENTION MEKANİZMASI AYARLARI =====
+    enable_attention: bool = field(
+        default=True,
+        metadata={"help": "CBAM (Convolutional Block Attention Module) kullan; kanal önemini dinamik öğrenir"},
+    )
+    attention_reduction: int = field(
+        default=4,
+        metadata={"help": "Attention modülü için kanal azaltma oranı (4=1/4 oranında sıkıştırma)"},
+    )
+    
     # ===== YOLO11 MODEL AYARLARI =====
     yolo_weights: Optional[str] = field(
         default=None,
@@ -757,6 +781,138 @@ def fill_nodata(
     return filled, ~invalid_mask
 
 
+# ==============================================================================
+# GELİŞMİŞ TOPOGRAFİK ANALİZ FONKSİYONLARI (Curvature + TPI)
+# ==============================================================================
+
+def compute_curvatures(
+    dtm: np.ndarray, 
+    pixel_size: float = 1.0
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    DTM'den Plan ve Profile Curvature hesaplar.
+    
+    Plan Curvature (Yatay Eğrilik):
+        - Kontür çizgileri boyunca eğrilik
+        - Pozitif değerler: Sırt/tepe (dışbükey)
+        - Negatif değerler: Vadi/hendek (içbükey)
+        - Arkeolojik yapılar: Tümülüsler pozitif, hendekler negatif
+    
+    Profile Curvature (Dikey Eğrilik):
+        - Eğim yönündeki eğrilik
+        - Pozitif değerler: Dışbükey yüzeyler (ivmelenen akış)
+        - Negatif değerler: İçbükey yüzeyler (yavaşlayan akış)
+        - Arkeolojik yapılar: Teraslar, basamaklar tespit edilir
+    
+    Args:
+        dtm: Sayısal Arazi Modeli (Digital Terrain Model)
+        pixel_size: Piksel boyutu (metre cinsinden)
+        
+    Returns:
+        (plan_curvature, profile_curvature) - Her ikisi de (H, W) boyutunda
+    """
+    # NaN değerleri doldur
+    dtm_filled, valid_mask = fill_nodata(dtm)
+    
+    # Birinci türevler (gradient) - x ve y yönlerinde
+    fy, fx = np.gradient(dtm_filled, pixel_size)
+    
+    # İkinci türevler
+    fyy, fyx = np.gradient(fy, pixel_size)
+    fxy, fxx = np.gradient(fx, pixel_size)
+    
+    # Gradyan büyüklüğünün kareleri
+    p = fx ** 2  # (df/dx)^2
+    q = fy ** 2  # (df/dy)^2
+    
+    # Sıfıra bölme koruması
+    denominator = p + q
+    denominator = np.where(denominator < 1e-10, 1e-10, denominator)
+    
+    # Plan Curvature (horizontal/contour curvature)
+    # Formül: Kh = -[(fxx * q) - (2 * fxy * fx * fy) + (fyy * p)] / [(p + q)^1.5]
+    plan_curv = -((fxx * q) - (2 * fxy * fx * fy) + (fyy * p)) / (denominator ** 1.5)
+    
+    # Profile Curvature (vertical/slope curvature)
+    # Formül: Kv = -[(fxx * p) + (2 * fxy * fx * fy) + (fyy * q)] / [(p + q)^1.5]
+    profile_curv = -((fxx * p) + (2 * fxy * fx * fy) + (fyy * q)) / (denominator ** 1.5)
+    
+    # NaN ve sonsuz değerleri temizle
+    plan_curv = np.nan_to_num(plan_curv, nan=0.0, posinf=0.0, neginf=0.0)
+    profile_curv = np.nan_to_num(profile_curv, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Aşırı değerleri kırp (robust normalizasyon için)
+    # Tipik curvature değerleri -0.1 ile 0.1 arasında
+    plan_curv = np.clip(plan_curv, -0.1, 0.1)
+    profile_curv = np.clip(profile_curv, -0.1, 0.1)
+    
+    # Orijinal geçersiz bölgeleri işaretle
+    plan_curv[~valid_mask] = np.nan
+    profile_curv[~valid_mask] = np.nan
+    
+    return plan_curv.astype(np.float32), profile_curv.astype(np.float32)
+
+
+def compute_tpi_multiscale(
+    dtm: np.ndarray, 
+    radii: Tuple[int, ...] = (5, 15, 30)
+) -> np.ndarray:
+    """
+    Çok ölçekli Topographic Position Index (TPI) hesaplar.
+    
+    TPI, bir pikselin çevresine göre göreli yüksekliğini ölçer:
+        TPI = merkez_yükseklik - ortalama(komşu_yükseklikleri)
+    
+    Arkeolojik Yapı Tespitinde Kullanımı:
+        - Pozitif TPI: Çevreden yüksek yapılar (tümülüs, höyük, tepe)
+        - Negatif TPI: Çevreden alçak yapılar (hendek, vadi, çukur)
+        - Sıfıra yakın TPI: Düz alanlar veya yamaçlar
+    
+    Çok Ölçekli Yaklaşım:
+        - Küçük yarıçap (5px): Küçük yapılar, duvar kalıntıları
+        - Orta yarıçap (15px): Tipik tümülüsler, küçük höyükler
+        - Büyük yarıçap (30px): Geniş höyükler, yerleşim tepeleri
+    
+    Args:
+        dtm: Sayısal Arazi Modeli
+        radii: Farklı ölçekler için yarıçaplar (piksel cinsinden)
+        
+    Returns:
+        tpi_combined: Çok ölçekli TPI ortalaması, normalize edilmiş [-1, 1] arasında
+    """
+    # NaN değerleri doldur
+    dtm_filled, valid_mask = fill_nodata(dtm)
+    
+    tpi_stack = []
+    
+    for radius in radii:
+        # Kare pencere boyutu (2*r + 1)
+        window_size = 2 * radius + 1
+        
+        # Uniform filter ile komşuluk ortalaması hesapla
+        # reflect mode: kenar piksellerini yansıtarak sınır etkilerini azalt
+        mean_elevation = uniform_filter(dtm_filled, size=window_size, mode='reflect')
+        
+        # TPI = merkez piksel değeri - ortalama değer
+        tpi = dtm_filled - mean_elevation
+        
+        # Z-score benzeri normalizasyon (-1 ile 1 arası)
+        tpi_std = np.nanstd(tpi[valid_mask]) if np.any(valid_mask) else 1.0
+        if tpi_std > 0:
+            tpi = tpi / (3 * tpi_std)  # 3-sigma normalizasyon (±3σ → ±1)
+        
+        tpi = np.clip(tpi, -1, 1)
+        tpi_stack.append(tpi)
+    
+    # Ölçeklerin ortalamasını al (ensemble yaklaşım)
+    tpi_combined = np.nanmean(np.stack(tpi_stack, axis=0), axis=0)
+    
+    # Orijinal geçersiz bölgeleri işaretle
+    tpi_combined[~valid_mask] = np.nan
+    
+    return tpi_combined.astype(np.float32)
+
+
 def compute_derivatives_with_rvt(
     dtm: np.ndarray,
     pixel_size: float,
@@ -1097,10 +1253,46 @@ def stack_channels(
     lrm: np.ndarray,
     slope: np.ndarray,
     ndsm: np.ndarray,
+    plan_curv: Optional[np.ndarray] = None,
+    profile_curv: Optional[np.ndarray] = None,
+    tpi: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Stack nine channels in the required order."""
+    """
+    Stack channels in the required order.
+    
+    Varsayılan 9 kanal (geriye uyumlu):
+        [0-2]: RGB
+        [3]: SVF (Sky-View Factor)
+        [4]: Positive Openness
+        [5]: Negative Openness
+        [6]: LRM (Local Relief Model)
+        [7]: Slope
+        [8]: nDSM
+    
+    Gelişmiş 12 kanal (enable_curvature ve enable_tpi aktifse):
+        [9]: Plan Curvature
+        [10]: Profile Curvature
+        [11]: TPI (Topographic Position Index)
+    
+    Args:
+        rgb: RGB bantları (3, H, W)
+        svf: Sky-View Factor
+        pos_open: Positive Openness
+        neg_open: Negative Openness
+        lrm: Local Relief Model
+        slope: Eğim
+        ndsm: Normalize edilmiş DSM (DSM - DTM)
+        plan_curv: Plan Curvature (opsiyonel)
+        profile_curv: Profile Curvature (opsiyonel)
+        tpi: Topographic Position Index (opsiyonel)
+    
+    Returns:
+        Stacked tensor (C, H, W) where C is 9 or 12
+    """
     if rgb.shape[0] != 3:
         raise ValueError("RGB input must have three channels.")
+    
+    # Temel 9 kanal
     channels = [
         rgb[0],
         rgb[1],
@@ -1112,25 +1304,198 @@ def stack_channels(
         slope,
         ndsm,
     ]
+    
+    # Gelişmiş kanalları ekle (varsa)
+    if plan_curv is not None:
+        channels.append(plan_curv)
+    if profile_curv is not None:
+        channels.append(profile_curv)
+    if tpi is not None:
+        channels.append(tpi)
+    
     stacked = np.stack([ch.astype(np.float32) for ch in channels], axis=0)
     return stacked
+
+
+# ==============================================================================
+# CBAM (Convolutional Block Attention Module) - DİKKAT MEKANİZMASI
+# ==============================================================================
+
+class ChannelAttention(torch.nn.Module):
+    """
+    Squeeze-and-Excitation tarzı Kanal Dikkat Modülü.
+    
+    Her kanalın (RGB, SVF, Curvature vb.) önemini dinamik olarak ağırlıklandırır.
+    Model, hangi kanalların tespit için daha önemli olduğunu öğrenir.
+    
+    Örnek: Tümülüs tespitinde SVF ve TPI kanalları daha yüksek ağırlık alabilir,
+    hendek tespitinde ise Profile Curvature ve Negative Openness ön plana çıkabilir.
+    
+    Args:
+        in_channels: Giriş kanal sayısı (9 veya 12)
+        reduction: Kanal azaltma oranı (default: 4 → 12 kanal için 3 kanala sıkıştırır)
+    """
+    def __init__(self, in_channels: int, reduction: int = 4):
+        super().__init__()
+        # Global pooling
+        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
+        self.max_pool = torch.nn.AdaptiveMaxPool2d(1)
+        
+        # Paylaşımlı MLP (iki yol için ortak)
+        reduced_channels = max(in_channels // reduction, 1)
+        self.fc = torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, reduced_channels, 1, bias=False),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(reduced_channels, in_channels, 1, bias=False)
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Average pooling yolu
+        avg_out = self.fc(self.avg_pool(x))
+        # Max pooling yolu
+        max_out = self.fc(self.max_pool(x))
+        # Birleştir ve sigmoid ile [0, 1] aralığına normalize et
+        attention = torch.sigmoid(avg_out + max_out)
+        return x * attention
+
+
+class SpatialAttention(torch.nn.Module):
+    """
+    Mekansal Dikkat Modülü.
+    
+    Görüntünün hangi bölgelerinin (hangi piksellerin) önemli olduğunu öğrenir.
+    Arkeolojik yapı sınırlarına ve merkez bölgelere dikkat çeker.
+    
+    Args:
+        kernel_size: Konvolüsyon çekirdek boyutu (tek sayı, default: 7)
+    """
+    def __init__(self, kernel_size: int = 7):
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv = torch.nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Kanal boyunca average ve max pooling
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        # Birleştir
+        combined = torch.cat([avg_out, max_out], dim=1)
+        # Sigmoid ile [0, 1] aralığına normalize et
+        attention = torch.sigmoid(self.conv(combined))
+        return x * attention
+
+
+class CBAM(torch.nn.Module):
+    """
+    Convolutional Block Attention Module (CBAM).
+    
+    Hem kanal hem de mekansal dikkat uygular:
+    1. Önce kanal dikkat: Hangi özellik kanalları önemli?
+    2. Sonra mekansal dikkat: Hangi bölgeler önemli?
+    
+    Referans: Woo et al. "CBAM: Convolutional Block Attention Module" (ECCV 2018)
+    
+    Arkeolojik tespit için avantajları:
+    - Farklı yapı tipleri için farklı kanalları ön plana çıkarır
+    - Yapı sınırlarına ve merkezlerine odaklanır
+    - Gürültülü bölgeleri otomatik olarak azaltır
+    
+    Args:
+        in_channels: Giriş kanal sayısı
+        reduction: Kanal dikkat için azaltma oranı
+        kernel_size: Mekansal dikkat için çekirdek boyutu
+    """
+    def __init__(self, in_channels: int, reduction: int = 4, kernel_size: int = 7):
+        super().__init__()
+        self.channel_attention = ChannelAttention(in_channels, reduction)
+        self.spatial_attention = SpatialAttention(kernel_size)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.channel_attention(x)
+        x = self.spatial_attention(x)
+        return x
+
+
+class AttentionWrapper(torch.nn.Module):
+    """
+    Mevcut modele CBAM attention ekleyen sarmalayıcı.
+    
+    Giriş katmanından önce CBAM uygulayarak modelin hangi kanallara
+    ve bölgelere dikkat etmesi gerektiğini öğrenmesini sağlar.
+    
+    Args:
+        base_model: Sarmalanacak temel model (U-Net vb.)
+        in_channels: Giriş kanal sayısı
+        reduction: CBAM için kanal azaltma oranı
+    """
+    def __init__(self, base_model: torch.nn.Module, in_channels: int, reduction: int = 4):
+        super().__init__()
+        self.input_attention = CBAM(in_channels, reduction=reduction)
+        self.base_model = base_model
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Önce attention uygula
+        x = self.input_attention(x)
+        # Sonra base model'i çalıştır
+        return self.base_model(x)
+
+
+def get_num_channels(enable_curvature: bool = True, enable_tpi: bool = True) -> int:
+    """
+    Aktif kanalların toplam sayısını döndürür.
+    
+    Temel: 9 kanal (RGB + SVF + Openness + LRM + Slope + nDSM)
+    + Curvature: +2 kanal (Plan + Profile)
+    + TPI: +1 kanal
+    
+    Returns:
+        9, 11, 10, veya 12 (aktif özelliklere bağlı)
+    """
+    base_channels = 9
+    if enable_curvature:
+        base_channels += 2  # Plan + Profile Curvature
+    if enable_tpi:
+        base_channels += 1  # TPI
+    return base_channels
 
 
 def build_model(
     arch: str = "Unet",
     encoder: str = "resnet34",
-    in_ch: int = 9,
+    in_ch: int = 12,
+    enable_attention: bool = True,
+    attention_reduction: int = 4,
 ) -> torch.nn.Module:
-    """Instantiate a segmentation model from segmentation_models_pytorch."""
+    """
+    Segmentation model oluşturur (opsiyonel CBAM attention ile).
+    
+    Args:
+        arch: Model mimarisi (Unet, UnetPlusPlus, DeepLabV3Plus, vb.)
+        encoder: Encoder ismi (resnet34, resnet50, efficientnet-b3, vb.)
+        in_ch: Giriş kanal sayısı (9 veya 12)
+        enable_attention: CBAM attention modülünü etkinleştir
+        attention_reduction: Attention için kanal azaltma oranı
+        
+    Returns:
+        PyTorch modeli (attention sarmalayıcılı veya değil)
+    """
     if not hasattr(smp, arch):
         raise ValueError(f"Architecture '{arch}' not found in segmentation_models_pytorch.")
     model_cls = getattr(smp, arch)
-    model = model_cls(
+    base_model = model_cls(
         encoder_name=encoder,
         in_channels=in_ch,
         classes=1,
         activation=None,
     )
+    
+    # Attention modülü ekle (istenirse)
+    if enable_attention:
+        model = AttentionWrapper(base_model, in_ch, reduction=attention_reduction)
+        LOGGER.debug(f"CBAM Attention modülü eklendi (reduction={attention_reduction})")
+    else:
+        model = base_model
+    
     return model
 
 
@@ -1161,10 +1526,27 @@ def inflate_conv1_to_n(conv_w: torch.Tensor, in_ch: int = 9, mode: str = "avg") 
 
 
 def build_model_with_imagenet_inflated(
-    arch: str = "Unet", encoder: str = "resnet34", in_ch: int = 9
+    arch: str = "Unet", 
+    encoder: str = "resnet34", 
+    in_ch: int = 12,
+    enable_attention: bool = True,
+    attention_reduction: int = 4,
 ) -> torch.nn.Module:
     """
-    Build a model that uses an ImageNet-pretrained 3-ch encoder and inflate its first conv to in_ch (default 9).
+    Build a model that uses an ImageNet-pretrained 3-ch encoder and inflate its first conv to in_ch.
+    
+    ImageNet encoder'ları 3 kanal (RGB) için eğitilmiştir. Bu fonksiyon:
+    1. ImageNet ağırlıklarını yükler
+    2. İlk konvolüsyon katmanını 3 kanaldan in_ch kanala genişletir ("inflate")
+    3. Opsiyonel olarak CBAM attention ekler
+    
+    Args:
+        arch: Model mimarisi
+        encoder: Encoder ismi
+        in_ch: Hedef kanal sayısı (9 veya 12)
+        enable_attention: CBAM attention ekle
+        attention_reduction: Attention için kanal azaltma oranı
+    
     Decoder weights come from the 3-ch SMP model where shapes match; others remain default-initialized.
     """
     if not hasattr(smp, arch):
@@ -1230,7 +1612,15 @@ def build_model_with_imagenet_inflated(
     state_9[conv1_key_tgt] = inflate_conv1_to_n(w3, in_ch=in_ch, mode="avg")
 
     model_9.load_state_dict(state_9, strict=False)
-    return model_9
+    
+    # Attention modülü ekle (istenirse)
+    if enable_attention:
+        model = AttentionWrapper(model_9, in_ch, reduction=attention_reduction)
+        LOGGER.debug(f"CBAM Attention modülü eklendi (ImageNet inflated, reduction={attention_reduction})")
+    else:
+        model = model_9
+    
+    return model
 
 
 def load_weights(
@@ -1381,6 +1771,7 @@ def infer_tiled(
     rvt_radii: Optional[Sequence[float]] = None,
     gaussian_lrm_sigma: Optional[float] = None,
     rgb_only: bool = False,
+    tpi_radii: Tuple[int, ...] = (5, 15, 30),
 ) -> InferenceOutputs:
     """
     Run tiled inference and save outputs.
@@ -1448,6 +1839,10 @@ def infer_tiled(
                     lrm_s = precomputed_deriv.lrm[row_start:row_end, col_start:col_end].copy()
                     slope_s = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
                     ndsm_s = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
+                    # Yeni kanallar
+                    plan_curv_s = precomputed_deriv.plan_curv[row_start:row_end, col_start:col_end].copy() if precomputed_deriv.plan_curv is not None else None
+                    profile_curv_s = precomputed_deriv.profile_curv[row_start:row_end, col_start:col_end].copy() if precomputed_deriv.profile_curv is not None else None
+                    tpi_s = precomputed_deriv.tpi[row_start:row_end, col_start:col_end].copy() if precomputed_deriv.tpi is not None else None
                     if rgb_only:
                         log_rgb_only_once()
                         Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
@@ -1458,7 +1853,10 @@ def infer_tiled(
                         lrm_s = Z
                         slope_s = Z
                         ndsm_s = Z
-                    stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
+                        plan_curv_s = None
+                        profile_curv_s = None
+                        tpi_s = None
+                    stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, plan_curv_s, profile_curv_s, tpi_s)
                 else:
                     def read_band(idx: int) -> Optional[np.ndarray]:
                         if idx <= 0:
@@ -1482,12 +1880,18 @@ def infer_tiled(
                         lrm_s = Z
                         slope_s = Z
                         ndsm_s = Z
+                        plan_curv_s = None
+                        profile_curv_s = None
+                        tpi_s = None
                     else:
                         ndsm_s = compute_ndsm(dsm_s, dtm_s)
                         svf_s, pos_s, neg_s, lrm_s, slope_s = compute_derivatives_with_rvt(
                             dtm_s, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
                         )
-                    stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s)
+                        # Yeni kanallar için canlı hesaplama
+                        plan_curv_s, profile_curv_s = compute_curvatures(dtm_s, pixel_size=pixel_size)
+                        tpi_s = compute_tpi_multiscale(dtm_s, radii=tpi_radii)
+                    stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, plan_curv_s, profile_curv_s, tpi_s)
 
                 Hs, Ws = stack_s.shape[1], stack_s.shape[2]
                 ch = min(TILE_SAMPLE_CROP_SIZE, Hs)
@@ -1552,6 +1956,11 @@ def infer_tiled(
                 slope = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
                 ndsm_tile = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
                 
+                # Yeni kanallar (varsa)
+                plan_curv_tile = precomputed_deriv.plan_curv[row_start:row_end, col_start:col_end].copy() if precomputed_deriv.plan_curv is not None else None
+                profile_curv_tile = precomputed_deriv.profile_curv[row_start:row_end, col_start:col_end].copy() if precomputed_deriv.profile_curv is not None else None
+                tpi_tile = precomputed_deriv.tpi[row_start:row_end, col_start:col_end].copy() if precomputed_deriv.tpi is not None else None
+                
                 # Padding ekle (gerekirse)
                 if pad_h or pad_w:
                     rgb = np.pad(rgb, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
@@ -1564,6 +1973,13 @@ def infer_tiled(
                     lrm = np.pad(lrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     slope = np.pad(slope, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     ndsm_tile = np.pad(ndsm_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    # Yeni kanallar için padding
+                    if plan_curv_tile is not None:
+                        plan_curv_tile = np.pad(plan_curv_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    if profile_curv_tile is not None:
+                        profile_curv_tile = np.pad(profile_curv_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    if tpi_tile is not None:
+                        tpi_tile = np.pad(tpi_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
 
                 if rgb_only:
                     log_rgb_only_once()
@@ -1575,6 +1991,9 @@ def infer_tiled(
                     lrm = Z
                     slope = Z
                     ndsm_tile = Z
+                    plan_curv_tile = None
+                    profile_curv_tile = None
+                    tpi_tile = None
 
                 valid_mask = np.isfinite(dtm)
             else:
@@ -1624,11 +2043,18 @@ def infer_tiled(
                     lrm = Z
                     slope = Z
                     ndsm_tile = Z
+                    plan_curv_tile = None
+                    profile_curv_tile = None
+                    tpi_tile = None
                 else:
                     ndsm_tile = compute_ndsm(dsm, dtm)
                     svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
                         dtm, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
                     )
+                    # Yeni kanallar için canlı hesaplama (cache kullanılmıyorsa)
+                    # Not: Bu yavaş olabilir, cache kullanımı önerilir
+                    plan_curv_tile, profile_curv_tile = compute_curvatures(dtm, pixel_size=pixel_size)
+                    tpi_tile = compute_tpi_multiscale(dtm, radii=tpi_radii)
 
             stacked = stack_channels(
                 rgb=rgb,
@@ -1638,6 +2064,9 @@ def infer_tiled(
                 lrm=lrm,
                 slope=slope,
                 ndsm=ndsm_tile,
+                plan_curv=plan_curv_tile,
+                profile_curv=profile_curv_tile,
+                tpi=tpi_tile,
             )
             if global_norm and fixed_lows is not None and fixed_highs is not None:
                 normed = robust_norm_fixed(stacked, fixed_lows, fixed_highs)
@@ -2880,7 +3309,23 @@ def validate_cache(
 
 @dataclass
 class PrecomputedDerivatives:
-    """Önceden hesaplanmış RVT türevlerini tutan sınıf."""
+    """
+    Önceden hesaplanmış RVT türevlerini ve gelişmiş topografik özellikleri tutan sınıf.
+    
+    Temel Kanallar (9 kanal - geriye uyumlu):
+        rgb: RGB bantları (3, H, W)
+        svf: Sky-View Factor (H, W)
+        pos_open: Positive Openness (H, W)
+        neg_open: Negative Openness (H, W)
+        lrm: Local Relief Model (H, W)
+        slope: Eğim (H, W)
+        ndsm: Normalize edilmiş DSM (H, W)
+    
+    Gelişmiş Kanallar (3 ek kanal):
+        plan_curv: Plan Curvature - hendek/sırt ayrımı (H, W)
+        profile_curv: Profile Curvature - teraslar (H, W)
+        tpi: Topographic Position Index - höyük/çukur (H, W)
+    """
     rgb: np.ndarray          # (3, H, W)
     dsm: Optional[np.ndarray]  # (H, W) or None
     dtm: np.ndarray          # (H, W)
@@ -2890,9 +3335,14 @@ class PrecomputedDerivatives:
     lrm: np.ndarray          # (H, W)
     slope: np.ndarray        # (H, W)
     ndsm: np.ndarray         # (H, W)
-    transform: Affine
-    crs: Optional[RasterioCRS]
-    pixel_size: float
+    # Yeni gelişmiş kanallar
+    plan_curv: Optional[np.ndarray] = None    # (H, W) - Plan Curvature
+    profile_curv: Optional[np.ndarray] = None # (H, W) - Profile Curvature
+    tpi: Optional[np.ndarray] = None          # (H, W) - Topographic Position Index
+    # Metadata
+    transform: Affine = field(default=None)  # type: ignore
+    crs: Optional[RasterioCRS] = None
+    pixel_size: float = 1.0
     
 
 def precompute_derivatives(
@@ -2903,17 +3353,37 @@ def precompute_derivatives(
     recalculate: bool = False,
     rvt_radii: Optional[Sequence[float]] = None,
     gaussian_lrm_sigma: Optional[float] = None,
+    enable_curvature: bool = True,
+    enable_tpi: bool = True,
+    tpi_radii: Tuple[int, ...] = (5, 15, 30),
 ) -> Optional[PrecomputedDerivatives]:
     """
-    Tüm raster için RVT türevlerini önceden hesapla.
+    Tüm raster için RVT türevlerini ve gelişmiş topografik özellikleri önceden hesapla.
     
     Bu fonksiyon:
     1. Cache varsa ve geçerliyse yükler
-    2. Yoksa tüm raster'ı okur ve RVT türevlerini hesaplar
+    2. Yoksa tüm raster'ı okur ve türevleri hesaplar
     3. İstenirse cache'e kaydeder
     
+    Hesaplanan kanallar:
+        - Temel 9 kanal: RGB, SVF, Openness (±), LRM, Slope, nDSM
+        - Curvature (enable_curvature=True): Plan + Profile Curvature
+        - TPI (enable_tpi=True): Multi-scale Topographic Position Index
+    
+    Args:
+        input_path: GeoTIFF dosya yolu
+        band_idx: Bant indeksleri [R, G, B, DSM, DTM]
+        use_cache: Cache kullan
+        cache_path: Cache dosya yolu
+        recalculate: Cache'i yoksay, yeniden hesapla
+        rvt_radii: RVT yarıçapları (metre)
+        gaussian_lrm_sigma: LRM için Gaussian sigma
+        enable_curvature: Curvature kanallarını hesapla
+        enable_tpi: TPI kanalını hesapla
+        tpi_radii: TPI yarıçapları (piksel)
+    
     Returns:
-        PrecomputedDerivatives or None
+        PrecomputedDerivatives veya None
     """
     with rasterio.open(input_path) as src:
         height, width = src.height, src.width
@@ -2932,20 +3402,47 @@ def precompute_derivatives(
                     dsm_cached = derivatives_data.get("dsm")
                     if dsm_cached is not None and getattr(dsm_cached, "size", 0) == 0:
                         dsm_cached = None
-                    return PrecomputedDerivatives(
-                        rgb=derivatives_data["rgb"],
-                        dsm=dsm_cached,
-                        dtm=derivatives_data["dtm"],
-                        svf=derivatives_data["svf"],
-                        pos_open=derivatives_data["pos_open"],
-                        neg_open=derivatives_data["neg_open"],
-                        lrm=derivatives_data["lrm"],
-                        slope=derivatives_data["slope"],
-                        ndsm=derivatives_data["ndsm"],
-                        transform=transform,
-                        crs=crs,
-                        pixel_size=pixel_size,
-                    )
+                    
+                    # Yeni kanalları cache'den al (yoksa None)
+                    plan_curv_cached = derivatives_data.get("plan_curv")
+                    profile_curv_cached = derivatives_data.get("profile_curv")
+                    tpi_cached = derivatives_data.get("tpi")
+                    
+                    # Eski cache formatından gelen boş array'leri None yap
+                    if plan_curv_cached is not None and getattr(plan_curv_cached, "size", 0) == 0:
+                        plan_curv_cached = None
+                    if profile_curv_cached is not None and getattr(profile_curv_cached, "size", 0) == 0:
+                        profile_curv_cached = None
+                    if tpi_cached is not None and getattr(tpi_cached, "size", 0) == 0:
+                        tpi_cached = None
+                    
+                    # Eğer yeni kanallar isteniyor ama cache'de yoksa, yeniden hesapla
+                    need_recalc = False
+                    if enable_curvature and (plan_curv_cached is None or profile_curv_cached is None):
+                        LOGGER.info("Cache'de Curvature yok, yeniden hesaplanacak")
+                        need_recalc = True
+                    if enable_tpi and tpi_cached is None:
+                        LOGGER.info("Cache'de TPI yok, yeniden hesaplanacak")
+                        need_recalc = True
+                    
+                    if not need_recalc:
+                        return PrecomputedDerivatives(
+                            rgb=derivatives_data["rgb"],
+                            dsm=dsm_cached,
+                            dtm=derivatives_data["dtm"],
+                            svf=derivatives_data["svf"],
+                            pos_open=derivatives_data["pos_open"],
+                            neg_open=derivatives_data["neg_open"],
+                            lrm=derivatives_data["lrm"],
+                            slope=derivatives_data["slope"],
+                            ndsm=derivatives_data["ndsm"],
+                            plan_curv=plan_curv_cached,
+                            profile_curv=profile_curv_cached,
+                            tpi=tpi_cached,
+                            transform=transform,
+                            crs=crs,
+                            pixel_size=pixel_size,
+                        )
                 else:
                     LOGGER.info("Cache geçersiz, yeniden hesaplanacak")
         
@@ -2991,6 +3488,22 @@ def precompute_derivatives(
             dtm, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
         )
         
+        # Gelişmiş topografik özellikler
+        plan_curv = None
+        profile_curv = None
+        tpi = None
+        
+        if enable_curvature:
+            LOGGER.info("Curvature kanalları hesaplanıyor (Plan + Profile)...")
+            plan_curv, profile_curv = compute_curvatures(dtm, pixel_size=pixel_size)
+            LOGGER.info("  → Plan Curvature: hendek/sırt ayrımı için")
+            LOGGER.info("  → Profile Curvature: teras/basamak tespiti için")
+        
+        if enable_tpi:
+            LOGGER.info(f"TPI (Topographic Position Index) hesaplanıyor (yarıçaplar: {tpi_radii})...")
+            tpi = compute_tpi_multiscale(dtm, radii=tpi_radii)
+            LOGGER.info("  → TPI: höyük/çukur tespiti için")
+        
         derivatives = PrecomputedDerivatives(
             rgb=rgb,
             dsm=dsm,
@@ -3001,6 +3514,9 @@ def precompute_derivatives(
             lrm=lrm,
             slope=slope,
             ndsm=ndsm,
+            plan_curv=plan_curv,
+            profile_curv=profile_curv,
+            tpi=tpi,
             transform=transform,
             crs=crs,
             pixel_size=pixel_size,
@@ -3018,6 +3534,10 @@ def precompute_derivatives(
                 "lrm": lrm,
                 "slope": slope,
                 "ndsm": ndsm,
+                # Yeni kanallar
+                "plan_curv": plan_curv if plan_curv is not None else np.array([]),
+                "profile_curv": profile_curv if profile_curv is not None else np.array([]),
+                "tpi": tpi if tpi is not None else np.array([]),
             }
             metadata = {
                 "input_path": str(input_path),
@@ -3025,6 +3545,9 @@ def precompute_derivatives(
                 "bands": list(band_idx),
                 "shape": (height, width),
                 "pixel_size": pixel_size,
+                "enable_curvature": enable_curvature,
+                "enable_tpi": enable_tpi,
+                "tpi_radii": list(tpi_radii) if enable_tpi else [],
                 # NOT: tile ve overlap cache'e KAYDEDİLMEZ!
                 # RVT türevleri tüm raster için hesaplanır, tile/overlap
                 # sadece model inference sırasında kullanılır.
@@ -3413,9 +3936,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             recalculate=config.recalculate_cache,
             rvt_radii=config.rvt_radii,
             gaussian_lrm_sigma=config.gaussian_lrm_sigma,
+            enable_curvature=config.enable_curvature,
+            enable_tpi=config.enable_tpi,
+            tpi_radii=config.tpi_radii,
         )
         if precomputed_deriv:
-            LOGGER.info("✓ RVT türevleri hazır - Her encoder çok daha hızlı çalışacak!")
+            num_ch = get_num_channels(config.enable_curvature, config.enable_tpi)
+            LOGGER.info(f"✓ Türevler hazır ({num_ch} kanal) - Her encoder çok daha hızlı çalışacak!")
         else:
             LOGGER.warning("RVT türevleri hesaplanamadı, normal moda devam ediliyor")
 
@@ -3454,13 +3981,31 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 else:
                     LOGGER.info("[%s] No weights at %s; falling back to zero-shot.", suffix, cand)
 
+            # Kanal sayısını hesapla (9, 10, 11 veya 12)
+            num_channels = get_num_channels(
+                enable_curvature=config.enable_curvature,
+                enable_tpi=config.enable_tpi
+            )
+            
             if per_weights is not None:
                 LOGGER.info("[%s] Eğitilmiş ağırlıklar yükleniyor: %s", suffix, per_weights)
-                model = build_model(arch=config.arch, encoder=smp_name, in_ch=9)
+                model = build_model(
+                    arch=config.arch, 
+                    encoder=smp_name, 
+                    in_ch=num_channels,
+                    enable_attention=config.enable_attention,
+                    attention_reduction=config.attention_reduction,
+                )
                 load_weights(model, per_weights, map_location=device)
             else:
-                LOGGER.info("[%s] Zero-shot modunda başlatılıyor (ImageNet 3->9 genişletme)", suffix)
-                model = build_model_with_imagenet_inflated(arch=config.arch, encoder=smp_name, in_ch=9)
+                LOGGER.info("[%s] Zero-shot modunda başlatılıyor (ImageNet 3->%d genişletme)", suffix, num_channels)
+                model = build_model_with_imagenet_inflated(
+                    arch=config.arch, 
+                    encoder=smp_name, 
+                    in_ch=num_channels,
+                    enable_attention=config.enable_attention,
+                    attention_reduction=config.attention_reduction,
+                )
 
             enc_prefix = out_prefix.with_suffix("")
             enc_prefix = enc_prefix.parent / f"{enc_prefix.name}_{suffix}"
@@ -3488,6 +4033,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 rvt_radii=config.rvt_radii,
                 gaussian_lrm_sigma=config.gaussian_lrm_sigma,
                 rgb_only=config.rgb_only,
+                tpi_radii=config.tpi_radii,
             )
             LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
             LOGGER.info("[%s] ✓ İkili maske: %s", suffix, outputs.mask_path)
@@ -3524,13 +4070,31 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             return
     
     # Tek model çalıştır (sadece encoders boş/none ise)
+    # Kanal sayısını hesapla (9, 10, 11 veya 12)
+    num_channels = get_num_channels(
+        enable_curvature=config.enable_curvature,
+        enable_tpi=config.enable_tpi
+    )
+    
     if enc_mode in ("", "none") and config.enable_deep_learning and config.zero_shot_imagenet:
-        LOGGER.info("Zero-shot mode: using ImageNet-pretrained encoder inflated to 9 channels.")
+        LOGGER.info(f"Zero-shot mode: using ImageNet-pretrained encoder inflated to {num_channels} channels.")
+        if config.enable_attention:
+            LOGGER.info("CBAM Attention modülü aktif.")
         model = build_model_with_imagenet_inflated(
-            arch=config.arch, encoder=config.encoder, in_ch=9
+            arch=config.arch, 
+            encoder=config.encoder, 
+            in_ch=num_channels,
+            enable_attention=config.enable_attention,
+            attention_reduction=config.attention_reduction,
         )
     elif enc_mode in ("", "none") and config.enable_deep_learning:
-        model = build_model(arch=config.arch, encoder=config.encoder, in_ch=9)
+        model = build_model(
+            arch=config.arch, 
+            encoder=config.encoder, 
+            in_ch=num_channels,
+            enable_attention=config.enable_attention,
+            attention_reduction=config.attention_reduction,
+        )
         # weights_path is guaranteed to be set in this branch
         if weights_path is not None:
             load_weights(model, weights_path, map_location=device)
@@ -3567,6 +4131,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             rvt_radii=config.rvt_radii,
             gaussian_lrm_sigma=config.gaussian_lrm_sigma,
             rgb_only=config.rgb_only,
+            tpi_radii=config.tpi_radii,
         )
         # Record encoder for fusion filenames (single-encoder path)
         fusion_encoder_label = config.encoder
