@@ -114,12 +114,18 @@ python egitim_verisi_olusturma.py \
   --mask ground_truth.tif \
   --output training_data
 
+# Or use interactive mode (no arguments needed):
+python egitim_verisi_olusturma.py
+# Follow the prompts to enter file paths
+
 # Step 2: Train the model
 python training.py --data training_data --epochs 50
 
 # Step 3: Use your trained model
 python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
 ```
+
+**💡 Tip:** The training data generation script (`egitim_verisi_olusturma.py`) supports interactive mode. If you run it without arguments, it will guide you through the process step-by-step.
 
 ---
 
@@ -1048,6 +1054,36 @@ python archaeo_detect.py --overlap 512 --feather
    python archaeo_detect.py --cache-derivatives -v
    ```
 
+#### ❌ Error 7: Training Script Import Errors
+
+**Symptoms:**
+```
+HATA: segmentation-models-pytorch kurulu değil!
+HATA: archaeo_detect.py'den attention modülleri import edilemedi.
+```
+
+**Solutions:**
+1. **Install missing packages**:
+   ```bash
+   pip install segmentation-models-pytorch
+   ```
+
+2. **Check Python path**: Ensure `archaeo_detect.py` is in the same directory or in Python path
+
+3. **Verify installation**: Run `python -c "import segmentation_models_pytorch as smp; print(smp.__version__)"`
+
+#### ❌ Error 8: Training Data Format Mismatch
+
+**Symptoms:**
+```
+ValueError: Expected 12 channels but got 9
+```
+
+**Solutions:**
+1. **Regenerate training data**: Use `egitim_verisi_olusturma.py` with correct parameters
+2. **Check metadata.json**: Verify `num_channels` matches actual data
+3. **Verify file format**: Ensure `.npz` files contain `image` key with shape `(12, H, W)`
+
 ### Debug Mode
 
 For detailed debugging:
@@ -1057,6 +1093,41 @@ python archaeo_detect.py --verbose 2 2>&1 | tee debug_log.txt
 ```
 
 This command writes all debug messages to both screen and `debug_log.txt` file.
+
+### Training Script Debugging
+
+**Check training data:**
+```bash
+# Verify training data structure
+ls -R training_data/
+# Should show: train/images/, train/masks/, val/images/, val/masks/
+
+# Check metadata
+cat training_data/metadata.json | python -m json.tool
+```
+
+**Test data loading:**
+```python
+# Quick test script
+import numpy as np
+from pathlib import Path
+
+data_dir = Path("training_data")
+train_images = list((data_dir / "train" / "images").glob("*.npz"))
+if train_images:
+    sample = np.load(train_images[0])
+    print(f"Keys: {sample.files}")
+    if 'image' in sample.files:
+        img = sample['image']
+        print(f"Image shape: {img.shape}")
+        print(f"Expected: (12, 256, 256), Got: {img.shape}")
+```
+
+**Monitor training in real-time:**
+```bash
+# Watch training history file
+watch -n 5 'tail -20 checkpoints/training_history.json'
+```
 
 ---
 
@@ -1092,7 +1163,13 @@ A:
 4. Use high-quality data
 
 **Q: How do I train my own model?**  
-A: The project includes dedicated training scripts! See the [Custom Model Training](#custom-model-training) section below for step-by-step instructions using `egitim_verisi_olusturma.py` and `training.py`.
+A: The project includes dedicated training scripts! See the [Model Training Guide](#-model-training-guide) section below for step-by-step instructions using `egitim_verisi_olusturma.py` and `training.py`.
+
+**Q: Can I use the training scripts interactively?**  
+A: Yes! `egitim_verisi_olusturma.py` supports interactive mode. Just run it without arguments: `python egitim_verisi_olusturma.py` and it will prompt you for inputs.
+
+**Q: What if I don't have ground truth masks?**  
+A: You can still use the system with zero-shot ImageNet weights (`zero_shot_imagenet: true`) or classical methods only. However, for best results, train a custom model with your own labeled data.
 
 ### 📊 Data Questions
 
@@ -1166,6 +1243,22 @@ python egitim_verisi_olusturma.py \
   --mask ground_truth.tif \
   --output training_data
 ```
+
+#### Interactive Mode
+
+If you run the script without arguments, it will prompt you interactively:
+
+```bash
+python egitim_verisi_olusturma.py
+```
+
+**Interactive prompts:**
+- Input GeoTIFF file (default: `kesif_alani.tif`)
+- Ground truth mask file (required)
+- Output directory (default: `training_data`)
+- Tile size (default: `256`)
+
+This is useful for quick testing or when you prefer interactive input.
 
 #### Complete Example with All Options
 
@@ -1434,6 +1527,43 @@ python egitim_verisi_olusturma.py \
   --output training_data
 ```
 
+**Example 5: Interactive Mode (No Arguments)**
+
+For quick testing or when you prefer step-by-step input:
+
+```bash
+python egitim_verisi_olusturma.py
+# Follow the prompts:
+# Input GeoTIFF: [kesif_alani.tif]
+# Mask file: ground_truth.tif
+# Output directory: [training_data]
+# Tile size: [256]
+```
+
+**Example 6: Multiple Source Files**
+
+If you have multiple areas to combine:
+
+```python
+# Use the create_tiles_from_multiple_sources function
+from egitim_verisi_olusturma import create_tiles_from_multiple_sources
+from pathlib import Path
+
+sources = [
+    (Path("area1.tif"), Path("area1_mask.tif")),
+    (Path("area2.tif"), Path("area2_mask.tif")),
+    (Path("area3.tif"), Path("area3_mask.tif")),
+]
+
+create_tiles_from_multiple_sources(
+    sources=sources,
+    output_dir=Path("combined_training_data"),
+    tile_size=256,
+    overlap=64,
+    balance_ratio=0.4
+)
+```
+
 #### Troubleshooting Data Preparation
 
 **Problem: "No valid tiles found"**
@@ -1457,7 +1587,15 @@ python egitim_verisi_olusturma.py \
 
 **Problem: "RVT calculation too slow"**
 - **Cause**: Large input files, complex terrain
-- **Solution**: This is normal for first run. Subsequent runs with same input will be faster if you reuse the script (it uses caching internally)
+- **Solution**: This is normal for first run. The script calculates RVT derivatives on-the-fly. For faster subsequent runs, consider using the cache system in `archaeo_detect.py` or processing smaller areas
+
+**Problem: "Interaktif mod çalışmıyor" (Interactive mode not working)**
+- **Cause**: Script expects command-line arguments
+- **Solution**: Run without any arguments: `python egitim_verisi_olusturma.py` (no flags)
+
+**Problem: "Metadata.json format hatası"**
+- **Cause**: Corrupted or incomplete metadata file
+- **Solution**: Delete `metadata.json` and regenerate training data. The script will create a new one automatically
 
 ### 🚀 Step 3: Train the Model
 
@@ -1468,6 +1606,8 @@ Use `training.py` to train your custom U-Net model with 12-channel input and CBA
 ```bash
 python training.py --data training_data
 ```
+
+**Note:** The script automatically reads the number of channels from `metadata.json` in the training data directory. If metadata is missing, it defaults to 12 channels.
 
 This will use default settings:
 - Architecture: U-Net
@@ -1702,6 +1842,32 @@ python training.py \
   --encoder efficientnet-b3
 ```
 
+**Scenario 6: Training Without Attention (Testing)**
+
+To test if attention improves results:
+
+```bash
+python training.py \
+  --data training_data \
+  --no-attention \
+  --epochs 50
+```
+
+**Scenario 7: CPU-Only Training**
+
+If you don't have GPU:
+
+```bash
+python training.py \
+  --data training_data \
+  --batch-size 4 \
+  --workers 2 \
+  --no-amp \
+  --epochs 30
+```
+
+**Note:** CPU training is much slower. Consider using classical methods or smaller datasets for CPU-only scenarios.
+
 ### 📊 Step 4: Evaluate and Use Trained Model
 
 #### Using Trained Model for Inference
@@ -1922,6 +2088,30 @@ RuntimeError: CUDA out of memory. Tried to allocate X GB
 2. **More negative examples**: Add more background tiles to training data
 3. **Check data quality**: Ensure masks don't have labeling errors
 4. **Use balanced sampling**: In data prep, use `--balance-ratio 0.3` (more negatives)
+
+**Problem: "Training data dizini bulunamadı" (Training data directory not found)**
+
+**Symptoms:**
+```
+HATA: Veri dizini bulunamadı: training_data
+```
+
+**Solutions:**
+1. **Check path**: Ensure the path to training data is correct
+2. **Run data preparation first**: Use `egitim_verisi_olusturma.py` to create training data
+3. **Verify structure**: Training data should have `train/images/` and `val/images/` subdirectories
+
+**Problem: "Metadata bulunamadı" (Metadata not found)**
+
+**Symptoms:**
+```
+UYARI: Metadata bulunamadı, varsayılan kanal sayısı kullanılıyor: 12
+```
+
+**Solutions:**
+1. **Regenerate training data**: Run `egitim_verisi_olusturma.py` again to create `metadata.json`
+2. **Check file location**: `metadata.json` should be in the training data root directory
+3. **Manual creation**: If needed, create a basic `metadata.json` with `num_channels: 12`
 
 #### 6. Training Workflow Best Practices
 
@@ -2250,36 +2440,133 @@ python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumul
 
 ## 📚 Technical Details
 
+### Project Structure
+
+```
+archaeo_detect_base/
+├── archaeo_detect.py              # Main detection script
+├── egitim_verisi_olusturma.py     # Training data generation
+├── training.py                     # Model training script
+├── evaluation.py                   # Evaluation metrics
+├── config.yaml                     # Configuration file
+├── requirements.txt                # Python dependencies
+├── README.md                       # This documentation
+├── training_data/                  # Generated training tiles
+│   ├── train/
+│   │   ├── images/                 # 12-channel image tiles (.npz)
+│   │   └── masks/                  # Binary mask tiles (.npz)
+│   ├── val/
+│   │   ├── images/
+│   │   └── masks/
+│   └── metadata.json               # Dataset metadata
+├── checkpoints/                    # Trained model weights
+│   ├── best_Unet_resnet34_12ch_attention.pth
+│   └── training_history.json
+├── cache/                          # RVT derivatives cache
+│   └── *.derivatives.npz
+└── ciktilar/                       # Output detection results
+    ├── *_prob.tif                  # Probability maps
+    ├── *_mask.tif                  # Binary masks
+    └── *_mask.gpkg                 # Vector polygons
+```
+
 ### System Architecture
 
 ```
 archaeo_detect.py
 ├── Data Loading (rasterio)
+│   ├── Multi-band GeoTIFF reading
+│   ├── Band selection and validation
+│   └── CRS and transform preservation
 ├── Preprocessing
-│   ├── Band reading
+│   ├── Band reading (RGB, DSM, DTM)
 │   ├── RVT derivatives (rvt-py)
-│   ├── Curvature calculation (Plan + Profile)
-│   ├── TPI calculation (multi-scale)
-│   ├── nDSM calculation
-│   └── Normalization
-├── Detection
+│   │   ├── SVF (Sky-View Factor)
+│   │   ├── Positive/Negative Openness
+│   │   ├── LRM (Local Relief Model)
+│   │   └── Slope
+│   ├── Advanced features
+│   │   ├── Curvature calculation (Plan + Profile)
+│   │   ├── TPI calculation (multi-scale)
+│   │   └── nDSM calculation (DSM - DTM)
+│   └── Normalization (global/local percentile)
+├── Detection Pipeline
 │   ├── Deep Learning (PyTorch + SMP)
-│   │   ├── U-Net
-│   │   ├── DeepLabV3+
+│   │   ├── U-Net / UnetPlusPlus / DeepLabV3+
 │   │   ├── CBAM Attention (optional)
-│   │   └── Other architectures
+│   │   ├── Multi-encoder ensemble
+│   │   └── Tile-based inference
 │   ├── Classical Methods
-│   │   ├── RVT (SVF, Openness, LRM)
-│   │   ├── Hessian Matrix
-│   │   └── Morphology (scikit-image)
-│   └── Fusion (Hybrid)
+│   │   ├── RVT visualization (SVF, Openness, LRM)
+│   │   ├── Hessian Matrix (ridge/valley detection)
+│   │   └── Morphology (opening, closing, top-hat)
+│   ├── YOLO11 (optional)
+│   │   ├── Object detection
+│   │   ├── Segmentation
+│   │   └── Labeled inventory
+│   └── Fusion (Hybrid combination)
+│       └── Weighted averaging (alpha blending)
 ├── Post-Processing
-│   ├── Thresholding
-│   ├── Morphological post-processing
-│   └── Area filtering
-└── Output
-    ├── Raster (GeoTIFF)
-    └── Vector (GeoPackage)
+│   ├── Thresholding (probability → binary)
+│   ├── Morphological operations
+│   ├── Area filtering (min_area)
+│   └── Tall object masking (nDSM-based)
+└── Output Generation
+    ├── Raster outputs (GeoTIFF)
+    │   ├── Probability maps
+    │   └── Binary masks
+    └── Vector outputs (GeoPackage)
+        ├── Polygon geometries
+        ├── Area attributes
+        └── CRS preservation
+```
+
+### Training Pipeline Architecture
+
+```
+egitim_verisi_olusturma.py
+├── Input Validation
+│   ├── GeoTIFF + mask file check
+│   ├── Dimension matching
+│   └── CRS validation
+├── Feature Extraction
+│   ├── RVT derivatives (SVF, Openness, LRM, Slope)
+│   ├── Curvature (Plan, Profile)
+│   ├── TPI (multi-scale)
+│   └── nDSM calculation
+├── Tile Generation
+│   ├── Sliding window with overlap
+│   ├── Quality filtering (nodata, positive ratio)
+│   └── Balanced sampling (optional)
+├── Normalization
+│   └── Robust percentile scaling (2%-98%)
+└── Data Export
+    ├── Train/Val split
+    ├── File saving (.npz or .npy)
+    └── Metadata generation
+
+training.py
+├── Data Loading
+│   ├── ArchaeologyDataset class
+│   ├── Data augmentation (flip, rotate)
+│   └── DataLoader with workers
+├── Model Creation
+│   ├── Architecture selection (U-Net, etc.)
+│   ├── Encoder initialization
+│   ├── CBAM Attention wrapper
+│   └── Channel adaptation (12 channels)
+├── Training Loop
+│   ├── Forward pass
+│   ├── Loss calculation (BCE, Dice, Combined, Focal)
+│   ├── Backward pass (with AMP)
+│   └── Optimizer step
+├── Validation
+│   ├── IoU calculation
+│   ├── Loss monitoring
+│   └── Best model tracking
+└── Checkpointing
+    ├── Best model saving
+    └── Training history logging
 ```
 
 ### Libraries Used
