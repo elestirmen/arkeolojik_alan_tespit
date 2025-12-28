@@ -4163,7 +4163,7 @@ def validate_derivative_raster_cache_metadata(
     enable_tpi: bool,
     tpi_radii: Sequence[int],
 ) -> bool:
-    """Raster-cache metadata do§rula (girdi + parametre uyumu)."""
+    """Raster-cache metadata dogrula (girdi + parametre uyumu)."""
     required_keys = [
         "complete",
         "input_name",
@@ -4180,16 +4180,16 @@ def validate_derivative_raster_cache_metadata(
         "band_map",
     ]
     if not all(k in metadata for k in required_keys):
-        LOGGER.warning("Raster-cache metadata eksik anahtarlar var; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache metadata eksik anahtarlar var; cache gecersiz")
         return False
 
     if not bool(metadata.get("complete", False)):
-        LOGGER.warning("Raster-cache tamamlanmamŸ g”rnyor; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache tamamlanmamis gorunuyor; cache gecersiz")
         return False
 
     if str(metadata.get("input_name", "")) != input_path.name:
         LOGGER.warning(
-            "Raster-cache dosya ad uyuŸmuyor: cache'deki=%s, mevcut=%s",
+            "Raster-cache dosya adi uyusmuyor: cache'deki=%s, mevcut=%s",
             metadata.get("input_name"),
             input_path.name,
         )
@@ -4200,20 +4200,20 @@ def validate_derivative_raster_cache_metadata(
         current_mtime = float(stat.st_mtime)
         current_size = int(stat.st_size)
     except (OSError, FileNotFoundError) as e:
-        LOGGER.warning("Girdi dosyas kontrol edilemedi: %s", e)
+        LOGGER.warning("Girdi dosyasi kontrol edilemedi: %s", e)
         return False
 
     cached_mtime = float(metadata.get("input_mtime", -1))
     cached_size = int(metadata.get("input_size", -1))
     if cached_size != current_size:
-        LOGGER.warning("Girdi dosyas boyutu de§iŸmiŸ; cache ge‡ersiz")
+        LOGGER.warning("Girdi dosyasi boyutu degismis; cache gecersiz")
         return False
     if abs(cached_mtime - current_mtime) > 2.0:
-        LOGGER.warning("Girdi dosyas mtime de§iŸmiŸ; cache ge‡ersiz")
+        LOGGER.warning("Girdi dosyasi mtime degismis; cache gecersiz")
         return False
 
     if list(metadata.get("bands", [])) != list(band_idx):
-        LOGGER.warning("Raster-cache bant sras de§iŸmiŸ; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache bant sirasi degismis; cache gecersiz")
         return False
 
     wanted_radii = list(DEFAULTS.rvt_radii if rvt_radii is None else rvt_radii)
@@ -4225,31 +4225,31 @@ def validate_derivative_raster_cache_metadata(
         atol=1e-6,
         equal_nan=True,
     ):
-        LOGGER.warning("Raster-cache RVT radii parametreleri de§iŸmiŸ; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache RVT radii parametreleri degismis; cache gecersiz")
         return False
 
     wanted_sigma = float(DEFAULTS.gaussian_lrm_sigma if gaussian_lrm_sigma is None else gaussian_lrm_sigma)
     cached_sigma = float(metadata.get("gaussian_lrm_sigma", float("nan")))
     if not math.isfinite(cached_sigma) or abs(cached_sigma - wanted_sigma) > 1e-6:
-        LOGGER.warning("Raster-cache gaussian_lrm_sigma de§iŸmiŸ; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache gaussian_lrm_sigma degismis; cache gecersiz")
         return False
 
     if bool(metadata.get("enable_curvature", False)) != bool(enable_curvature):
-        LOGGER.warning("Raster-cache enable_curvature de§iŸmiŸ; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache enable_curvature degismis; cache gecersiz")
         return False
     if bool(metadata.get("enable_tpi", False)) != bool(enable_tpi):
-        LOGGER.warning("Raster-cache enable_tpi de§iŸmiŸ; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache enable_tpi degismis; cache gecersiz")
         return False
 
     wanted_tpi = [int(x) for x in (tpi_radii if enable_tpi else [])]
     cached_tpi = [int(x) for x in metadata.get("tpi_radii", [])]
     if wanted_tpi != cached_tpi:
-        LOGGER.warning("Raster-cache tpi_radii de§iŸmiŸ; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache tpi_radii degismis; cache gecersiz")
         return False
 
     band_map = metadata.get("band_map")
     if not isinstance(band_map, dict) or not band_map:
-        LOGGER.warning("Raster-cache band_map eksik; cache ge‡ersiz")
+        LOGGER.warning("Raster-cache band_map eksik; cache gecersiz")
         return False
 
     required_bands = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm"]
@@ -4303,13 +4303,13 @@ def load_derivative_raster_cache_info(
                 exp_h = int(shape[0])
                 exp_w = int(shape[1])
                 if int(ds.height) != exp_h or int(ds.width) != exp_w:
-                    LOGGER.warning("Raster-cache boyutu uyumsuz; cache ge‡ersiz")
+                    LOGGER.warning("Raster-cache boyutu uyumsuz; cache gecersiz")
                     return None
             band_map = metadata.get("band_map", {})
             if isinstance(band_map, dict) and band_map:
                 max_band = max(int(v) for v in band_map.values())
                 if int(ds.count) < max_band:
-                    LOGGER.warning("Raster-cache band says yetersiz; cache ge‡ersiz")
+                    LOGGER.warning("Raster-cache band says yetersiz; cache gecersiz")
                     return None
     except Exception as e:
         LOGGER.warning("Raster-cache GeoTIFF a‡lamad (%s): %s", cache_tif_path, e)
@@ -4602,16 +4602,32 @@ def validate_cache(
     *,
     rvt_radii: Optional[Sequence[float]] = None,
     gaussian_lrm_sigma: Optional[float] = None,
+    enable_curvature: bool = True,
+    enable_tpi: bool = True,
+    tpi_radii: Optional[Sequence[int]] = None,
 ) -> bool:
     """
-    Cache'in mevcut parametrelerle uyumlu olup olmadığını kontrol et.
+    Cache'in mevcut parametrelerle uyumlu olup olmadini kontrol et.
     
-    NOT: tile ve overlap parametreleri cache geçerliliğini ETKİLEMEZ!
-    RVT türevleri tüm raster için bir kez hesaplanır, tile/overlap sadece
-    model inference sırasında kullanılır.
+    NOT: tile ve overlap parametreleri cache gecerliligini ETKILEMEZ!
+    RVT turevleri tum raster icin bir kez hesaplanir, tile/overlap sadece
+    model inference sirasinda kullanilir.
     
-    NOT: Dosya yolu değişse bile, dosya adı ve mtime aynıysa cache geçerlidir.
-    Bu, dosyaların farklı dizinlere taşınması durumunda cache'in kullanılabilmesini sağlar.
+    NOT: Dosya yolu degisse bile, dosya adi ve mtime ayniysa cache gecerlidir.
+    Bu, dosyalarin farkli dizinlere tasinmasi durumunda cache'in kullanilabilmesini saglar.
+    
+    Args:
+        metadata: Cache metadata sozlugu
+        input_path: Girdi dosyasi yolu
+        bands: Bant indeksleri
+        rvt_radii: RVT radii parametreleri
+        gaussian_lrm_sigma: LRM sigma parametresi
+        enable_curvature: Curvature kanallari aktif mi
+        enable_tpi: TPI kanali aktif mi
+        tpi_radii: TPI radii parametreleri (enable_tpi=True ise kontrol edilir)
+    
+    Returns:
+        bool: Cache gecerli mi
     """
     required_keys = ["input_path", "input_mtime", "input_size", "bands", "shape", "rvt_radii", "gaussian_lrm_sigma"]
     
@@ -4619,49 +4635,49 @@ def validate_cache(
         LOGGER.warning("Cache metadata eksik")
         return False
     
-    # Dosya adı kontrolü (yol değişse bile dosya adı aynı olmalı)
+    # Dosya adi kontrolu (yol degisse bile dosya adi ayni olmali)
     cached_path = Path(metadata["input_path"])
     if cached_path.name != input_path.name:
-        LOGGER.warning(f"Cache dosya adı uyuşmuyor: cache'deki={cached_path.name}, mevcut={input_path.name}")
+        LOGGER.warning(f"Cache dosya adi uyusmuyor: cache'deki={cached_path.name}, mevcut={input_path.name}")
         return False
     
-    # Dosya değişmiş mi? (mtime kontrolü - dosya taşınsa bile mtime genelde aynı kalır)
+    # Dosya degismis mi? (mtime kontrolu - dosya tasinsa bile mtime genelde ayni kalir)
     try:
         stat = input_path.stat()
         current_mtime = stat.st_mtime
         current_size = stat.st_size
         cached_mtime = metadata["input_mtime"]
         cached_size = metadata["input_size"]
-        # 2 saniye tolerans (dosya sistemi zamanlama farkları için)
+        # 2 saniye tolerans (dosya sistemi zamanlama farklari icin)
         if abs(cached_mtime - current_mtime) > 2.0:
-            LOGGER.warning(f"Girdi dosyası değişmiş, cache geçersiz (mtime farkı: {abs(cached_mtime - current_mtime):.1f} saniye)")
+            LOGGER.warning(f"Girdi dosyasi degismis, cache gecersiz (mtime farki: {abs(cached_mtime - current_mtime):.1f} saniye)")
             return False
         if int(cached_size) != int(current_size):
-            LOGGER.warning("Girdi dosyası boyutu değişmiş, cache geçersiz")
+            LOGGER.warning("Girdi dosyasi boyutu degismis, cache gecersiz")
             return False
     except (OSError, FileNotFoundError) as e:
-        LOGGER.warning(f"Girdi dosyası kontrol edilemedi: {e}")
+        LOGGER.warning(f"Girdi dosyasi kontrol edilemedi: {e}")
         return False
 
-    # Raster boyutu (H,W) kontrolü
+    # Raster boyutu (H,W) kontrolu
     try:
         with rasterio.open(input_path) as src:
             h = int(src.height)
             w = int(src.width)
         cached_shape = metadata["shape"]
         if tuple(cached_shape) != (h, w):
-            LOGGER.warning("Raster boyutu değişmiş, cache geçersiz")
+            LOGGER.warning("Raster boyutu degismis, cache gecersiz")
             return False
     except Exception as e:
         LOGGER.warning(f"Raster boyutu kontrol edilemedi: {e}")
         return False
     
-    # Bant sırası aynı mı?
+    # Bant sirasi ayni mi?
     if metadata["bands"] != list(bands):
-        LOGGER.warning(f"Bant sırası değişmiş, cache geçersiz (cache: {metadata['bands']}, mevcut: {list(bands)})")
+        LOGGER.warning(f"Bant sirasi degismis, cache gecersiz (cache: {metadata['bands']}, mevcut: {list(bands)})")
         return False
 
-    # RVT parametreleri (radii/sigma) aynı mı?
+    # RVT parametreleri (radii/sigma) ayni mi?
     wanted_radii = list(DEFAULTS.rvt_radii if rvt_radii is None else rvt_radii)
     cached_radii = list(metadata.get("rvt_radii", []))
     if len(wanted_radii) != len(cached_radii) or not np.allclose(
@@ -4671,15 +4687,35 @@ def validate_cache(
         atol=1e-6,
         equal_nan=True,
     ):
-        LOGGER.warning("RVT radii değişmiş, cache geçersiz")
+        LOGGER.warning("RVT radii degismis, cache gecersiz")
         return False
     wanted_sigma = float(DEFAULTS.gaussian_lrm_sigma if gaussian_lrm_sigma is None else gaussian_lrm_sigma)
     cached_sigma = float(metadata.get("gaussian_lrm_sigma", float("nan")))
     if not math.isfinite(cached_sigma) or abs(cached_sigma - wanted_sigma) > 1e-6:
-        LOGGER.warning("gaussian_lrm_sigma değişmiş, cache geçersiz")
+        LOGGER.warning("gaussian_lrm_sigma degismis, cache gecersiz")
         return False
     
-    LOGGER.info("Cache geçerli ✓")
+    # enable_curvature parametresi kontrolu
+    cached_enable_curvature = metadata.get("enable_curvature", False)
+    if enable_curvature != cached_enable_curvature:
+        LOGGER.warning(f"enable_curvature degismis (cache: {cached_enable_curvature}, mevcut: {enable_curvature}), cache gecersiz")
+        return False
+    
+    # enable_tpi parametresi kontrolu
+    cached_enable_tpi = metadata.get("enable_tpi", False)
+    if enable_tpi != cached_enable_tpi:
+        LOGGER.warning(f"enable_tpi degismis (cache: {cached_enable_tpi}, mevcut: {enable_tpi}), cache gecersiz")
+        return False
+    
+    # TPI radii kontrolu (sadece TPI aktifse)
+    if enable_tpi:
+        wanted_tpi_radii = list(DEFAULTS.tpi_radii if tpi_radii is None else tpi_radii)
+        cached_tpi_radii = list(metadata.get("tpi_radii", []))
+        if len(wanted_tpi_radii) != len(cached_tpi_radii) or wanted_tpi_radii != cached_tpi_radii:
+            LOGGER.warning(f"tpi_radii degismis (cache: {cached_tpi_radii}, mevcut: {wanted_tpi_radii}), cache gecersiz")
+            return False
+    
+    LOGGER.info("Cache gecerli")
     return True
 
 
@@ -4792,6 +4828,9 @@ def precompute_derivatives(
                     band_idx,
                     rvt_radii=rvt_radii,
                     gaussian_lrm_sigma=gaussian_lrm_sigma,
+                    enable_curvature=enable_curvature,
+                    enable_tpi=enable_tpi,
+                    tpi_radii=tpi_radii,
                 ):
                     # Cache'den yükle
                     dsm_cached = derivatives_data.get("dsm")
