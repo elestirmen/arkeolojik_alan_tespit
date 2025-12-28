@@ -1041,8 +1041,13 @@ python archaeo_detect.py --overlap 512 --feather
    ```
 
 2. Verify cache file naming:
-   - Cache files should be named: `<input_name>.derivatives.npz`
-   - Example: `kesif_alani.derivatives.npz` for input `kesif_alani.tif`
+   - NPZ cache (default for small/medium rasters): `<input_name>.derivatives.npz`
+   - Raster cache (block-based; used automatically for very large rasters or with `cache_derivatives_mode: "raster"`):
+     - `<input_name>.derivatives_raster.tif`
+     - `<input_name>.derivatives_raster.json`
+   - Example for input `kesif_alani.tif`:
+     - `kesif_alani.derivatives.npz`
+     - `kesif_alani.derivatives_raster.tif`
 
 3. Check cache validation:
    - Cache validation checks file name and modification time

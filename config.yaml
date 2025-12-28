@@ -28,7 +28,7 @@
 # - Dosya çok bantlı bir GeoTIFF olmalıdır
 # - Önerilen bantlar: R, G, B, DSM (Yüzey Modeli), DTM (Arazi Modeli)
 # Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
-input: "kesif_alani.tif"
+input: "gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
 #input: "karlik_vadi.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
@@ -873,13 +873,32 @@ verbose: 1
 # ÖNERİ: Neredeyse her zaman true kullanın, büyük zaman kazancı sağlar
 cache_derivatives: true
 
+# cache_derivatives_mode: Cache formatı seçimi
+# - "auto": Küçük/orta rasterlarda .npz cache, çok büyük rasterlarda blok-bazlı raster-cache
+# - "npz": Zorla .npz (çok büyük rasterlarda otomatik raster-cache'e düşebilir)
+# - "raster": Zorla raster-cache (blok blok diske yazılır)
+# Raster-cache dosyaları:
+#   - <stem>.derivatives_raster.tif  (büyük dosya olabilir)
+#   - <stem>.derivatives_raster.json (metadata)
+cache_derivatives_mode: "auto"
+
+# deriv_cache_chunk: Raster-cache üretiminde blok boyutu (piksel)
+# - Büyük değer: daha az blok, daha hızlı (daha çok RAM)
+# - Küçük değer: daha az RAM, daha çok blok (daha yavaş)
+deriv_cache_chunk: 2048
+
+# deriv_cache_halo: Blok sınır artefaktlarını önlemek için halo (piksel)
+# - null: otomatik (rvt_radii / tpi_radii / gaussian_lrm_sigma'dan hesaplanır)
+# - sayı: sabit halo piksel (ileri kullanıcı)
+deriv_cache_halo: null
+
 # cache_dir: Önbellek dosyalarının kaydedileceği dizin
 # - null: Girdi dosyasının bulunduğu dizine kaydet (varsayılan)
 # - Yol belirtin: Özel bir önbellek dizini kullanın
 # ÖRNEK:
 #   - null: kesif_alani.derivatives.npz, kesif_alani.tif'in yanında
-#   - "cache/": cache/kesif_alani.derivatives.npz
-#   - "C:/temp/": C:/temp/kesif_alani.derivatives.npz
+#   - "cache/": cache/kesif_alani.derivatives.npz + cache/kesif_alani.derivatives_raster.tif
+#   - "C:/temp/": C:/temp/kesif_alani.derivatives.npz + C:/temp/kesif_alani.derivatives_raster.tif
 # KULLANIM:
 #   Birden fazla proje için merkezi bir önbellek dizini istiyorsanız kullanın
 # ÖNERİ: Varsayılan null kullanın, daha basit
