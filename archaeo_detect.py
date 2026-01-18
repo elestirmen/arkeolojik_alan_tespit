@@ -1,4 +1,4 @@
-﻿"""
+"""
 Çok bantlı GeoTIFF'lerden arkeolojik alan tespiti için komut satırı aracı.
 
 Pipeline aşağıdaki adımları gerçekleştirir:
@@ -32,6 +32,7 @@ import sys
 import uuid
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field, fields
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence, TextIO, Tuple, TypeVar
 
@@ -105,6 +106,18 @@ except ImportError:
 LOGGER = logging.getLogger("archaeo_detect")
 
 T = TypeVar("T")
+
+SESSION_RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _safe_token(value: str) -> str:
+    token = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value.strip())
+    return token.strip("_")
+
+
+def _fmt_float(value: float, decimals: int = 2) -> str:
+    formatted = f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+    return formatted.replace(".", "p")
 
 # ==== Sabit Değerler ====
 # Bu değerler PipelineDefaults içinde yapılandırılabilir hale getirildi.
@@ -4072,7 +4085,61 @@ def write_fused_probability_rasters_from_paths(
     return transform, crs
 
 
-def resolve_out_prefix(input_path: Path, prefix: Optional[str]) -> Path:
+def build_session_folder_name(input_path: Path, config: PipelineDefaults) -> str:
+    """Build a descriptive, timestamped output subfolder name."""
+    stem = _safe_token(input_path.stem.strip()) or "input"
+    parts: List[str] = [SESSION_RUN_ID, stem]
+
+    method_tokens: List[str] = []
+    if config.enable_deep_learning:
+        dl_token = "dl"
+        if config.arch:
+            dl_token += f"-{_safe_token(config.arch)}"
+        if (config.encoders or "").strip().lower() in ("", "none") and config.encoder:
+            dl_token += f"-{_safe_token(config.encoder)}"
+        method_tokens.append(dl_token)
+    if config.enable_classic:
+        classic_token = "classic"
+        modes = (config.classic_modes or "").strip().lower()
+        if modes:
+            classic_token += f"-{_safe_token(modes)}"
+        method_tokens.append(classic_token)
+    if config.enable_yolo:
+        yolo_token = "yolo"
+        if config.yolo_conf is not None:
+            yolo_token += f"-conf{_fmt_float(config.yolo_conf)}"
+        method_tokens.append(yolo_token)
+    if config.enable_fusion:
+        method_tokens.append("fusion")
+    if method_tokens:
+        parts.append("+".join(method_tokens))
+
+    param_tokens: List[str] = []
+    if config.enable_deep_learning and config.th is not None:
+        param_tokens.append(f"th{_fmt_float(config.th)}")
+    if config.enable_classic:
+        if config.classic_th is None:
+            param_tokens.append("otsu")
+        else:
+            param_tokens.append(f"cth{_fmt_float(config.classic_th)}")
+    if config.tile:
+        param_tokens.append(f"tile{int(config.tile)}")
+    if config.overlap:
+        param_tokens.append(f"ov{int(config.overlap)}")
+    if config.min_area is not None:
+        param_tokens.append(f"min{_fmt_float(float(config.min_area), decimals=0)}")
+    if config.weights:
+        param_tokens.append(f"w-{_safe_token(Path(config.weights).stem)}")
+    elif config.zero_shot_imagenet:
+        param_tokens.append("zeroshot")
+
+    if param_tokens:
+        parts.append("_".join(param_tokens))
+
+    return "_".join(filter(None, parts))
+
+
+def resolve_out_prefix(input_path: Path, prefix: Optional[str], config: PipelineDefaults) -> Path:
     """Resolve output prefix path."""
     if prefix:
         out_path = Path(prefix)
@@ -4082,8 +4149,9 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str]) -> Path:
         out_path = input_path.with_suffix("")
 
     # Route all raster/vector outputs under a dedicated subfolder: 'ciktilar'
-    # Downstream code writes to base_prefix.parent; make that parent the 'ciktilar' folder
-    return out_path.parent / "ciktilar" / out_path.name
+    # Downstream code writes to base_prefix.parent; make that parent session-scoped.
+    session_folder = build_session_folder_name(input_path, config)
+    return out_path.parent / "ciktilar" / session_folder / out_path.name
 
 
 def build_filename_with_params(
@@ -5422,7 +5490,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             parser.error(f"Weights file not found: {weights_path}")
 
     bands = parse_band_indexes(config.bands)
-    out_prefix = resolve_out_prefix(input_path, config.out_prefix)
+    out_prefix = resolve_out_prefix(input_path, config.out_prefix, config)
 
     # Heuristic: treat very large rasters differently to avoid OOM in downstream steps (fusion/vectorization).
     raster_pixels = 0
