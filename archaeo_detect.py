@@ -1997,6 +1997,8 @@ def infer_tiled(
     gaussian_lrm_sigma: Optional[float] = None,
     rgb_only: bool = False,
     tpi_radii: Tuple[int, ...] = (5, 15, 30),
+    arch: Optional[str] = None,
+    weight_type: Optional[str] = None,
 ) -> InferenceOutputs:
     """
     Run tiled inference and save outputs.
@@ -2588,7 +2590,10 @@ def infer_tiled(
         # Parametreli dosya adı oluştur
         filename = build_filename_with_params(
             base_name=base_prefix.name,
+            mode_suffix="dl",
+            arch=arch,
             encoder=encoder,
+            weight_type=weight_type,
             threshold=threshold,
             tile=tile,
             min_area=min_area,
@@ -3037,6 +3042,7 @@ def infer_yolo_tiled(
         filename = build_filename_with_params(
             base_name=base_prefix.name,
             mode_suffix="yolo11",
+            yolo_model=yolo_weights,
             threshold=conf_threshold,
             tile=tile,
             min_area=min_area,
@@ -3418,10 +3424,17 @@ def infer_classic_tiled(
                     np.uint8
                 )
 
+            # Mode listesini stringe çevir (combo veya virgülle ayrılmış)
+            modes_str = "combo" if len(modes) > 1 else modes[0] if modes else "combo"
+            # Otsu mu manuel eşik mi?
+            th_type = "otsu" if classic_th is None else None
+            
             classic_filename = build_filename_with_params(
                 base_name=base_prefix.name,
                 mode_suffix="classic",
+                classic_modes=modes_str,
                 threshold=combined_threshold,
+                threshold_type=th_type,
                 tile=tile,
                 min_area=min_area,
             )
@@ -3606,11 +3619,18 @@ def infer_classic_tiled(
     combined_mask = np.zeros_like(combined_prob, dtype=np.uint8)
     combined_mask[combined_valid & (combined_prob >= combined_threshold)] = 1
 
+    # Mode listesini stringe çevir (combo veya virgülle ayrılmış)
+    modes_str = "combo" if len(base_modes) > 1 else base_modes[0] if base_modes else "combo"
+    # Otsu mu manuel eşik mi?
+    th_type = "otsu" if classic_th is None else None
+    
     # Parametreli dosya adı oluştur (classic için)
     classic_filename = build_filename_with_params(
         base_name=base_prefix.name,
         mode_suffix="classic",
+        classic_modes=modes_str,
         threshold=combined_threshold,
+        threshold_type=th_type,
         tile=tile,
         min_area=min_area,
     )
@@ -3641,6 +3661,7 @@ def infer_classic_tiled(
                 base_name=base_prefix.name,
                 mode_suffix=f"classic_{mode}",
                 threshold=combined_threshold,
+                threshold_type=th_type,
                 tile=tile,
                 min_area=min_area,
             )
@@ -4073,33 +4094,77 @@ def build_filename_with_params(
     alpha: Optional[float] = None,
     min_area: Optional[float] = None,
     mode_suffix: Optional[str] = None,
+    arch: Optional[str] = None,
+    weight_type: Optional[str] = None,  # "imagenet", "trained", veya model adı
+    classic_modes: Optional[str] = None,  # "combo", "rvtlog", vb.
+    yolo_model: Optional[str] = None,  # "yolo11n-seg", "yolo11s-seg", vb.
+    threshold_type: Optional[str] = None,  # "otsu" veya None (manuel)
 ) -> str:
     """
     Parametreleri içeren dosya adı oluştur.
     
-    Örnek: kesif_alani_resnet34_th0.5_tile1024_minarea80
+    Format: {base}_{mode}_{arch}_{encoder}_{wt}_{modes}_th{th}_tile{tile}_alpha{alpha}_minarea{min}
+    
+    Örnekler:
+      - DL: kesif_alani_dl_Unet_resnet34_imagenet_th0.5_tile1024_minarea80
+      - Classic: kesif_alani_classic_combo_otsu_tile1024_minarea80
+      - Fused: kesif_alani_fused_Unet_resnet34_th0.5_tile1024_alpha0.7_minarea80
+      - YOLO: kesif_alani_yolo11_seg_conf0.3_tile1024_minarea50
     """
     parts = [base_name]
     
+    # 1. Mode suffix (dl, classic, fused, yolo11)
     if mode_suffix:
         parts.append(mode_suffix)
     
+    # 2. Architecture (Unet, DeepLabV3Plus vb.) - DL ve fusion için
+    if arch:
+        parts.append(arch)
+    
+    # 3. Encoder (resnet34, efficientnet-b3 vb.)
     if encoder:
         parts.append(encoder)
     
-    if threshold is not None:
-        # Threshold'u kısa formatta (0.5 -> th0.5)
+    # 4. Weight type (imagenet, trained, veya model checkpoint adı)
+    if weight_type:
+        # Eğer bir dosya yolu ise sadece dosya adını al (uzantısız)
+        if "/" in weight_type or "\\" in weight_type:
+            weight_type = Path(weight_type).stem
+        # Çok uzunsa kısalt (max 20 karakter)
+        if len(weight_type) > 20:
+            weight_type = weight_type[:20]
+        parts.append(weight_type)
+    
+    # 5. Classic modes (combo, rvtlog, hessian, morph)
+    if classic_modes:
+        parts.append(classic_modes)
+    
+    # 6. YOLO model tipi (seg, det, veya model adı)
+    if yolo_model:
+        # Model adından tipi çıkar (yolo11n-seg.pt -> seg)
+        if "-seg" in yolo_model:
+            parts.append("seg")
+        elif "-det" in yolo_model or yolo_model.endswith(".pt") and "-seg" not in yolo_model:
+            parts.append("det")
+        else:
+            parts.append(yolo_model.replace(".pt", ""))
+    
+    # 7. Threshold (th0.5 veya otsu)
+    if threshold_type == "otsu":
+        parts.append("otsu")
+    elif threshold is not None:
         parts.append(f"th{threshold:.2f}".rstrip('0').rstrip('.'))
     
+    # 8. Tile size
     if tile is not None:
         parts.append(f"tile{tile}")
     
+    # 9. Alpha değeri (fusion için)
     if alpha is not None:
-        # Alpha değeri (fusion için)
         parts.append(f"alpha{alpha:.2f}".rstrip('0').rstrip('.'))
     
+    # 10. Min area
     if min_area is not None and min_area > 0:
-        # Min area (80.0 -> minarea80)
         parts.append(f"minarea{int(min_area)}")
     
     return "_".join(parts)
@@ -5423,6 +5488,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     derivative_cache_tif: Optional[Path] = None
     derivative_cache_meta: Optional[Path] = None
 
+    # Debug: Cache ayarlarını logla
+    LOGGER.info("=" * 70)
+    LOGGER.info("CACHE AYARLARI")
+    LOGGER.info("=" * 70)
+    LOGGER.info(f"  cache_derivatives: {config.cache_derivatives}")
+    LOGGER.info(f"  cache_derivatives_mode: {config.cache_derivatives_mode}")
+    LOGGER.info(f"  cache_dir: {config.cache_dir}")
+    LOGGER.info(f"  enable_deep_learning: {config.enable_deep_learning}")
+    LOGGER.info(f"  enable_classic: {config.enable_classic}")
+
     cache_mode = str(getattr(config, "cache_derivatives_mode", "auto")).strip().lower()
     if cache_mode not in ("auto", "npz", "raster"):
         LOGGER.warning("cache_derivatives_mode geçersiz (%s); 'auto' kullanılacak.", cache_mode)
@@ -5437,8 +5512,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             enable_curvature=config.enable_curvature,
             enable_tpi=config.enable_tpi,
         )
+        LOGGER.info(f"  cache_precompute_ok: {cache_precompute_ok}")
         if not cache_precompute_ok and cache_precompute_msg:
             LOGGER.warning(cache_precompute_msg)
+    else:
+        LOGGER.info(f"  NPZ cache kontrolü atlandı (cache_derivatives={config.cache_derivatives}, cache_mode={cache_mode})")
 
     if (config.enable_deep_learning or config.enable_classic) and config.cache_derivatives:
         if cache_mode in ("auto", "npz") and cache_precompute_ok:
@@ -5592,6 +5670,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             enc_prefix = out_prefix.with_suffix("")
             enc_prefix = enc_prefix.parent / f"{enc_prefix.name}_{suffix}"
 
+            # Weight type belirleme (eğitilmiş mi, ImageNet mi)
+            wt = "trained" if per_weights else "imagenet"
+            
             outputs = infer_tiled(
                 model=model,
                 input_path=input_path,
@@ -5620,6 +5701,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 gaussian_lrm_sigma=config.gaussian_lrm_sigma,
                 rgb_only=config.rgb_only,
                 tpi_radii=config.tpi_radii,
+                arch=config.arch,
+                weight_type=wt,
             )
             LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
             LOGGER.info("[%s] ✓ İkili maske: %s", suffix, outputs.mask_path)
@@ -5695,6 +5778,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # Derin öğrenme çıkarımını çalıştır (etkinse)
     outputs = None
     if enc_mode in ("", "none") and config.enable_deep_learning and model is not None:
+        # Weight type belirleme (eğitilmiş mi, ImageNet mi)
+        single_wt = "trained" if weights_path else "imagenet"
+        
         outputs = infer_tiled(
             model=model,
             input_path=input_path,
@@ -5722,6 +5808,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             gaussian_lrm_sigma=config.gaussian_lrm_sigma,
             rgb_only=config.rgb_only,
             tpi_radii=config.tpi_radii,
+            arch=config.arch,
+            weight_type=single_wt,
         )
         # Record encoder for fusion filenames (single-encoder path)
         fusion_encoder_label = config.encoder
@@ -5829,6 +5917,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 _fname = build_filename_with_params(
                     base_name=base_prefix.name,
                     mode_suffix="fused",
+                    arch=config.arch,
                     encoder=enc_suffix,
                     threshold=fuse_threshold,
                     tile=config.tile,
@@ -5876,6 +5965,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         fused_filename = build_filename_with_params(
             base_name=base_prefix.name,
             mode_suffix="fused",
+            arch=config.arch,
             encoder=fusion_encoder_label,
             threshold=fuse_threshold,
             tile=config.tile,

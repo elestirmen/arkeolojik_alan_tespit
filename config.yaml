@@ -28,8 +28,9 @@
 # - Dosya çok bantlı bir GeoTIFF olmalıdır
 # - Önerilen bantlar: R, G, B, DSM (Yüzey Modeli), DTM (Arazi Modeli)
 # Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
-input: "gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
+#input: "gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
 #input: "karlik_vadi.tif"
+input: "kesif_alani.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
 # - null ise: Girdi dosya adından otomatik üretilir
@@ -201,7 +202,7 @@ zero_shot_imagenet: true
 #   - 0.7  : Çok seçici (sadece çok güvenli tespitler)
 #   - 0.4  : Daha liberal (daha fazla aday bölge)
 # ÖNERİ: 0.5-0.6 arasında başlayın, sonuçlara göre ayarlayın
-th: 0.7
+th: 0.4
 
 
 # ============================================================================
