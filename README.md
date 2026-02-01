@@ -1252,16 +1252,225 @@ python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention
 
 Create a binary mask where archaeological features are marked as **1** (white) and everything else as **0** (black).
 
-#### Using QGIS (Recommended for beginners)
+#### Using QGIS (Free, open-source)
 
-1. **Load your orthophoto** → Layer → Add Raster Layer
-2. **Create new layer** → Layer → Create Layer → New Shapefile Layer (Polygon)
-3. **Digitize features** → Toggle Editing → Add Polygon → Draw around archaeological structures
-4. **Rasterize** → Raster → Conversion → Rasterize
-   - Set pixel size to match your input (e.g., 1.0)
-   - Set output extent to match input raster
-   - Burn value: 1
-5. **Export** as GeoTIFF with single band
+**What you'll do:** Draw polygons around archaeological features, then convert them to a raster image where archaeological areas = 1 and everything else = 0.
+
+**Step 1: Open your orthophoto**
+```
+Menu: Layer → Add Layer → Add Raster Layer...
+Navigate to your GeoTIFF file → Click "Add"
+```
+Your image should now appear on the map canvas. Use mouse wheel to zoom, hold middle button to pan.
+
+**Step 2: Create a new polygon layer for digitizing**
+```
+Menu: Layer → Create Layer → New Shapefile Layer...
+```
+In the dialog:
+- **File name:** Click "..." and choose where to save (e.g., `archaeological_mask.shp`)
+- **Geometry type:** Select "Polygon"
+- **CRS:** Click the globe icon → search for your raster's coordinate system (check raster properties if unsure)
+- Click "OK"
+
+A new empty layer appears in the Layers panel.
+
+**Step 3: Start digitizing (drawing polygons)**
+```
+1. Select your new layer in the Layers panel (click on it)
+2. Menu: Layer → Toggle Editing (or click the pencil icon)
+3. Look for "Add Polygon Feature" button in the toolbar (polygon with + sign)
+4. Click it, then start clicking on the map to draw vertices
+5. Right-click to finish each polygon
+```
+
+**Tips for digitizing:**
+- Zoom in close for accuracy (scroll wheel)
+- Draw around tumuli, walls, ditches - anything archaeological
+- If you make a mistake: Ctrl+Z to undo
+- Each click adds a vertex; right-click closes the polygon
+- Draw as many polygons as needed
+
+**Step 4: Save your edits**
+```
+Menu: Layer → Toggle Editing → Click "Save" when prompted
+Or: Click the floppy disk icon in the toolbar
+```
+
+**Step 5: Convert polygons to raster (the mask)**
+```
+Menu: Raster → Conversion → Rasterize (Vector to Raster)...
+```
+In the dialog:
+- **Input layer:** Your polygon layer (`archaeological_mask`)
+- **Field to use for a burn-in value:** Leave empty (we'll use fixed value)
+- **A fixed value to burn:** Enter `1`
+- **Output raster size units:** Georeferenced units
+- **Width/Horizontal resolution:** Same as your input raster (e.g., `1.0` for 1m resolution)
+- **Height/Vertical resolution:** Same value (e.g., `1.0`)
+- **Output extent:** Click "..." → "Calculate from Layer" → Select your input raster
+- **Rasterized:** Click "..." → Save to File → name it `ground_truth.tif`
+- Click "Run"
+
+**Step 6: Fill NoData with zeros**
+
+The rasterize tool creates NoData where there are no polygons. We need those to be 0.
+```
+Menu: Raster → Raster Calculator...
+```
+Enter this expression (replace with your actual layer name):
+```
+("ground_truth@1" >= 1) * 1
+```
+Or use:
+```
+Menu: Processing → Toolbox → Search "Fill nodata"
+Use "Fill NoData cells" tool with fill value = 0
+```
+
+**Verify your mask:**
+- Values should be only 0 and 1
+- Right-click layer → Properties → Symbology → check min/max values
+- Dimensions should match your input raster exactly
+
+---
+
+#### Using ArcGIS Pro
+
+**What you'll do:** Create a polygon feature class, digitize archaeological features, then convert to a raster mask.
+
+**Step 1: Create a new project and add your data**
+```
+1. Open ArcGIS Pro → New Project → Map
+2. Give it a name and location → OK
+3. Map tab → Add Data → Browse to your GeoTIFF → Add
+```
+Your orthophoto should appear on the map. Use scroll wheel to zoom, hold wheel to pan.
+
+**Step 2: Check your raster's properties (important for later)**
+```
+1. In Contents pane, right-click your raster → Properties
+2. Go to "Source" tab → Note the:
+   - Cell Size (e.g., 1.0 x 1.0)
+   - Extent (Top, Left, Right, Bottom coordinates)
+   - Spatial Reference (e.g., EPSG:32635)
+```
+Write these down - you'll need them to match your mask.
+
+**Step 3: Create a new feature class for digitizing**
+```
+1. In Catalog pane, expand your project's geodatabase (.gdb)
+2. Right-click the geodatabase → New → Feature Class
+```
+In the wizard:
+- **Name:** `archaeological_features`
+- **Alias:** Archaeological Features (optional)
+- **Feature Class Type:** Polygon
+- Click "Next"
+- **Fields:** Skip (we'll add later) → Click "Next"
+- **Spatial Reference:** Click the globe → Import → Select your raster
+- Click "Finish"
+
+The new empty layer appears in Contents.
+
+**Step 4: Start digitizing**
+```
+1. In Contents, click on your new layer to select it
+2. Edit tab → Create (opens Create Features pane)
+3. Click on "archaeological_features" in the Create Features pane
+4. Select "Polygon" tool
+5. Click on the map to add vertices, double-click to finish
+```
+
+**Digitizing tips:**
+- Press `Z` to zoom, `C` to pan while drawing
+- Press `Ctrl+Z` to undo last vertex
+- Double-click (or press `F2`) to finish each polygon
+- Draw around all visible archaeological features
+- Be as precise as possible - these become your training labels!
+
+**Step 5: Save your edits**
+```
+Edit tab → Save → Save Edits
+```
+
+**Step 6: Add a field for the raster value**
+```
+1. In Contents, right-click your layer → Attribute Table
+2. Click "Add Field" button (top of table)
+3. Field Name: burn_value
+4. Data Type: Short (Integer)
+5. Click "Save" (in Fields tab)
+```
+
+**Step 7: Set all polygons to value 1**
+```
+1. In the attribute table, right-click the "burn_value" column header
+2. Select "Calculate Field..."
+3. In Expression box, simply type: 1
+4. Click "OK"
+```
+All rows should now show `1` in the burn_value column.
+
+**Step 8: Convert to raster**
+```
+Analysis tab → Tools → Search "Polygon to Raster"
+```
+In the tool dialog:
+- **Input Features:** archaeological_features
+- **Value field:** burn_value
+- **Output Raster Dataset:** Browse → Save as `ground_truth.tif`
+- **Cell assignment type:** CELL_CENTER
+- **Priority field:** NONE
+- **Cellsize:** Same as your input raster (e.g., `1`)
+
+**Important - Set Environment:**
+```
+Click "Environments" tab at bottom of tool:
+- Snap Raster: Select your input raster (ensures alignment!)
+- Cell Size: Same as your input raster
+- Extent: Same as your input raster
+```
+Click "Run"
+
+**Step 9: Convert NoData to 0**
+
+By default, areas outside polygons become NoData. We need them to be 0.
+```
+Analysis tab → Tools → Search "Reclassify"
+```
+Or use Raster Calculator:
+```
+Analysis tab → Tools → Search "Raster Calculator"
+Expression: Con(IsNull("ground_truth.tif"), 0, "ground_truth.tif")
+Output: ground_truth_final.tif
+```
+
+Alternative with Reclassify:
+```
+- Input raster: ground_truth.tif
+- Reclass field: Value
+- Reclassification:
+  - Add row: Old = NoData, New = 0
+  - Existing: Old = 1, New = 1
+- Output: ground_truth_final.tif
+```
+
+**Step 10: Verify your mask**
+```
+1. Add the final mask to your map
+2. Right-click → Properties → Source → Check:
+   - Cell size matches input ✓
+   - Extent matches input ✓
+   - Values are only 0 and 1 ✓
+```
+
+**Common issues:**
+- **Mask extent doesn't match:** Re-run Polygon to Raster with correct Environment settings
+- **Mask has wrong cell size:** Set cell size explicitly in tool and Environment
+- **Mask is all NoData:** Check that burn_value field has value 1
+
+---
 
 #### Using Python
 

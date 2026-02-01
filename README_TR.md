@@ -1253,16 +1253,225 @@ python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention
 
 Arkeolojik özelliklerin **1** (beyaz), diğer her şeyin **0** (siyah) olarak işaretlendiği ikili bir maske oluşturun.
 
-#### QGIS Kullanarak (Yeni başlayanlar için önerilir)
+#### QGIS Kullanarak (Ücretsiz, açık kaynak)
 
-1. **Ortofotoyu yükleyin** → Katman → Raster Katman Ekle
-2. **Yeni katman oluşturun** → Katman → Katman Oluştur → Yeni Shapefile Katmanı (Çokgen)
-3. **Özellikleri sayısallaştırın** → Düzenlemeyi Aç/Kapat → Çokgen Ekle → Arkeolojik yapıların etrafını çizin
-4. **Rasterleştirin** → Raster → Dönüştürme → Rasterleştir
-   - Piksel boyutunu girişle eşleştirin (örn. 1.0)
-   - Çıktı kapsamını giriş rasteriyle eşleştirin
-   - Yakma değeri: 1
-5. **Dışa aktarın** tek bantlı GeoTIFF olarak
+**Ne yapacaksınız:** Arkeolojik özelliklerin etrafına çokgenler çizecek, sonra bunları arkeolojik alanlar = 1, diğer her yer = 0 olan bir raster görüntüye dönüştüreceksiniz.
+
+**Adım 1: Ortofotoyu açın**
+```
+Menü: Katman → Katman Ekle → Raster Katman Ekle...
+GeoTIFF dosyanıza gidin → "Ekle"ye tıklayın
+```
+Görüntünüz harita tuvalinde görünmelidir. Yakınlaştırmak için fare tekerleğini, kaydırmak için orta tuşu basılı tutun.
+
+**Adım 2: Sayısallaştırma için yeni çokgen katmanı oluşturun**
+```
+Menü: Katman → Katman Oluştur → Yeni Shapefile Katmanı...
+```
+Açılan pencerede:
+- **Dosya adı:** "..." butonuna tıklayıp kayıt yerini seçin (örn. `arkeolojik_maske.shp`)
+- **Geometri tipi:** "Çokgen" seçin
+- **KRS (Koordinat Referans Sistemi):** Küre ikonuna tıklayın → rasterinizin koordinat sistemini arayın (emin değilseniz raster özelliklerinden bakın)
+- "Tamam"a tıklayın
+
+Katmanlar panelinde yeni boş bir katman görünür.
+
+**Adım 3: Sayısallaştırmaya başlayın (çokgen çizimi)**
+```
+1. Katmanlar panelinde yeni katmanınızı seçin (üzerine tıklayın)
+2. Menü: Katman → Sketching'e Geç (veya kalem ikonuna tıklayın)
+3. Araç çubuğunda "Çokgen Objesi Ekle" butonunu bulun (+ işaretli çokgen)
+4. Butona tıklayın, sonra haritada köşe noktaları eklemek için tıklamaya başlayın
+5. Her çokgeni bitirmek için sağ tıklayın
+```
+
+**Sayısallaştırma ipuçları:**
+- Hassasiyet için yakınlaştırın (fare tekerleği)
+- Tümülüslerin, duvarların, hendeklerin etrafını çizin - arkeolojik olan her şey
+- Hata yaparsanız: Ctrl+Z ile geri alın
+- Her tıklama bir köşe noktası ekler; sağ tıklama çokgeni kapatır
+- İhtiyaç kadar çokgen çizin
+
+**Adım 4: Düzenlemelerinizi kaydedin**
+```
+Menü: Katman → Sketching'e Geç → Sorulduğunda "Kaydet"e tıklayın
+Veya: Araç çubuğundaki disket ikonuna tıklayın
+```
+
+**Adım 5: Çokgenleri rastera dönüştürün (maske)**
+```
+Menü: Raster → Dönüştürme → Rasterleştir (Vektörü Rastera)...
+```
+Açılan pencerede:
+- **Giriş katmanı:** Çokgen katmanınız (`arkeolojik_maske`)
+- **Yakma değeri için kullanılacak alan:** Boş bırakın (sabit değer kullanacağız)
+- **Yakmak için sabit değer:** `1` girin
+- **Çıktı raster boyut birimi:** Coğrafi birimler
+- **Genişlik/Yatay çözünürlük:** Giriş rasterinizle aynı (örn. 1m çözünürlük için `1.0`)
+- **Yükseklik/Dikey çözünürlük:** Aynı değer (örn. `1.0`)
+- **Çıktı kapsamı:** "..." → "Katmandan Hesapla" → Giriş rasterinizi seçin
+- **Rasterleştirilmiş:** "..." → Dosyaya Kaydet → `ground_truth.tif` olarak adlandırın
+- "Çalıştır"a tıklayın
+
+**Adım 6: NoData alanlarını sıfırla doldurun**
+
+Rasterleştirme aracı çokgen olmayan yerlerde NoData oluşturur. Bunların 0 olması gerekiyor.
+```
+Menü: Raster → Raster Hesap Makinesi...
+```
+Bu ifadeyi girin (gerçek katman adınızla değiştirin):
+```
+("ground_truth@1" >= 1) * 1
+```
+Veya şunu kullanın:
+```
+Menü: İşleme → Araç Kutusu → "Fill nodata" arayın
+"Fill NoData cells" aracını dolgu değeri = 0 ile kullanın
+```
+
+**Maskenizi doğrulayın:**
+- Değerler sadece 0 ve 1 olmalı
+- Katmana sağ tıklayın → Özellikler → Sembolloji → min/max değerlerini kontrol edin
+- Boyutlar giriş rasterinizle tam olarak eşleşmeli
+
+---
+
+#### ArcGIS Pro Kullanarak
+
+**Ne yapacaksınız:** Çokgen feature class oluşturacak, arkeolojik özellikleri sayısallaştıracak, sonra raster maskeye dönüştüreceksiniz.
+
+**Adım 1: Yeni proje oluşturun ve verilerinizi ekleyin**
+```
+1. ArcGIS Pro'yu açın → New Project → Map
+2. İsim ve konum verin → OK
+3. Map sekmesi → Add Data → GeoTIFF'inize göz atın → Add
+```
+Ortofotunuz haritada görünmelidir. Yakınlaştırmak için fare tekerleği, kaydırmak için tekerleği basılı tutun.
+
+**Adım 2: Rasterinizin özelliklerini kontrol edin (sonrası için önemli)**
+```
+1. Contents panelinde rasterinize sağ tıklayın → Properties
+2. "Source" sekmesine gidin → Şunları not edin:
+   - Cell Size (Hücre Boyutu, örn. 1.0 x 1.0)
+   - Extent (Kapsam - Top, Left, Right, Bottom koordinatları)
+   - Spatial Reference (Mekansal Referans, örn. EPSG:32635)
+```
+Bunları yazın - maskenizi eşleştirmek için gerekecek.
+
+**Adım 3: Sayısallaştırma için yeni feature class oluşturun**
+```
+1. Catalog panelinde projenizin geodatabase'ini (.gdb) genişletin
+2. Geodatabase'e sağ tıklayın → New → Feature Class
+```
+Sihirbazda:
+- **Name (Ad):** `arkeolojik_ozellikler`
+- **Alias (Takma Ad):** Arkeolojik Özellikler (isteğe bağlı)
+- **Feature Class Type:** Polygon
+- "Next"e tıklayın
+- **Fields (Alanlar):** Atlayın (sonra ekleyeceğiz) → "Next"e tıklayın
+- **Spatial Reference:** Küreye tıklayın → Import → Rasterinizi seçin
+- "Finish"e tıklayın
+
+Yeni boş katman Contents'te görünür.
+
+**Adım 4: Sayısallaştırmaya başlayın**
+```
+1. Contents'te seçmek için yeni katmanınıza tıklayın
+2. Edit sekmesi → Create (Create Features panelini açar)
+3. Create Features panelinde "arkeolojik_ozellikler"e tıklayın
+4. "Polygon" aracını seçin
+5. Köşe noktaları eklemek için haritada tıklayın, bitirmek için çift tıklayın
+```
+
+**Sayısallaştırma ipuçları:**
+- Çizerken yakınlaştırmak için `Z`, kaydırmak için `C` tuşuna basın
+- Son köşe noktasını geri almak için `Ctrl+Z`
+- Her çokgeni bitirmek için çift tıklayın (veya `F2`)
+- Görünen tüm arkeolojik özelliklerin etrafını çizin
+- Mümkün olduğunca hassas olun - bunlar eğitim etiketleriniz olacak!
+
+**Adım 5: Düzenlemelerinizi kaydedin**
+```
+Edit sekmesi → Save → Save Edits
+```
+
+**Adım 6: Raster değeri için alan ekleyin**
+```
+1. Contents'te katmanınıza sağ tıklayın → Attribute Table
+2. "Add Field" butonuna tıklayın (tablonun üstünde)
+3. Field Name: yakma_degeri
+4. Data Type: Short (Integer)
+5. Fields sekmesinde "Save"e tıklayın
+```
+
+**Adım 7: Tüm çokgenlere değer 1 atayın**
+```
+1. Öznitelik tablosunda "yakma_degeri" sütun başlığına sağ tıklayın
+2. "Calculate Field..." seçin
+3. Expression kutusuna sadece şunu yazın: 1
+4. "OK"e tıklayın
+```
+Tüm satırlarda yakma_degeri sütununda `1` görünmelidir.
+
+**Adım 8: Rastera dönüştürün**
+```
+Analysis sekmesi → Tools → "Polygon to Raster" arayın
+```
+Araç penceresinde:
+- **Input Features:** arkeolojik_ozellikler
+- **Value field:** yakma_degeri
+- **Output Raster Dataset:** Göz at → `ground_truth.tif` olarak kaydedin
+- **Cell assignment type:** CELL_CENTER
+- **Priority field:** NONE
+- **Cellsize:** Giriş rasterinizle aynı (örn. `1`)
+
+**Önemli - Environment Ayarları:**
+```
+Aracın altındaki "Environments" sekmesine tıklayın:
+- Snap Raster: Giriş rasterinizi seçin (hizalamayı garantiler!)
+- Cell Size: Giriş rasterinizle aynı
+- Extent: Giriş rasterinizle aynı
+```
+"Run"a tıklayın
+
+**Adım 9: NoData'yı 0'a dönüştürün**
+
+Varsayılan olarak, çokgenlerin dışındaki alanlar NoData olur. Bunların 0 olması gerekiyor.
+```
+Analysis sekmesi → Tools → "Reclassify" arayın
+```
+Veya Raster Calculator kullanın:
+```
+Analysis sekmesi → Tools → "Raster Calculator" arayın
+Expression: Con(IsNull("ground_truth.tif"), 0, "ground_truth.tif")
+Output: ground_truth_final.tif
+```
+
+Reclassify ile alternatif:
+```
+- Input raster: ground_truth.tif
+- Reclass field: Value
+- Reclassification (Yeniden sınıflandırma):
+  - Satır ekle: Old = NoData, New = 0
+  - Mevcut: Old = 1, New = 1
+- Output: ground_truth_final.tif
+```
+
+**Adım 10: Maskenizi doğrulayın**
+```
+1. Final maskeyi haritanıza ekleyin
+2. Sağ tıklayın → Properties → Source → Kontrol edin:
+   - Hücre boyutu girişle eşleşiyor ✓
+   - Kapsam girişle eşleşiyor ✓
+   - Değerler sadece 0 ve 1 ✓
+```
+
+**Yaygın sorunlar:**
+- **Maske kapsamı eşleşmiyor:** Polygon to Raster'ı doğru Environment ayarlarıyla yeniden çalıştırın
+- **Maske yanlış hücre boyutunda:** Araçta ve Environment'ta hücre boyutunu açıkça ayarlayın
+- **Maske tamamen NoData:** yakma_degeri alanının 1 değerine sahip olduğunu kontrol edin
+
+---
 
 #### Python Kullanarak
 
