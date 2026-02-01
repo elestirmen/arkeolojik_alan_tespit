@@ -724,7 +724,26 @@ def load_config_from_yaml(yaml_path: Path) -> Dict[str, Any]:
     return config_dict
 
 
-def build_config_from_args(args: argparse.Namespace) -> PipelineDefaults:
+def collect_cli_overrides(parser: argparse.ArgumentParser, argv: Sequence[str]) -> set[str]:
+    """CLI üzerinden açıkça verilen argparse dest isimlerini döndür."""
+    overrides: set[str] = set()
+    option_actions = getattr(parser, "_option_string_actions", {})
+    for raw in argv:
+        if not raw or not raw.startswith("-"):
+            continue
+        opt = raw.split("=", 1)[0]
+        action = option_actions.get(opt)
+        if action is None:
+            continue
+        dest = getattr(action, "dest", None)
+        if isinstance(dest, str) and dest:
+            overrides.add(dest)
+    return overrides
+
+
+def build_config_from_args(
+    args: argparse.Namespace, *, cli_overrides: Optional[Iterable[str]] = None
+) -> PipelineDefaults:
     """Komut satırı argümanlarından ve opsiyonel YAML config'den PipelineDefaults oluştur."""
     # Önce YAML config'i yükle (varsa)
     base_config = {}
@@ -742,23 +761,25 @@ def build_config_from_args(args: argparse.Namespace) -> PipelineDefaults:
         if field_name in base_config and isinstance(base_config[field_name], list):
             base_config[field_name] = tuple(base_config[field_name])
     
-    # Komut satırı argümanlarıyla override et
-    # Sadece komut satırında açıkça belirtilen argümanları kullan
-    values = {}
-    for f in fields(PipelineDefaults):
-        # Önce YAML'dan al (varsa)
-        if f.name in base_config:
-            values[f.name] = base_config[f.name]
-        # Sonra komut satırından al (varsa ve default değilse)
-        if hasattr(args, f.name):
+    values = {f.name: default_for(f.name) for f in fields(PipelineDefaults)}
+    values.update(base_config)
+
+    # Komut satırı argümanlarıyla override et (sadece açıkça belirtilenler).
+    if cli_overrides is None:
+        # Geriye dönük uyumluluk: Eski davranış (yalnızca default'tan farklıysa override).
+        # NOT: Bu yaklaşım, "default değerine geri dön" niyetini algılayamaz.
+        for f in fields(PipelineDefaults):
+            if not hasattr(args, f.name):
+                continue
             arg_value = getattr(args, f.name)
-            # Eğer argüman default değilse, YAML'ı override et
             default_value = default_for(f.name)
             if arg_value != default_value:
                 values[f.name] = arg_value
-            # Eğer YAML'da da yoksa, default'u kullan
-            elif f.name not in values:
-                values[f.name] = arg_value
+    else:
+        for name in set(cli_overrides):
+            if name not in values or not hasattr(args, name):
+                continue
+            values[name] = getattr(args, name)
     
     return PipelineDefaults(**values)
 
@@ -5442,8 +5463,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("yolo_device"),
     )
 
+    argv_list = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(argv)
-    config = build_config_from_args(args)
+    config = build_config_from_args(args, cli_overrides=collect_cli_overrides(parser, argv_list))
 
     ENCODER_ALIASES = {
         "efficientnet-b3": "timm-efficientnet-b3",

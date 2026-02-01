@@ -5,6 +5,7 @@ Bu dosya archaeo_detect.py modülünün temel fonksiyonlarını test eder.
 Testleri çalıştırmak için: pytest tests/ -v
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from archaeo_detect import (
     PipelineDefaults,
+    build_config_from_args,
     percentile_clip,
     compute_ndsm,
     _otsu_threshold_0to1,
@@ -465,6 +467,42 @@ class TestFusionProbability:
         # Her iki değer de NaN olan yerlerde sonuç NaN olmalı
         # En az birinin geçerli olduğu yerlerde hesaplanmalı
         assert np.isfinite(fused[0, 0])
+
+
+# ============================================================================
+# Config/YAML Override Testleri
+# ============================================================================
+
+class TestConfigOverride:
+    def test_cli_overrides_yaml_even_when_default_values(self, tmp_path: Path):
+        """CLI override, YAML'daki ayarları default değerle de olsa ezebilmeli."""
+        yaml_path = tmp_path / "config.yaml"
+        yaml_path.write_text(
+            "\n".join(
+                [
+                    "enable_yolo: true",
+                    "cache_derivatives: true",
+                    "yolo_conf: 0.7",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        defaults = PipelineDefaults()
+        args = argparse.Namespace(
+            config=str(yaml_path),
+            enable_yolo=False,
+            cache_derivatives=False,
+            yolo_conf=defaults.yolo_conf,  # default değere geri dön
+        )
+        config = build_config_from_args(
+            args, cli_overrides={"enable_yolo", "cache_derivatives", "yolo_conf"}
+        )
+
+        assert config.enable_yolo is False
+        assert config.cache_derivatives is False
+        assert config.yolo_conf == pytest.approx(defaults.yolo_conf)
 
 
 # ============================================================================

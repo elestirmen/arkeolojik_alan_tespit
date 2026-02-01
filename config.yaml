@@ -28,9 +28,9 @@
 # - Dosya çok bantlı bir GeoTIFF olmalıdır
 # - Önerilen bantlar: R, G, B, DSM (Yüzey Modeli), DTM (Arazi Modeli)
 # Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
-#input: "gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
+input: "gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
 #input: "karlik_vadi.tif"
-input: "kesif_alani.tif"
+#input: "kesif_alani.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
 # - null ise: Girdi dosya adından otomatik üretilir
