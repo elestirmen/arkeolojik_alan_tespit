@@ -1191,56 +1191,108 @@ C: Evet, giriş CRS'i korunur ve çıktıya aktarılır.
 
 ## 🎓 Model Eğitimi Kılavuzu
 
-Bu bölüm, kendi etiketli verilerinizle özel modeller eğitmek için kapsamlı bir kılavuz sağlar.
+Bu kılavuz, kendi etiketli verilerinizle özel model eğitme sürecini adım adım açıklar. Ham veriden eğitilmiş modele kadar tüm süreci kapsar.
 
-### 📋 Ön Koşullar
+---
 
-Eğitimden önce şunlara ihtiyacınız var:
-- ✅ RGB + DSM + DTM bantları içeren GeoTIFF dosyaları
-- ✅ Ground truth maske dosyaları (GeoTIFF formatı)
-  - Arkeolojik alanlar = 1 (beyaz)
-  - Arka plan = 0 (siyah)
-- ✅ Tüm bağımlılıkların yüklü olduğu Python ortamı
-- ✅ GPU önerilir (ama CPU eğitimi mümkündür)
+### ⚡ Hızlı Başlangıç (Özet)
+
+Deneyimli kullanıcılar için minimal iş akışı:
+
+```bash
+# 1. Verilerinizi hazırlayın (GeoTIFF + ikili maske)
+# 2. Eğitim karolarını oluşturun
+python egitim_verisi_olusturma.py --input veri.tif --mask maske.tif --output training_data
+
+# 3. Modeli eğitin
+python training.py --data training_data --epochs 50
+
+# 4. Eğitilmiş modeli kullanın
+python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth --input yeni_alan.tif
+```
+
+---
+
+### 📋 Genel Bakış
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         MODEL EĞİTİM İŞ AKIŞI                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐              │
+│   │  ADIM 1      │      │  ADIM 2      │      │  ADIM 3      │              │
+│   │  Maske       │ ───► │  Karo        │ ───► │  Model       │              │
+│   │  Hazırlama   │      │  Oluşturma   │      │  Eğitimi     │              │
+│   └──────────────┘      └──────────────┘      └──────────────┘              │
+│         │                     │                     │                        │
+│         ▼                     ▼                     ▼                        │
+│   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐              │
+│   │ GeoTIFF +    │      │ 12 kanallı   │      │ Eğitilmiş    │              │
+│   │ İkili Maske  │      │ NPZ karolar  │      │ .pth model   │              │
+│   └──────────────┘      └──────────────┘      └──────────────┘              │
+│                                                      │                       │
+│                                                      ▼                       │
+│                                               ┌──────────────┐              │
+│                                               │  ADIM 4      │              │
+│                                               │  Modeli      │              │
+│                                               │  Kullan      │              │
+│                                               └──────────────┘              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**İhtiyacınız olanlar:**
+- RGB + DSM + DTM bantları içeren GeoTIFF dosyası
+- İkili maske (GeoTIFF): arkeolojik alanlar = 1, arka plan = 0
+- Bağımlılıkları yüklü Python ortamı
+- GPU önerilir (CPU da çalışır ama yavaştır)
+
+---
 
 ### 🛠️ Adım 1: Ground Truth Maskeleri Hazırlama
 
-İkili maske dosyaları oluşturun:
-- **Değer 1 (beyaz)**: Arkeolojik alanlar/yapılar
-- **Değer 0 (siyah)**: Arka plan/arkeolojik olmayan alanlar
+Arkeolojik özelliklerin **1** (beyaz), diğer her şeyin **0** (siyah) olarak işaretlendiği ikili bir maske oluşturun.
 
-**QGIS kullanarak örnek:**
-1. RGB ortofotoyu yükleyin
-2. Yeni çokgen katmanı oluşturun
-3. Arkeolojik özellikleri sayısallaştırın
-4. Tek bantlı GeoTIFF olarak dışa aktarın (0/1 değerleri)
+#### QGIS Kullanarak (Yeni başlayanlar için önerilir)
 
-**Python kullanarak örnek:**
+1. **Ortofotoyu yükleyin** → Katman → Raster Katman Ekle
+2. **Yeni katman oluşturun** → Katman → Katman Oluştur → Yeni Shapefile Katmanı (Çokgen)
+3. **Özellikleri sayısallaştırın** → Düzenlemeyi Aç/Kapat → Çokgen Ekle → Arkeolojik yapıların etrafını çizin
+4. **Rasterleştirin** → Raster → Dönüştürme → Rasterleştir
+   - Piksel boyutunu girişle eşleştirin (örn. 1.0)
+   - Çıktı kapsamını giriş rasteriyle eşleştirin
+   - Yakma değeri: 1
+5. **Dışa aktarın** tek bantlı GeoTIFF olarak
+
+#### Python Kullanarak
+
 ```python
 import rasterio
 import numpy as np
-from rasterio.transform import from_bounds
 
-# Basit ikili maske oluştur
-# (Kendi sayısallaştırma iş akışınızla değiştirin)
+# Maske dizisi oluştur (girişle aynı boyutlarda)
 mask = np.zeros((height, width), dtype=np.uint8)
-# Arkeolojik alanları 1 olarak ayarla
-mask[arkeolojik_alanlar] = 1
 
-# GeoTIFF olarak kaydet
-with rasterio.open('ground_truth.tif', 'w',
-                   driver='GTiff',
-                   height=height, width=width,
-                   count=1, dtype=mask.dtype,
-                   crs=crs, transform=transform) as dst:
+# Arkeolojik alanları işaretle (örnek: koordinatlardan veya çokgenlerden)
+mask[100:200, 150:250] = 1  # Gerçek alanlarla değiştirin
+
+# GeoTIFF olarak kaydet (giriş CRS ve transform ile eşleşmeli!)
+with rasterio.open('maske.tif', 'w', driver='GTiff',
+                   height=height, width=width, count=1, 
+                   dtype='uint8', crs=giris_crs, 
+                   transform=giris_transform) as dst:
     dst.write(mask, 1)
 ```
 
-### 📦 Adım 2: Eğitim Verisi Oluşturma
+> **Önemli:** Maske boyutları, CRS ve çözünürlük giriş GeoTIFF'inizle tam olarak eşleşmelidir!
 
-GeoTIFF dosyalarınızdan ve ground truth maskelerinden 12 kanallı eğitim karoları oluşturmak için `egitim_verisi_olusturma.py` kullanın.
+---
 
-#### Temel Kullanım
+### 📦 Adım 2: Eğitim Karoları Oluşturma
+
+`egitim_verisi_olusturma.py` betiği GeoTIFF + maskenizi 12 kanallı eğitim karolarına dönüştürür.
+
+#### Temel Komut
 
 ```bash
 python egitim_verisi_olusturma.py \
@@ -1251,224 +1303,100 @@ python egitim_verisi_olusturma.py \
 
 #### İnteraktif Mod
 
-Betiği argüman olmadan çalıştırırsanız, interaktif olarak size yönergeler verir:
+Yönlendirmeli giriş için argümansız çalıştırın:
 
 ```bash
 python egitim_verisi_olusturma.py
+# Sırayla sorar: Giriş dosyası → Maske dosyası → Çıktı dizini → Karo boyutu
 ```
 
-**İnteraktif yönergeler:**
-- Giriş GeoTIFF dosyası (varsayılan: `kesif_alani.tif`)
-- Ground truth maske dosyası (gerekli)
-- Çıktı dizini (varsayılan: `training_data`)
-- Karo boyutu (varsayılan: `256`)
-
-Bu, hızlı test veya interaktif giriş tercih ettiğinizde kullanışlıdır.
-
-#### Tüm Seçeneklerle Tam Örnek
-
-```bash
-python egitim_verisi_olusturma.py \
-  --input kesif_alani.tif \
-  --mask ground_truth.tif \
-  --output training_data \
-  --tile-size 256 \
-  --overlap 64 \
-  --train-ratio 0.8 \
-  --min-positive 0.01 \
-  --max-nodata 0.3 \
-  --balance-ratio 0.4 \
-  --format npz \
-  --bands 1,2,3,4,5 \
-  --tpi-radii 5,15,30
-```
-
-#### Tüm Parametreler Açıklaması
-
-| Parametre | Varsayılan | Açıklama | Ne Zaman Kullanılır |
-|-----------|------------|----------|---------------------|
-| `--input`, `-i` | **Gerekli** | Giriş GeoTIFF dosya yolu (RGB + DSM + DTM bantları) | Her zaman gerekli |
-| `--mask`, `-m` | **Gerekli** | Ground truth maske dosya yolu (ikili GeoTIFF: 0=arka plan, 1=arkeolojik) | Her zaman gerekli |
-| `--output`, `-o` | `training_data` | Eğitim karoları için çıktı dizini | Farklı ad istiyorsanız değiştirin |
-| `--tile-size`, `-t` | `256` | Piksel cinsinden karo boyutu (256, 512, vb.) | Çoğu durum için 256, büyük yapılar için 512 |
-| `--overlap` | `64` | Karolar arasındaki örtüşme piksel cinsinden | Daha iyi kapsam için artırın (örn. 512 karolar için 128) |
-| `--train-ratio` | `0.8` | Eğitim/doğrulama bölme oranı (0.0-1.0) | 0.8 = %80 eğitim, %20 doğrulama (standart) |
-| `--min-positive` | `0.0` | Karo dahil etmek için minimum pozitif piksel oranı (0.0-1.0) | 0.01 = <%1 arkeolojik piksel içeren karoları filtrele |
-| `--max-nodata` | `0.3` | Karo dahil etmek için maksimum nodata oranı (0.0-1.0) | 0.3 = >%30 nodata içeren karoları hariç tut |
-| `--balance-ratio` | `None` | Pozitif/negatif denge oranı (0.0-1.0) | 0.4 = %40 pozitif, %60 negatif (dengesiz veri için önerilir) |
-| `--format` | `npz` | Dosya formatı: `npy` (daha hızlı) veya `npz` (sıkıştırılmış, daha küçük) | `npz` disk alanı tasarrufu sağlar (~%50-70 daha küçük) |
-| `--bands`, `-b` | `1,2,3,4,5` | Bant sırası: R,G,B,DSM,DTM | Bantlarınız farklı sıradaysa değiştirin |
-| `--tpi-radii` | `5,15,30` | Piksel cinsinden TPI yarıçapları (virgülle ayrılmış) | Farklı yapı boyutları için ayarlayın |
-| `--no-normalize` | `False` | Normalizasyonu devre dışı bırak (önerilmez) | Sadece ham değerler istiyorsanız |
-
-#### Detaylı İş Akışı
-
-**Adım Adım Süreç:**
-
-1. **Giriş Doğrulama**
-   - Giriş GeoTIFF ve maske dosyalarının varlığını kontrol eder
-   - Aynı boyutlara ve CRS'e sahip olduklarını doğrular
-   - Bant sayısını ve veri tiplerini doğrular
-
-2. **Bant Okuma**
-   - RGB bantlarını okur (tipik olarak 1-3 bantlar)
-   - DSM'yi okur (Sayısal Yüzey Modeli, bant 4)
-   - DTM'yi okur (Sayısal Arazi Modeli, bant 5)
-   - Nodata değerlerini ve eksik bantları işler
-
-3. **RVT Türev Hesaplama**
-   - **SVF (Gökyüzü Görünürlük Faktörü)**: Ufuk görünürlüğünü hesaplar (tümülüs tespiti)
-   - **Pozitif Açıklık**: Yukarı doğru görünürlüğü ölçer (höyükler)
-   - **Negatif Açıklık**: Aşağı doğru görünürlüğü ölçer (hendekler)
-   - **LRM (Yerel Kabartma Modeli)**: Yerel topografik anomalileri vurgular
-   - **Eğim**: Arazi dikliğini hesaplar (teraslar, duvarlar)
-
-4. **Gelişmiş Özellik Hesaplama**
-   - **Plan Eğriliği**: Yatay eğrilik (sırt/hendek ayrımı)
-   - **Profil Eğriliği**: Dikey eğrilik (teras tespiti)
-   - **TPI (Topografik Konum İndeksi)**: Çok ölçekli yükseklik karşılaştırması (höyükler/çöküntüler)
-
-5. **nDSM Hesaplama**
-   - Normalize edilmiş DSM hesaplar: `nDSM = DSM - DTM`
-   - Yüksek nesneleri (ağaçlar, binalar) maskelemek için kullanılır
-
-6. **Karo Oluşturma**
-   - Giriş görüntüsünü örtüşen karolara böler
-   - Kenar durumlarını işler (sınırlardaki kısmi karolar)
-   - `--min-positive` ve `--max-nodata` kriterlerine göre karoları filtreler
-
-7. **Dengeli Örnekleme** (eğer `--balance-ratio` belirtilmişse)
-   - Karoları pozitif (arkeolojik piksel içeren) ve negatif (sadece arka plan) olarak ayırır
-   - Hedef oranı elde etmek için negatif karoları örnekler
-   - Eğitim verisinde sınıf dengesizliğini önler
-
-8. **Normalizasyon**
-   - Sağlam yüzdelik tabanlı normalizasyon uygular (%2-%98 aralığı)
-   - Her kanalı bağımsız olarak normalize eder
-   - Aykırı değerleri ve ekstrem değerleri işler
-
-9. **Eğitim/Doğrulama Bölme**
-   - Karoları rastgele eğitim ve doğrulama setlerine böler
-   - Her iki sette aynı pozitif/negatif oranını korur
-   - Tekrarlanabilirlik için tohum kullanır
-
-10. **Dosya Kaydetme**
-    - 12 kanallı görüntü karolarını kaydeder (`.npz` veya `.npy` formatı)
-    - Karşılık gelen ikili maskeleri kaydeder
-    - Dizin yapısı oluşturur: `train/images/`, `train/masks/`, `val/images/`, `val/masks/`
-
-11. **Metadata Dışa Aktarma**
-    - Veri kümesi istatistikleriyle `metadata.json` kaydeder
-    - Karo sayıları, pozitif oranlar, kanal bilgisi içerir
-    - Veri kümesi özelliklerini izlemek için kullanışlıdır
-
-#### Çıktı Yapısı
-
-Betiği çalıştırdıktan sonra aşağıdaki dizin yapısını alırsınız:
+#### İçeride Ne Olur
 
 ```
-training_data/
-├── train/
-│   ├── images/
-│   │   ├── tile_00000_00000.npz  # 12 kanallı dizi (12, 256, 256)
-│   │   ├── tile_00000_00192.npz   # Şekil: (12, 256, 256)
-│   │   ├── tile_00000_00384.npz
-│   │   └── ...                    # Daha fazla karo
-│   └── masks/
-│       ├── tile_00000_00000.npz    # İkili maske (256, 256)
-│       ├── tile_00000_00192.npz   # Değerler: 0 (arka plan) veya 1 (arkeolojik)
-│       ├── tile_00000_00384.npz
-│       └── ...                    # Karşılık gelen maskeler
-├── val/
-│   ├── images/
-│   │   ├── tile_01234_00000.npz   # Doğrulama görüntüleri
-│   │   └── ...
-│   └── masks/
-│       ├── tile_01234_00000.npz   # Doğrulama maskeleri
-│       └── ...
-└── metadata.json                  # Veri kümesi istatistikleri ve bilgisi
+Giriş GeoTIFF (5 bant)           Ground Truth Maske
+       │                                │
+       ▼                                │
+┌──────────────────┐                    │
+│ RGB + DSM + DTM  │                    │
+│ bantlarını oku   │                    │
+└────────┬─────────┘                    │
+         │                              │
+         ▼                              │
+┌──────────────────┐                    │
+│ RVT türevlerini  │                    │
+│ hesapla:         │                    │
+│ - SVF            │                    │
+│ - Açıklık (+/-)  │                    │
+│ - LRM, Eğim      │                    │
+└────────┬─────────┘                    │
+         │                              │
+         ▼                              │
+┌──────────────────┐                    │
+│ Hesapla:         │                    │
+│ - Eğrilikler     │                    │
+│ - TPI            │                    │
+│ - nDSM           │                    │
+└────────┬─────────┘                    │
+         │                              │
+         ▼                              │
+┌──────────────────┐                    │
+│ 12 kanalı yığınla│◄───────────────────┘
+│ + 256x256        │
+│ karolara böl     │
+└────────┬─────────┘
+         │
+         ▼
+   training_data/
+   ├── train/images/*.npz  (12, 256, 256)
+   ├── train/masks/*.npz   (256, 256)
+   ├── val/images/*.npz
+   ├── val/masks/*.npz
+   └── metadata.json
 ```
 
-**Dosya Formatı Detayları:**
+#### Temel Parametreler
 
-- **`.npz` formatı (varsayılan)**: Sıkıştırılmış NumPy arşivi
-  - Daha küçük dosya boyutu (~%50-70 azalma)
-  - Daha yavaş okuma/yazma (yine de çok hızlı)
-  - Disk alanı tasarrufu için önerilir
-  
-- **`.npy` formatı**: Sıkıştırılmamış NumPy dizisi
-  - Daha hızlı okuma/yazma
-  - Daha büyük dosya boyutu
-  - Disk alanı sorun değilse kullanın
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `--input` | Gerekli | Çok bantlı GeoTIFF (RGB+DSM+DTM) |
+| `--mask` | Gerekli | İkili maske GeoTIFF (0/1 değerleri) |
+| `--output` | `training_data` | Çıktı dizini |
+| `--tile-size` | `256` | Piksel cinsinden karo boyutu |
+| `--overlap` | `64` | Karolar arası örtüşme |
+| `--train-ratio` | `0.8` | %80 eğitim, %20 doğrulama |
+| `--balance-ratio` | `None` | Pozitif/negatif dengeleme (örn. `0.4` = %40 pozitif) |
+| `--min-positive` | `0.0` | Karoyu dahil etmek için min pozitif piksel oranı |
+| `--bands` | `1,2,3,4,5` | Bant sırası: R,G,B,DSM,DTM |
 
-**Dosyaları Yükleme:**
+#### Senaryoya Göre Önerilen Ayarlar
 
-```python
-import numpy as np
+| Senaryo | Komut |
+|---------|-------|
+| **Standart** | `--tile-size 256 --overlap 64 --balance-ratio 0.4` |
+| **Büyük yapılar** | `--tile-size 512 --overlap 128` |
+| **Dengesiz veri** (<%5 arkeolojik) | `--balance-ratio 0.4 --min-positive 0.01` |
+| **Hızlı test** | `--tile-size 256 --train-ratio 0.9` |
 
-# .npz dosyasını yükle
-data = np.load('tile_00000_00000.npz')
-image = data['image']  # Şekil: (12, 256, 256)
-mask = np.load('tile_00000_00000.npz')['mask']  # Şekil: (256, 256)
+#### Çıktı: 12 Kanal Açıklaması
 
-# .npy dosyasını yükle (format npy ise)
-image = np.load('tile_00000_00000.npy')  # Şekil: (12, 256, 256)
-mask = np.load('tile_00000_00000.npy')   # Şekil: (256, 256)
-```
+| # | Kanal | Ne Tespit Eder |
+|---|-------|----------------|
+| 0-2 | RGB | Renk/doku anomalileri |
+| 3 | SVF | Tümülüsler, höyükler (ufuk görünürlüğü) |
+| 4 | Pozitif Açıklık | Yükseltilmiş yapılar |
+| 5 | Negatif Açıklık | Hendekler, çöküntüler |
+| 6 | LRM | Yerel topografik anomaliler |
+| 7 | Eğim | Teraslar, duvarlar |
+| 8 | nDSM | Zemin üstü yüzey yüksekliği |
+| 9 | Plan Eğriliği | Sırt ve vadiler |
+| 10 | Profil Eğriliği | Teraslar, basamaklar |
+| 11 | TPI | Göreceli yükseklik (höyükler/çöküntüler) |
 
-**Metadata.json İçeriği:**
-
-```json
-{
-  "dataset_info": {
-    "input_file": "kesif_alani.tif",
-    "mask_file": "ground_truth.tif",
-    "tile_size": 256,
-    "overlap": 64,
-    "train_ratio": 0.8,
-    "format": "npz",
-    "created_at": "2025-01-15T10:30:00"
-  },
-  "statistics": {
-    "total_tiles": 1250,
-    "train_tiles": 1000,
-    "val_tiles": 250,
-    "positive_tiles": 450,
-    "negative_tiles": 800,
-    "positive_ratio": 0.36,
-    "actual_positive_ratio": 0.40
-  },
-  "channels": {
-    "count": 12,
-    "order": [
-      "Kırmızı", "Yeşil", "Mavi", "SVF", "Pozitif Açıklık",
-      "Negatif Açıklık", "LRM", "Eğim", "nDSM",
-      "Plan Eğriliği", "Profil Eğriliği", "TPI"
-    ]
-  }
-}
-```
-
-**Kanal Sırası (12 kanal):**
-
-| İndeks | Kanal | Açıklama | Arkeolojik Kullanım |
-|--------|-------|----------|---------------------|
-| 0 | Kırmızı | RGB Kırmızı bant | Renk/doku anomalileri |
-| 1 | Yeşil | RGB Yeşil bant | Bitki örtüsü desenleri |
-| 2 | Mavi | RGB Mavi bant | Toprak renk varyasyonları |
-| 3 | SVF | Gökyüzü Görünürlük Faktörü | Tümülüsler, höyükler (ufuk görünürlüğü) |
-| 4 | Poz. Açıklık | Pozitif Açıklık | Yükseltilmiş yapılar (yukarı görünürlük) |
-| 5 | Neg. Açıklık | Negatif Açıklık | Hendekler, çöküntüler (aşağı görünürlük) |
-| 6 | LRM | Yerel Kabartma Modeli | Yerel topografik anomaliler |
-| 7 | Eğim | Arazi eğimi | Teraslar, duvarlar, basamaklar |
-| 8 | nDSM | Normalize DSM | Yüzey yüksekliği (DSM - DTM) |
-| 9 | Plan Eğriliği | Yatay eğrilik | Sırt/hendek ayrımı |
-| 10 | Profil Eğriliği | Dikey eğrilik | Teraslar, basamaklar, akış yönü |
-| 11 | TPI | Topografik Konum İndeksi | Çevreye göre höyükler/çöküntüler |
+---
 
 ### 🚀 Adım 3: Modeli Eğitme
 
-12 kanallı giriş ve CBAM Dikkat ile özel U-Net modelinizi eğitmek için `training.py` kullanın.
+12 kanallı verileriniz üzerinde CBAM dikkat mekanizmalı U-Net modeli eğitmek için `training.py` kullanın.
 
 #### Temel Eğitim
 
@@ -1476,19 +1404,9 @@ mask = np.load('tile_00000_00000.npy')   # Şekil: (256, 256)
 python training.py --data training_data
 ```
 
-**Not:** Betik, eğitim verisi dizinindeki `metadata.json`'dan kanal sayısını otomatik olarak okur. Metadata eksikse, varsayılan olarak 12 kanal kullanır.
+Bu mantıklı varsayılanları kullanır: U-Net + ResNet34 + 50 epoch + CBAM dikkat + karma hassasiyet.
 
-Bu, varsayılan ayarları kullanır:
-- Mimari: U-Net
-- Kodlayıcı: ResNet34
-- Epoch: 50
-- Batch boyutu: 8
-- Öğrenme oranı: 1e-4
-- Kayıp: Birleşik (BCE + Dice)
-- CBAM Dikkat: Etkin
-- Karma Hassasiyet: Etkin (FP16)
-
-#### Tam Eğitim Örneği
+#### Tüm Seçeneklerle Tam Komut
 
 ```bash
 python training.py \
@@ -1499,41 +1417,81 @@ python training.py \
   --batch-size 8 \
   --lr 1e-4 \
   --loss combined \
-  --patience 10 \
-  --workers 4 \
-  --output checkpoints \
-  --seed 42
+  --patience 10
 ```
 
-#### Tüm Parametreler Açıklaması
+#### Temel Parametreler
 
-| Parametre | Varsayılan | Açıklama | Öneriler |
-|-----------|------------|----------|----------|
-| `--data`, `-d` | `training_data` | Eğitim verisi dizini (Adım 2'den) | `training_data` klasörünüzün yolu |
-| `--arch`, `-a` | `Unet` | Model mimarisi | `Unet` (hızlı, iyi), `UnetPlusPlus` (daha iyi doğruluk), `DeepLabV3Plus` (çok ölçekli) |
-| `--encoder`, `-e` | `resnet34` | Kodlayıcı omurga | `resnet34` (dengeli), `resnet50` (daha iyi), `efficientnet-b3` (verimli) |
-| `--epochs` | `50` | Eğitim epoch sayısı | 50 ile başlayın, kayıp hala düşüyorsa artırın |
-| `--batch-size`, `-b` | `8` | Batch boyutu | GPU belleği izin veriyorsa artırın (16-32 daha iyi) |
-| `--lr` | `1e-4` | Öğrenme oranı | 1e-4 ile başlayın, kayıp salınıyorsa azaltın |
-| `--loss` | `combined` | Kayıp fonksiyonu | `combined` (BCE+Dice), `focal` (dengesiz veri), `dice` (küçük nesneler) |
-| `--patience` | `10` | Erken durdurma sabrı | N epoch boyunca iyileşme yoksa dur |
-| `--no-attention` | `False` | CBAM Dikkat'i devre dışı bırak | Sadece dikkat olmadan test etmek istiyorsanız devre dışı bırakın |
-| `--no-amp` | `False` | Karma hassasiyeti (FP16) devre dışı bırak | Sadece sayısal sorunlarla karşılaşırsanız devre dışı bırakın |
-| `--workers` | `4` | DataLoader işçi iş parçacıkları | Daha hızlı veri yükleme için artırın (4-8 tipik) |
-| `--output`, `-o` | `checkpoints` | Checkpoint dizini | Eğitilmiş modellerin kaydedileceği yer |
-| `--seed` | `42` | Rastgele tohum | Tekrarlanabilirlik için |
+| Parametre | Varsayılan | Seçenekler / Notlar |
+|-----------|------------|---------------------|
+| `--data` | `training_data` | Adım 2 çıktısının yolu |
+| `--arch` | `Unet` | `Unet`, `UnetPlusPlus`, `DeepLabV3Plus`, `FPN` |
+| `--encoder` | `resnet34` | `resnet50`, `efficientnet-b3`, `densenet121` |
+| `--epochs` | `50` | Daha fazla = potansiyel olarak daha iyi (erken durdurma ile) |
+| `--batch-size` | `8` | GPU belleği izin veriyorsa artırın |
+| `--lr` | `1e-4` | Kayıp salınıyorsa azaltın |
+| `--loss` | `combined` | `bce`, `dice`, `combined`, `focal` |
+| `--patience` | `10` | N epoch iyileşme yoksa erken durdurma |
+| `--no-attention` | Kapalı | CBAM dikkatini devre dışı bırak |
+| `--no-amp` | Kapalı | Karma hassasiyeti (FP16) devre dışı bırak |
 
-#### Eğitim Çıktı Yapısı
+#### Doğru Ayarları Seçme
+
+**Model Mimarisi:**
+
+| Mimari | Hız | Doğruluk | Ne Zaman Kullanılır |
+|--------|-----|----------|---------------------|
+| `Unet` | Hızlı | İyi | **Buradan başlayın** - güvenilir temel |
+| `UnetPlusPlus` | Orta | Mükemmel | Daha yüksek doğruluk gerektiğinde |
+| `DeepLabV3Plus` | Orta | Mükemmel | Çok ölçekli yapılar |
+
+**Kodlayıcı:**
+
+| Kodlayıcı | Hız | Doğruluk | Bellek |
+|-----------|-----|----------|--------|
+| `resnet34` | Hızlı | İyi | Düşük | **Önerilen başlangıç** |
+| `resnet50` | Orta | Daha iyi | Orta | Daha iyi doğruluk |
+| `efficientnet-b3` | Hızlı | Mükemmel | Düşük | En iyi verimlilik |
+
+**Kayıp Fonksiyonu:**
+
+| Kayıp | Ne Zaman Kullanılır |
+|-------|---------------------|
+| `combined` | **Varsayılan** - çoğu durum için çalışır |
+| `focal` | Dengesiz veri (az arkeolojik piksel) |
+| `dice` | Küçük nesneler, örtüşme odaklı |
+
+#### Eğitim Çıktısı
 
 ```
 checkpoints/
-├── best_Unet_resnet34_12ch_attention.pth  # En iyi model checkpoint'i
-└── training_history.json                  # Eğitim metrikleri (JSON)
+├── best_Unet_resnet34_12ch_attention.pth   ← Çıkarım için bunu kullanın
+└── training_history.json                    ← Eğitim metrikleri
 ```
 
-### 📊 Adım 4: Eğitilmiş Modeli Değerlendirme ve Kullanma
+#### Eğitimi İzleme
 
-#### Çıkarım için Eğitilmiş Modeli Kullanma
+Konsol çıktısını izleyin:
+
+```
+Epoch  1/50 | Train Loss: 0.45 | Val Loss: 0.39 | Val IoU: 0.62 | LR: 1e-04
+  → En iyi model kaydedildi
+Epoch  2/50 | Train Loss: 0.38 | Val Loss: 0.34 | Val IoU: 0.68 | LR: 1e-04
+  → En iyi model kaydedildi
+...
+Erken durdurma: En iyi model 15. epoch'ta (Val IoU: 0.79)
+```
+
+**Metriklerin anlamı:**
+- **Val IoU** (Kesişim/Birleşim): Yüksek = daha iyi. Hedef: 0.6-0.8
+- **Val Loss**: Düşük = daha iyi. Zamanla azalmalı
+- **Train Loss**: Val Loss'tan biraz düşük olmalı (çok düşükse = aşırı öğrenme)
+
+---
+
+### 📊 Adım 4: Eğitilmiş Modeli Kullanma
+
+#### Komut Satırından
 
 ```bash
 python archaeo_detect.py \
@@ -1542,13 +1500,120 @@ python archaeo_detect.py \
   --th 0.6
 ```
 
-#### config.yaml'da Yapılandırma
+#### config.yaml Üzerinden
 
 ```yaml
 weights: "checkpoints/best_Unet_resnet34_12ch_attention.pth"
 zero_shot_imagenet: false
 encoder: "resnet34"
 ```
+
+Sonra sadece çalıştırın:
+```bash
+python archaeo_detect.py
+```
+
+---
+
+### 🔧 Sorun Giderme
+
+#### Veri Hazırlama Sorunları
+
+| Sorun | Neden | Çözüm |
+|-------|-------|-------|
+| "Maske boyutları eşleşmiyor" | Farklı çözünürlük/kapsam | Maskeyi yeniden örnekle: `gdalwarp -tr 1.0 1.0 -r nearest maske.tif maske_duzeltilmis.tif` |
+| "Geçerli karo bulunamadı" | `--min-positive` çok yüksek | `0.0` veya `0.01`'e düşürün |
+| "Bellek hatası" | Büyük giriş dosyası | `--tile-size`'ı 128'e düşürün |
+
+#### Eğitim Sorunları
+
+| Sorun | Neden | Çözüm |
+|-------|-------|-------|
+| Kayıp düşmüyor | Öğrenme oranı çok yüksek | `--lr 5e-5` veya `1e-5` kullanın |
+| GPU bellek yetersiz | Batch boyutu çok büyük | `--batch-size 4` veya `--no-amp` kullanın |
+| Aşırı öğrenme (train << val loss) | Çok az veri | Daha fazla karo ekleyin veya `--loss focal` kullanın |
+| Tüm tahminler = 0 | Sınıf dengesizliği | `--loss focal` kullanın, veri hazırlamada `--balance-ratio 0.4` |
+| Eğitim çok yavaş | GPU yok / küçük batch | GPU kullanın, `--batch-size` artırın, AMP etkinleştirin |
+
+#### Hızlı Tanı Komutları
+
+```bash
+# Eğitim verisi yapısını kontrol et
+ls -R training_data/
+
+# Metadata'yı görüntüle
+cat training_data/metadata.json | python -m json.tool
+
+# Veri yüklemeyi test et
+python -c "import numpy as np; d=np.load('training_data/train/images/tile_00000_00000.npz'); print(d['image'].shape)"
+# Beklenen: (12, 256, 256)
+```
+
+---
+
+### 💡 En İyi Uygulamalar
+
+#### Veri Kalitesi Kontrol Listesi
+
+- [ ] Maskeler doğru (kesin sınırlar)
+- [ ] Tüm arkeolojik özellikler tutarlı şekilde etiketlenmiş
+- [ ] Dengeli veri kümesi (%30-50 pozitif karo)
+- [ ] Negatiflerde çeşitli arazi türleri
+- [ ] Minimum 1000 karo (2000-5000 önerilir)
+
+#### Eğitim İş Akışı
+
+```
+1. Hızlı test (5 epoch)      → Her şeyin çalıştığını doğrula
+2. Temel (50 epoch)          → Başlangıç noktası belirle
+3. Optimize et (daha iyi kodlayıcı/mimari dene)
+4. İnce ayar (gerekirse LR düşür)
+```
+
+#### Performans Beklentileri
+
+| Veri Kümesi Boyutu | Beklenen Val IoU | Eğitim Süresi (GPU) |
+|--------------------|------------------|---------------------|
+| 500-1000 karo | 0.55-0.65 | 30-60 dk |
+| 1000-3000 karo | 0.65-0.75 | 1-2 saat |
+| 3000-5000 karo | 0.70-0.80 | 2-4 saat |
+| 5000+ karo | 0.75-0.85 | 4+ saat |
+
+---
+
+### 📚 Tam Örnek: Uçtan Uca
+
+```bash
+# 1. Dengeli örnekleme ile eğitim verisi oluştur
+python egitim_verisi_olusturma.py \
+  --input kesif_alani.tif \
+  --mask ground_truth.tif \
+  --output training_data \
+  --tile-size 256 \
+  --balance-ratio 0.4
+
+# 2. Modeli eğit
+python training.py \
+  --data training_data \
+  --arch Unet \
+  --encoder resnet34 \
+  --epochs 50 \
+  --batch-size 16 \
+  --loss combined
+
+# 3. Yeni alanda çıkarım yap
+python archaeo_detect.py \
+  --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
+  --input yeni_alan.tif \
+  --th 0.6 \
+  --enable-fusion
+```
+
+**Beklenen sonuçlar:**
+- ~1000-2000 eğitim karosu
+- Val IoU: 0.65-0.75
+- Eğitim süresi: 1-2 saat (GPU)
+- Model dosyası: ~70 MB
 
 ---
 
@@ -1791,6 +1856,6 @@ Bu projeyi akademik çalışmanızda kullanırsanız, lütfen şu şekilde atıf
 <div align="center">
 
 Geliştirici: [Ahmet Ertuğrul Arık]  
-Son Güncelleme: Ekim 2025
+Son Güncelleme: Şubat 2026
 
 </div>
