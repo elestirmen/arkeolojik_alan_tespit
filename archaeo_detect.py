@@ -2199,9 +2199,9 @@ def infer_tiled(
                         lrm_s = Z
                         slope_s = Z
                         ndsm_s = Z
-                        plan_curv_s = None
-                        profile_curv_s = None
-                        tpi_s = None
+                        plan_curv_s = Z if enable_curvature else None
+                        profile_curv_s = Z if enable_curvature else None
+                        tpi_s = Z if enable_tpi else None
                     stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, plan_curv_s, profile_curv_s, tpi_s)
                 elif deriv_ds is not None and deriv_band_map is not None:
                     def read_band(idx: int) -> Optional[np.ndarray]:
@@ -2222,9 +2222,9 @@ def infer_tiled(
                         lrm_s = Z
                         slope_s = Z
                         ndsm_s = Z
-                        plan_curv_s = None
-                        profile_curv_s = None
-                        tpi_s = None
+                        plan_curv_s = Z if enable_curvature else None
+                        profile_curv_s = Z if enable_curvature else None
+                        tpi_s = Z if enable_tpi else None
                     else:
                         band_names: List[str] = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm"]
                         if enable_curvature:
@@ -2281,9 +2281,9 @@ def infer_tiled(
                         lrm_s = Z
                         slope_s = Z
                         ndsm_s = Z
-                        plan_curv_s = None
-                        profile_curv_s = None
-                        tpi_s = None
+                        plan_curv_s = Z if enable_curvature else None
+                        profile_curv_s = Z if enable_curvature else None
+                        tpi_s = Z if enable_tpi else None
                     else:
                         ndsm_s = compute_ndsm(dsm_s, dtm_s)
                         svf_s, pos_s, neg_s, lrm_s, slope_s = compute_derivatives_with_rvt(
@@ -2413,9 +2413,9 @@ def infer_tiled(
                     lrm = Z
                     slope = Z
                     ndsm_tile = Z
-                    plan_curv_tile = None
-                    profile_curv_tile = None
-                    tpi_tile = None
+                    plan_curv_tile = Z if enable_curvature else None
+                    profile_curv_tile = Z if enable_curvature else None
+                    tpi_tile = Z if enable_tpi else None
 
                 valid_mask = np.isfinite(dtm)
             elif deriv_ds is not None and deriv_band_map is not None:
@@ -2515,9 +2515,9 @@ def infer_tiled(
                     lrm = Z
                     slope = Z
                     ndsm_tile = Z
-                    plan_curv_tile = None
-                    profile_curv_tile = None
-                    tpi_tile = None
+                    plan_curv_tile = Z if enable_curvature else None
+                    profile_curv_tile = Z if enable_curvature else None
+                    tpi_tile = Z if enable_tpi else None
                 else:
                     ndsm_tile = compute_ndsm(dsm, dtm)
                     svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
