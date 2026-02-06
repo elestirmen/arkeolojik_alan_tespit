@@ -1018,8 +1018,8 @@ Error: DTM band not found
 `config.yaml`'da bantları kontrol edin:
 ```yaml
 bands: "1,2,3,4,5"  # Bant 5 DTM olmalı
-# DTM yoksa:
-bands: "1,2,3,4,0"  # DTM yerine 0 kullan
+# DTM zorunlu (0 geçersizdir)
+# DTM eksikse önce geçerli bir DTM bandı üretin/sağlayın.
 ```
 
 #### ❌ Hata 5: Karo Sınırlarında Çizgiler

@@ -49,52 +49,52 @@ class TestPipelineDefaultsValidation:
 
     def test_invalid_th_above_1(self):
         """th > 1.0 hata vermeli."""
-        with pytest.raises(ValueError, match="th değeri 0-1 arasında olmalı"):
+        with pytest.raises(ValueError, match=r"th .*0-1"):
             PipelineDefaults(th=1.5)
 
     def test_invalid_th_below_0(self):
         """th < 0.0 hata vermeli."""
-        with pytest.raises(ValueError, match="th değeri 0-1 arasında olmalı"):
+        with pytest.raises(ValueError, match=r"th .*0-1"):
             PipelineDefaults(th=-0.1)
 
     def test_invalid_alpha(self):
         """alpha 0-1 dışında hata vermeli."""
-        with pytest.raises(ValueError, match="alpha değeri 0-1 arasında olmalı"):
+        with pytest.raises(ValueError, match=r"alpha .*0-1"):
             PipelineDefaults(alpha=2.0)
 
     def test_invalid_tile_negative(self):
         """Negatif tile hata vermeli."""
-        with pytest.raises(ValueError, match="tile pozitif olmalı"):
+        with pytest.raises(ValueError, match=r"tile .*pozitif"):
             PipelineDefaults(tile=-100)
 
     def test_invalid_overlap_greater_than_tile(self):
         """overlap >= tile hata vermeli."""
-        with pytest.raises(ValueError, match="overlap.*tile.*küçük olmalı"):
+        with pytest.raises(ValueError, match=r"overlap.*tile"):
             PipelineDefaults(tile=512, overlap=600)
 
     def test_invalid_percentiles(self):
         """percentile_low >= percentile_high hata vermeli."""
-        with pytest.raises(ValueError, match="percentile_low.*percentile_high.*küçük olmalı"):
+        with pytest.raises(ValueError, match=r"percentile_low.*percentile_high"):
             PipelineDefaults(percentile_low=99.0, percentile_high=1.0)
 
     def test_invalid_connectivity(self):
         """label_connectivity 4 veya 8 dışında hata vermeli."""
-        with pytest.raises(ValueError, match="label_connectivity 4 veya 8 olmalı"):
+        with pytest.raises(ValueError, match=r"label_connectivity 4 veya 8"):
             PipelineDefaults(label_connectivity=6)
 
     def test_invalid_yolo_conf(self):
         """yolo_conf 0-1 dışında hata vermeli."""
-        with pytest.raises(ValueError, match="yolo_conf değeri 0-1 arasında olmalı"):
+        with pytest.raises(ValueError, match=r"yolo_conf .*0-1"):
             PipelineDefaults(yolo_conf=1.5)
 
     def test_invalid_verbose(self):
         """verbose 0-2 dışında hata vermeli."""
-        with pytest.raises(ValueError, match="verbose 0-2 arasında olmalı"):
+        with pytest.raises(ValueError, match=r"verbose 0-2"):
             PipelineDefaults(verbose=5)
 
     def test_empty_sigma_scales(self):
         """Boş sigma_scales hata vermeli."""
-        with pytest.raises(ValueError, match="sigma_scales en az bir değer içermeli"):
+        with pytest.raises(ValueError, match=r"sigma_scales en az bir"):
             PipelineDefaults(sigma_scales=())
 
     def test_valid_device_cuda(self):

@@ -24,10 +24,12 @@ Varsayımlar:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import math
 import os
+import shutil
 import sys
 import uuid
 from contextlib import ExitStack, nullcontext
@@ -260,6 +262,17 @@ def alloc_array(
     return arr, path
 
 
+def cleanup_scratch_dir(scratch_dir: Optional[Path]) -> None:
+    """Best-effort cleanup for temporary memmap scratch directories."""
+    if scratch_dir is None:
+        return
+    try:
+        gc.collect()
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+    except Exception as e:  # pragma: no cover - defensive cleanup
+        LOGGER.debug("Scratch cleanup skipped for %s: %s", scratch_dir, e)
+
+
 def install_gdal_warning_filter() -> None:
     """Suppress noisy but harmless GDAL warnings about mis-declared TIFF extrasamples."""
     global _GDAL_HANDLER_INSTALLED
@@ -319,7 +332,7 @@ class PipelineDefaults:
     )
     bands: str = field(
         default="1,2,3,4,5",
-        metadata={"help": "R,G,B,DSM,DTM bantlarının 1-tabanlı sırası; eksik bant için 0 yazın (örn: 1,2,3,4,5)"},
+        metadata={"help": "R,G,B,DSM,DTM bantlarının 1-tabanlı sırası; DSM eksikse 0 olabilir, DTM zorunludur (örn: 1,2,3,4,5)"},
     )
     
     # ===== YÖNTEM SEÇİMİ (HANGİ YÖNTEMLERİN ÇALIŞACAĞINI BURADAN KONTROL EDİN) =====
@@ -2056,6 +2069,9 @@ def infer_tiled(
         LOGGER.warning("Yüksek obje maskeleme istendi ama DSM bandı eksik; devre dışı bırakılıyor.")
         mask_talls = None
 
+    prob_map_out: Optional[np.ndarray] = None
+    mask_out: Optional[np.ndarray] = None
+
     with ExitStack() as stack:
         src = stack.enter_context(rasterio.open(input_path))
         meta = src.meta.copy()
@@ -2100,6 +2116,8 @@ def infer_tiled(
             # If we cannot detect available RAM, be conservative only for very large accumulators.
             use_memmap = est_bytes >= int(24 * 1024**3)
         scratch_dir: Optional[Path] = make_scratch_dir("infer") if use_memmap else None
+        if scratch_dir is not None:
+            stack.callback(cleanup_scratch_dir, scratch_dir)
         if use_memmap:
             LOGGER.info(
                 "Large raster detected (%dx%d). Using disk-backed accumulators under %s",
@@ -2645,6 +2663,15 @@ def infer_tiled(
             mask_path=mask_path,
         )
 
+        if use_memmap:
+            prob_map_out = None
+            mask_out = None
+            del prob_map, binary_mask, prob_acc, weight_acc, ndsm_max, valid_global
+            gc.collect()
+        else:
+            prob_map_out = prob_map
+            mask_out = binary_mask
+
     # GPU belleğini temizle (bellek sızıntısını önle)
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -2653,8 +2680,8 @@ def infer_tiled(
     return InferenceOutputs(
         prob_path=prob_path,
         mask_path=mask_path,
-        prob_map=prob_map,
-        mask=binary_mask,
+        prob_map=prob_map_out,
+        mask=mask_out,
         transform=transform,
         crs=crs,
     )
@@ -3149,11 +3176,22 @@ def infer_yolo_tiled(
             torch.cuda.empty_cache()
             LOGGER.debug("GPU belleği temizlendi (YOLO)")
 
+        if use_memmap:
+            prob_map_out = None
+            mask_out = None
+            del prob_map, binary_mask, prob_acc, weight_acc, valid_global
+            gc.collect()
+        else:
+            prob_map_out = prob_map
+            mask_out = binary_mask
+
+        cleanup_scratch_dir(scratch_dir)
+
         return YoloOutputs(
             prob_path=prob_path,
             mask_path=mask_path,
-            prob_map=prob_map,
-            mask=binary_mask,
+            prob_map=prob_map_out,
+            mask=mask_out,
             transform=transform,
             crs=crs,
             threshold=conf_threshold,
@@ -3242,6 +3280,8 @@ def infer_classic_tiled(
 
         if large_raster:
             scratch_dir: Optional[Path] = make_scratch_dir("classic") if use_memmap else None
+            if scratch_dir is not None:
+                stack.callback(cleanup_scratch_dir, scratch_dir)
             if use_memmap:
                 LOGGER.info(
                     "Large raster detected (%dx%d). Using disk-backed classic accumulators under %s",
@@ -3484,11 +3524,20 @@ def infer_classic_tiled(
                 mask_path=classic_mask_path,
             )
 
+            if use_memmap:
+                prob_map_out = None
+                mask_out = None
+                del combined_prob, combined_mask, prob_acc_big, weight_acc_big, valid_global_big
+                gc.collect()
+            else:
+                prob_map_out = combined_prob
+                mask_out = combined_mask
+
             return ClassicOutputs(
                 prob_path=classic_prob_path,
                 mask_path=classic_mask_path,
-                prob_map=combined_prob,
-                mask=combined_mask,
+                prob_map=prob_map_out,
+                mask=mask_out,
                 transform=transform,
                 crs=crs,
                 threshold=combined_threshold,
@@ -5472,6 +5521,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "effnet-b3": "timm-efficientnet-b3",
         "resnet34": "resnet34",
         "resnet50": "resnet50",
+        "densenet121": "densenet121",
     }
 
     def normalize_encoder(name: str) -> Tuple[str, str]:
@@ -5481,7 +5531,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         return smp_name, suffix
 
     def available_encoders_list() -> List[str]:
-        return ["resnet34", "resnet50", "efficientnet-b3"]
+        return ["resnet34", "resnet50", "efficientnet-b3", "densenet121"]
 
     if config.classic_th is not None and not (0.0 <= config.classic_th <= 1.0):
         parser.error("--classic-th must be between 0 and 1.")
@@ -5500,6 +5550,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         parser.error(f"Input raster not found: {input_path}")
 
     enc_mode = (config.encoders or "").strip().lower()
+    if enc_mode == "single":
+        LOGGER.info("'single' encoder modu, tek-model modu olarak yorumlandı (encoders=none).")
+        enc_mode = "none"
     ran_multi = enc_mode not in ("", "none")
     if enc_mode in ("", "none"):
         if not config.zero_shot_imagenet and not config.weights:
@@ -5816,6 +5869,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
                 if gpkg:
                     LOGGER.info("[%s] ✓ Vektör dosyası: %s", suffix, gpkg)
+
+        if not dl_runs:
+            parser.error(
+                "Hiç geçerli encoder çalıştırılamadı. --encoders değerlerini kontrol edin veya encoders=none kullanın."
+            )
         
         LOGGER.info("")
         LOGGER.info("=" * 70)
@@ -6291,3 +6349,4 @@ if __name__ == "__main__":
 #   yolo_weights: "path/to/your/best.pt"
 #
 # ============================================================================
+

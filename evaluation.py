@@ -21,6 +21,7 @@ Kullanım:
 
 from __future__ import annotations
 
+import math
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,44 @@ except ImportError:
     gpd = None
 
 LOGGER = logging.getLogger("archaeo_detect.evaluation")
+
+
+def _prediction_to_binary(
+    prediction: np.ndarray,
+    threshold: Optional[float] = None,
+) -> np.ndarray:
+    """
+    Normalize prediction raster values into a binary mask.
+
+    Behaviour:
+    - If `threshold` is provided, use it directly.
+    - If data appears to be probabilistic (finite values within [0, 1] and not strictly {0,1}),
+      apply an automatic threshold of 0.5.
+    - Otherwise, treat all values > 0 as positive.
+    """
+    arr = prediction.astype(np.float32, copy=False)
+
+    if threshold is not None:
+        return (arr >= float(threshold)).astype(np.uint8)
+
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return np.zeros_like(arr, dtype=np.uint8)
+
+    unique_vals = np.unique(finite)
+    is_binary_zero_one = unique_vals.size <= 2 and np.all(np.isin(unique_vals, [0.0, 1.0]))
+    if is_binary_zero_one:
+        return (arr > 0).astype(np.uint8)
+
+    min_val = float(np.min(finite))
+    max_val = float(np.max(finite))
+    if 0.0 <= min_val and max_val <= 1.0:
+        LOGGER.info(
+            "Threshold not provided for probability raster; applying default threshold=0.5."
+        )
+        return (arr >= 0.5).astype(np.uint8)
+
+    return (arr > 0).astype(np.uint8)
 
 
 @dataclass
@@ -292,9 +331,7 @@ def evaluate_predictions(
             f"Raster boyutları eşleşmiyor: {prediction.shape} vs {ground_truth.shape}"
         )
     
-    # Eşikleme (olasılık haritası ise)
-    if threshold is not None:
-        prediction = (prediction >= threshold).astype(np.uint8)
+    prediction = _prediction_to_binary(prediction, threshold=threshold)
     
     # Ground truth'u binary'ye çevir
     ground_truth = (ground_truth > 0).astype(np.uint8)
@@ -321,24 +358,41 @@ def evaluate_vectors(
     if gpd is None:
         raise ImportError("geopandas gerekli: pip install geopandas")
     
+    if rasterize_resolution <= 0:
+        raise ValueError("rasterize_resolution must be > 0.")
+
     pred_gdf = gpd.read_file(prediction_path)
     gt_gdf = gpd.read_file(ground_truth_path)
+
+    if pred_gdf.empty and gt_gdf.empty:
+        empty = np.zeros((1, 1), dtype=np.uint8)
+        return compute_metrics(empty, empty)
     
     # CRS kontrolü
     if pred_gdf.crs != gt_gdf.crs:
         gt_gdf = gt_gdf.to_crs(pred_gdf.crs)
     
     # Bounding box hesapla
-    total_bounds = np.array([
-        min(pred_gdf.total_bounds[0], gt_gdf.total_bounds[0]),
-        min(pred_gdf.total_bounds[1], gt_gdf.total_bounds[1]),
-        max(pred_gdf.total_bounds[2], gt_gdf.total_bounds[2]),
-        max(pred_gdf.total_bounds[3], gt_gdf.total_bounds[3]),
-    ])
+    if pred_gdf.empty:
+        total_bounds = np.array(gt_gdf.total_bounds, dtype=np.float64)
+    elif gt_gdf.empty:
+        total_bounds = np.array(pred_gdf.total_bounds, dtype=np.float64)
+    else:
+        total_bounds = np.array([
+            min(pred_gdf.total_bounds[0], gt_gdf.total_bounds[0]),
+            min(pred_gdf.total_bounds[1], gt_gdf.total_bounds[1]),
+            max(pred_gdf.total_bounds[2], gt_gdf.total_bounds[2]),
+            max(pred_gdf.total_bounds[3], gt_gdf.total_bounds[3]),
+        ], dtype=np.float64)
+
+    if not np.all(np.isfinite(total_bounds)):
+        raise ValueError("Invalid vector bounds; cannot rasterize.")
     
     # Rasterleştir
-    width = int((total_bounds[2] - total_bounds[0]) / rasterize_resolution)
-    height = int((total_bounds[3] - total_bounds[1]) / rasterize_resolution)
+    span_x = max(0.0, float(total_bounds[2] - total_bounds[0]))
+    span_y = max(0.0, float(total_bounds[3] - total_bounds[1]))
+    width = max(1, int(math.ceil(span_x / rasterize_resolution)))
+    height = max(1, int(math.ceil(span_y / rasterize_resolution)))
     
     from rasterio.features import rasterize
     from rasterio.transform import from_bounds

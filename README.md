@@ -1018,8 +1018,8 @@ Error: DTM band not found
 Check bands in `config.yaml`:
 ```yaml
 bands: "1,2,3,4,5"  # Band 5 should be DTM
-# If no DTM:
-bands: "1,2,3,4,0"  # Use 0 instead of DTM
+# DTM is required (0 is invalid)
+# If missing, generate/provide a valid DTM band first.
 ```
 
 #### ❌ Error 5: Lines at Tile Boundaries

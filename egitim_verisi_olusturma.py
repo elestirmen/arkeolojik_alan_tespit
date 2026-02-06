@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -71,6 +70,101 @@ logging.basicConfig(
 LOGGER = logging.getLogger("egitim_verisi")
 
 
+def _validate_tile_generation_params(
+    tile_size: int,
+    overlap: int,
+    min_positive_ratio: float,
+    max_nodata_ratio: float,
+    train_ratio: float,
+    save_format: str,
+    balance_ratio: Optional[float],
+    split_mode: str,
+) -> None:
+    errors: List[str] = []
+
+    if tile_size <= 0:
+        errors.append(f"tile_size pozitif olmalı, verilen: {tile_size}")
+    if overlap < 0:
+        errors.append(f"overlap negatif olamaz, verilen: {overlap}")
+    if overlap >= tile_size:
+        errors.append(f"overlap ({overlap}) tile_size'dan ({tile_size}) küçük olmalı")
+
+    if not 0.0 <= min_positive_ratio <= 1.0:
+        errors.append(
+            f"min_positive_ratio 0-1 arasında olmalı, verilen: {min_positive_ratio}"
+        )
+    if not 0.0 <= max_nodata_ratio <= 1.0:
+        errors.append(
+            f"max_nodata_ratio 0-1 arasında olmalı, verilen: {max_nodata_ratio}"
+        )
+    if not 0.0 < train_ratio < 1.0:
+        errors.append(f"train_ratio 0 ile 1 arasında olmalı, verilen: {train_ratio}")
+
+    if save_format not in {"npy", "npz"}:
+        errors.append(f"save_format geçersiz: {save_format} (npy/npz)")
+
+    if balance_ratio is not None and not 0.0 < balance_ratio < 1.0:
+        errors.append(
+            f"balance_ratio None veya (0,1) aralığında olmalı, verilen: {balance_ratio}"
+        )
+
+    if split_mode not in {"spatial", "random"}:
+        errors.append(f"split_mode geçersiz: {split_mode} (spatial/random)")
+
+    if errors:
+        raise ValueError("Parametre doğrulama hataları:\n- " + "\n- ".join(errors))
+
+
+def _split_windows_for_train_val(
+    windows: List[Tuple[int, int]],
+    *,
+    train_ratio: float,
+    tile_size: int,
+    raster_height: int,
+    split_mode: str,
+    seed: int = 42,
+) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], int, str]:
+    """
+    Split windows into train/val sets.
+
+    spatial mode:
+        Uses a horizontal split line and only keeps tiles fully above/below that line.
+        Tiles crossing the split line are discarded to avoid train/val spatial overlap leakage.
+    """
+    if not windows:
+        return [], [], 0, split_mode
+
+    rng = np.random.RandomState(seed)
+    windows_copy = list(windows)
+
+    if split_mode == "random":
+        rng.shuffle(windows_copy)
+        train_count = int(len(windows_copy) * train_ratio)
+        return windows_copy[:train_count], windows_copy[train_count:], 0, "random"
+
+    split_row = int(raster_height * train_ratio)
+    train_windows: List[Tuple[int, int]] = []
+    val_windows: List[Tuple[int, int]] = []
+    boundary_discarded = 0
+
+    for row_off, col_off in windows_copy:
+        if row_off + tile_size <= split_row:
+            train_windows.append((row_off, col_off))
+        elif row_off >= split_row:
+            val_windows.append((row_off, col_off))
+        else:
+            boundary_discarded += 1
+
+    if len(train_windows) == 0 or len(val_windows) == 0:
+        rng.shuffle(windows_copy)
+        train_count = int(len(windows_copy) * train_ratio)
+        return windows_copy[:train_count], windows_copy[train_count:], boundary_discarded, "random_fallback"
+
+    rng.shuffle(train_windows)
+    rng.shuffle(val_windows)
+    return train_windows, val_windows, boundary_discarded, "spatial"
+
+
 def create_training_tiles(
     input_tif: Path,
     mask_tif: Path,
@@ -85,6 +179,7 @@ def create_training_tiles(
     normalize: bool = True,
     save_format: str = "npz",
     balance_ratio: Optional[float] = 0.3,
+    split_mode: str = "spatial",
 ) -> dict:
     """
     GeoTIFF'ten 12 kanallı eğitim tile'ları oluşturur.
@@ -106,10 +201,25 @@ def create_training_tiles(
                        None = dengeleme yok, tüm tile'lar kullanılır.
                        Örn: 0.4 = %40 pozitif, %60 negatif.
                        Önerilen: 0.4 (hafif dengeli)
+        split_mode: Train/val bölme modu.
+                   "spatial" (önerilen): mekansal sızıntıyı azaltmak için
+                   sınırı kesen tile'ları atar.
+                   "random": klasik rastgele bölme (daha yüksek leakage riski).
         
     Returns:
         İstatistik sözlüğü
     """
+    _validate_tile_generation_params(
+        tile_size=tile_size,
+        overlap=overlap,
+        min_positive_ratio=min_positive_ratio,
+        max_nodata_ratio=max_nodata_ratio,
+        train_ratio=train_ratio,
+        save_format=save_format,
+        balance_ratio=balance_ratio,
+        split_mode=split_mode,
+    )
+
     output_dir = Path(output_dir)
     
     # Dizin yapısı oluştur
@@ -137,6 +247,9 @@ def create_training_tiles(
         "selected_positive_count": 0,
         "selected_negative_count": 0,
         "discarded_negative_count": 0,
+        "split_mode_requested": split_mode,
+        "split_mode_effective": split_mode,
+        "split_boundary_discarded": 0,
     }
     
     LOGGER.info("=" * 60)
@@ -147,6 +260,7 @@ def create_training_tiles(
     LOGGER.info(f"Çıktı: {output_dir}")
     LOGGER.info(f"Tile boyutu: {tile_size}x{tile_size}")
     LOGGER.info(f"Örtüşme: {overlap}")
+    LOGGER.info(f"Bölme modu: {split_mode}")
     LOGGER.info(f"Bant sırası: {bands}")
     LOGGER.info(f"TPI yarıçapları: {tpi_radii}")
     if balance_ratio is not None:
@@ -248,14 +362,35 @@ def create_training_tiles(
             # Dengeli seçim yok, tüm tile'ları kullan
             all_windows = windows
         
-        # Rastgele karıştır (train/val bölme için)
-        np.random.seed(42)
-        np.random.shuffle(all_windows)
-        
-        train_count = int(len(all_windows) * train_ratio)
+        train_windows, val_windows, boundary_discarded, split_mode_effective = _split_windows_for_train_val(
+            all_windows,
+            train_ratio=train_ratio,
+            tile_size=tile_size,
+            raster_height=height,
+            split_mode=split_mode,
+            seed=42,
+        )
+        stats["split_mode_effective"] = split_mode_effective
+        stats["split_boundary_discarded"] = int(boundary_discarded)
+
+        if split_mode_effective == "random_fallback":
+            LOGGER.warning(
+                "Mekansal bölme train/val için yeterli tile üretemedi; random bölmeye geri dönüldü."
+            )
+
+        all_windows = train_windows + val_windows
+        train_window_set = set(train_windows)
+
+        LOGGER.info(
+            "Train/Val planı: train=%d, val=%d, sınırda atılan=%d (%s)",
+            len(train_windows),
+            len(val_windows),
+            boundary_discarded,
+            split_mode_effective,
+        )
         
         LOGGER.info("\nTile'lar işleniyor...")
-        for idx, (row_off, col_off) in enumerate(tqdm(all_windows, desc="İşleniyor")):
+        for row_off, col_off in tqdm(all_windows, desc="İşleniyor"):
             window = Window(col_off, row_off, tile_size, tile_size)
             
             # Maske oku
@@ -332,7 +467,7 @@ def create_training_tiles(
                 stats["negative_tiles"] += 1
             
             # Train/Val ayrımı
-            is_train = idx < train_count
+            is_train = (row_off, col_off) in train_window_set
             
             if is_train:
                 images_dir = train_images_dir
@@ -549,6 +684,13 @@ def main():
         help="Pozitif/negatif dengeleme oranı (0-1). Örn: 0.4 = %%40 pozitif, %%60 negatif. "
              "None = dengeleme yok. Önerilen: 0.4 (hafif dengeli)",
     )
+    parser.add_argument(
+        "--split-mode",
+        type=str,
+        choices=["spatial", "random"],
+        default="spatial",
+        help="Train/val bölme modu. spatial önerilir (mekansal sızıntıyı azaltır).",
+    )
     
     args = parser.parse_args()
     
@@ -608,6 +750,7 @@ def main():
             normalize=not args.no_normalize,
             save_format=args.format,
             balance_ratio=args.balance_ratio,
+            split_mode=args.split_mode,
         )
     except Exception as e:
         LOGGER.error(f"Hata: {e}")

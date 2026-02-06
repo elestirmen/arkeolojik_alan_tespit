@@ -43,14 +43,14 @@ out_prefix: null
 # bands: Kullanılacak bantların virgülle ayrılmış listesi (1-tabanlı indeksler)
 # - Her bant numarası GeoTIFF dosyasındaki bant sırasına karşılık gelir
 # - Tipik düzen: "1,2,3,4,5" → R, G, B, DSM, DTM
-# - DSM (Sayısal Yüzey Modeli) yoksa sıfır (0) kullanın
-# - DTM (Sayısal Arazi Modeli) yoksa sıfır (0) kullanın
+# - DSM (Sayısal Yüzey Modeli) yoksa sıfır (0) kullanabilirsiniz
+# - DTM (Sayısal Arazi Modeli) zorunludur, 0 kullanılamaz
 # - En az RGB bantları (1,2,3) gereklidir
 # UYARI: Bant sayısı encoder ile uyumlu olmalıdır!
 # Örnekler:
 #   - "1,2,3,4,5"    → RGB + DSM + DTM (önerilen)
 #   - "1,2,3,0,5"    → RGB + DSM yok + DTM
-#   - "1,2,3,0,0"    → Sadece RGB (yükseklik verisi yok)
+#   - "1,2,3,0,0"    → Geçersiz (DTM zorunlu)
 bands: "1,2,3,4,5"
 
 
@@ -134,7 +134,7 @@ arch: "Unet"
 
 # encoder: TEK ENCODER modunda kullanılacak encoder ağı
 # - Önceden eğitilmiş (ImageNet) bir CNN omurgası
-# - Bu parametre yalnızca encoders: "single" olduğunda kullanılır
+# - Bu parametre yalnızca encoders: "none" olduğunda kullanılır
 # POPÜLER ENCODER'LAR:
 #   - "resnet34"          → Dengeli hız/doğruluk (önerilen başlangıç)
 #   - "resnet50"          → Daha derin, daha doğru ama yavaş
@@ -155,7 +155,7 @@ encoder: "resnet34"
 #   + Çeşitlilik sayesinde daha robust tespit
 #   - Daha uzun çalışma süresi
 #   - Her encoder için ayrı model ağırlığı gerekebilir
-# ÖNERİ: Üretim için "all" veya 2-3 encoder kombinasyonu, test için "single"
+# ÖNERİ: Üretim için "all" veya 2-3 encoder kombinasyonu, test için "none"
 #encoders: "none"
 encoders: "resnet34,resnet50,efficientnet-b3,DenseNet121"
 
@@ -164,7 +164,7 @@ encoders: "resnet34,resnet50,efficientnet-b3,DenseNet121"
 # - Eğitilmiş model ağırlıklarınızın dosya yolu
 # - null ise: ImageNet ağırlıkları kullanılır (zero-shot)
 # - Örnek: "models/unet_resnet34_5ep.pth"
-# NOT: Bu parametre yalnızca tek encoder modunda (encoders: "single") kullanılır
+# NOT: Bu parametre yalnızca tek encoder modunda (encoders: "none") kullanılır
 weights: null
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
@@ -927,7 +927,7 @@ recalculate_cache: false
 # Bu dosyalar hangi yöntemin etkin olduğuna bağlı olarak üretilir.
 
 # 1) DERİN ÖĞRENME ETKİNSE (enable_deep_learning: true):
-#    TEK ENCODER modu (encoders: "single"):
+#    TEK ENCODER modu (encoders: "none"):
 #      - <prefix>_prob.tif              → DL olasılık haritası (0-1 arası, sürekli)
 #      - <prefix>_mask.tif              → DL ikili maske (0 veya 1, eşik uygulanmış)
 #      - <prefix>_mask.gpkg (opsiyonel) → Vektör poligonlar (vectorize: true ise)
@@ -994,7 +994,7 @@ recalculate_cache: false
 #
 # Sadece hızlı bir test için:
 #   enable_deep_learning: true
-#   encoders: "single"
+#   encoders: "none"
 #   encoder: "resnet34"
 #   enable_classic: false
 #   tile: 512  (daha hızlı)
