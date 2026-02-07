@@ -36,7 +36,6 @@ except ImportError:
 
 try:
     import geopandas as gpd
-    from shapely.geometry import shape
 except ImportError:
     gpd = None
 

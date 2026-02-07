@@ -26,7 +26,6 @@ from archaeo_detect import (
     fill_nodata,
     _local_variance,
     _hessian_response,
-    _norm01,
     make_feather_weights,
     generate_windows,
     build_filename_with_params,

@@ -28,7 +28,6 @@ import gc
 import json
 import logging
 import math
-import os
 import shutil
 import sys
 import uuid
@@ -2074,7 +2073,6 @@ def infer_tiled(
 
     with ExitStack() as stack:
         src = stack.enter_context(rasterio.open(input_path))
-        meta = src.meta.copy()
         height, width = src.height, src.width
         transform = src.transform
         crs = src.crs
@@ -3136,9 +3134,8 @@ def infer_yolo_tiled(
                     # Calculate area for each detection (in square meters)
                     if crs and not crs.is_projected:
                         # If geographic CRS, project to calculate area
-                        from pyproj import CRS as PyProjCRS, Transformer
+                        from pyproj import CRS as PyProjCRS
                         area_crs = PyProjCRS.from_epsg(6933)  # Equal Area projection
-                        transformer = Transformer.from_crs(crs, area_crs, always_xy=True)
                         gdf['area_m2'] = gdf.geometry.to_crs(area_crs).area
                     else:
                         gdf['area_m2'] = gdf.geometry.area
@@ -3241,7 +3238,6 @@ def infer_classic_tiled(
 
     with ExitStack() as stack:
         src = stack.enter_context(rasterio.open(input_path))
-        meta = src.meta.copy()
         height, width = src.height, src.width
         transform = src.transform
         crs = src.crs

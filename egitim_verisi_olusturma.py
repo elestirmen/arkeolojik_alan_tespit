@@ -53,8 +53,6 @@ try:
         compute_tpi_multiscale,
         stack_channels,
         robust_norm,
-        DEFAULTS,
-        fill_nodata,
     )
 except ImportError:
     print("HATA: archaeo_detect.py bulunamadı!")
@@ -266,7 +264,7 @@ def create_training_tiles(
     if balance_ratio is not None:
         LOGGER.info(f"Dengeli seçim: Aktif (hedef: %{balance_ratio*100:.0f} pozitif, %{(1-balance_ratio)*100:.0f} negatif)")
     else:
-        LOGGER.info(f"Dengeli seçim: Kapalı (tüm tile'lar kullanılacak)")
+        LOGGER.info("Dengeli seçim: Kapalı (tüm tile'lar kullanılacak)")
     LOGGER.info("=" * 60)
     
     with rasterio.open(input_tif) as src, rasterio.open(mask_tif) as mask_src:
@@ -347,7 +345,7 @@ def create_training_tiles(
                 np.random.seed(42)
                 np.random.shuffle(all_windows)
                 
-                LOGGER.info(f"\nDengeli seçim sonucu:")
+                LOGGER.info("\nDengeli seçim sonucu:")
                 LOGGER.info(f"  Seçilen pozitif: {len(positive_windows)}")
                 LOGGER.info(f"  Seçilen negatif: {len(selected_negative)}")
                 LOGGER.info(f"  Atılan negatif: {stats['discarded_negative_count']}")
@@ -759,7 +757,7 @@ def main():
         sys.exit(1)
     
     print("\n✓ Eğitim verisi oluşturma tamamlandı!")
-    print(f"  Şimdi training.py ile model eğitebilirsiniz:")
+    print("  Şimdi training.py ile model eğitebilirsiniz:")
     print(f"  python training.py --data {args.output}")
 
 

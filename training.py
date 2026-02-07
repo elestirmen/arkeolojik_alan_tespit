@@ -33,13 +33,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -49,12 +47,21 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 # Segmentation Models PyTorch
-try:
-    import segmentation_models_pytorch as smp
-except ImportError:
-    print("HATA: segmentation-models-pytorch kurulu değil!")
-    print("Kurulum: pip install segmentation-models-pytorch")
-    sys.exit(1)
+smp = None
+
+
+def _require_smp():
+    """`segmentation-models-pytorch` bağımlılığını yalnızca eğitimde yükle."""
+    global smp
+    if smp is None:
+        try:
+            import segmentation_models_pytorch as _smp
+        except ImportError as exc:
+            raise ImportError(
+                "segmentation-models-pytorch kurulu değil. Kurulum: pip install segmentation-models-pytorch"
+            ) from exc
+        smp = _smp
+    return smp
 
 # Mevcut projedeki attention modüllerini import et
 try:
@@ -63,7 +70,6 @@ try:
         SpatialAttention,
         CBAM,
         AttentionWrapper,
-        get_num_channels,
     )
 except ImportError:
     print("UYARI: archaeo_detect.py'den attention modülleri import edilemedi.")
@@ -350,13 +356,50 @@ class TrainingConfig:
     output_dir: Path = field(default_factory=lambda: Path("checkpoints"))
 
 
+def _infer_file_format(data_dir: Path) -> str:
+    """Eğitim verisindeki dosya formatını (npz/npy) tespit eder."""
+    train_images = data_dir / "train" / "images"
+    if any(train_images.glob("*.npz")):
+        return "npz"
+    if any(train_images.glob("*.npy")):
+        return "npy"
+    raise ValueError(f"Desteklenen eğitim dosyası bulunamadı: {train_images} (*.npz / *.npy)")
+
+
+def _count_positive_mask_files(mask_dir: Path, file_format: str) -> Tuple[int, int]:
+    """
+    Maske dosyalarında en az bir pozitif piksel içeren tile sayısını döndür.
+
+    Returns:
+        (toplam_tile_sayisi, pozitif_tile_sayisi)
+    """
+    mask_files = sorted(mask_dir.glob(f"*.{file_format}"))
+    positive_files = 0
+
+    for mask_path in mask_files:
+        if file_format == "npy":
+            mask = np.load(mask_path)
+        else:
+            with np.load(mask_path) as packed:
+                if "mask" not in packed:
+                    raise ValueError(f"'mask' anahtarı bulunamadı: {mask_path}")
+                mask = packed["mask"]
+
+        if np.any(mask > 0):
+            positive_files += 1
+
+    return len(mask_files), positive_files
+
+
 def create_model(config: TrainingConfig) -> nn.Module:
     """Model oluşturur."""
-    
-    if not hasattr(smp, config.arch):
+
+    smp_lib = _require_smp()
+
+    if not hasattr(smp_lib, config.arch):
         raise ValueError(f"Mimari bulunamadı: {config.arch}")
-    
-    model_cls = getattr(smp, config.arch)
+
+    model_cls = getattr(smp_lib, config.arch)
     
     # Base model
     base_model = model_cls(
@@ -789,6 +832,11 @@ def main():
         default=42,
         help="Random seed",
     )
+    parser.add_argument(
+        "--allow-all-negative",
+        action="store_true",
+        help="Pozitif etiket içermeyen veri setleriyle eğitime devam et (önerilmez)",
+    )
     
     args = parser.parse_args()
     
@@ -815,6 +863,26 @@ def main():
     else:
         in_channels = 12
         LOGGER.warning(f"Metadata bulunamadı, varsayılan kanal sayısı kullanılıyor: {in_channels}")
+
+    # Etiket dağılımını doğrula (tamamı negatif veri sessizce eğitime girmesin)
+    file_format = _infer_file_format(data_dir)
+    train_total, train_positive = _count_positive_mask_files(data_dir / "train" / "masks", file_format)
+    val_total, val_positive = _count_positive_mask_files(data_dir / "val" / "masks", file_format)
+    LOGGER.info(
+        "Maske dağılımı | train: %d/%d pozitif tile | val: %d/%d pozitif tile",
+        train_positive, train_total, val_positive, val_total,
+    )
+
+    total_positive = train_positive + val_positive
+    if total_positive == 0 and not args.allow_all_negative:
+        print("HATA: Eğitim verisinde pozitif etiket bulunamadı (tüm maskeler 0).")
+        print("Ground truth maskesini ve egitim_verisi_olusturma.py çıktısını kontrol edin.")
+        print("Bilerek tamamen negatif veriyle eğitim yapmak isterseniz: --allow-all-negative")
+        sys.exit(1)
+    if total_positive == 0 and args.allow_all_negative:
+        LOGGER.warning(
+            "Pozitif etiket bulunamadı, ancak --allow-all-negative nedeniyle eğitim devam edecek."
+        )
     
     # Config oluştur
     config = TrainingConfig(
@@ -841,9 +909,9 @@ def main():
         print("\n" + "=" * 60)
         print("✓ EĞİTİM TAMAMLANDI!")
         print("=" * 60)
-        print(f"\nEğitilmiş modeli kullanmak için config.yaml'da:")
+        print("\nEğitilmiş modeli kullanmak için config.yaml'da:")
         print(f"  weights: \"{best_model}\"")
-        print(f"  zero_shot_imagenet: false")
+        print("  zero_shot_imagenet: false")
         print("\nVeya komut satırından:")
         print(f"  python archaeo_detect.py --weights {best_model}")
         print("=" * 60)
