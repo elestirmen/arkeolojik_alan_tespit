@@ -42,22 +42,41 @@ _TQDM_WARNED = False
 # Buradaki degerler komut satirindan arguman verilmezse varsayilan olarak kullanilir.
 # Komut satiri argumanlari her zaman bu degerleri ezer.
 CONFIG: dict[str, Any] = {
+    # Girdi DSM GeoTIFF yolu.
     "input": "/veri/karlik_dag_dsm.tif",
+    # Uretilecek DTM GeoTIFF yolu.
     "output": "/veri/karlik_dag_dtm_smrf.tif",
-    "cell": None,  # None -> DSM piksel boyutu kullanilir
+    # SMRF cell boyutu (metre). None -> DSM piksel boyutu kullanilir.
+    "cell": None,
+    # SMRF slope: buyudukce zemin siniflamasi daha toleransli olur.
     "slope": 0.2,
+    # SMRF threshold: zemin/saha ayrimi icin yukseklik fark esigi.
     "threshold": 0.45,
+    # SMRF window: maksimum pencere boyutu (metre).
     "window": 16.0,
+    # SMRF scalar: karar mekanizmasi carpan katsayisi.
     "scalar": 1.25,
-    "smrf_max_pixels": 120_000_000,  # >0 ise asilirsa SMRF oncesi downsample yapilir
-    "smrf_downsample_factor": 1.0,   # 1.0 -> kapali
+    # >0 ise girdi bu piksel sayisini asarsa SMRF oncesi downsample uygulanir.
+    # Kalite kritikse 0 yaparak otomatik downsample'i kapat.
+    "smrf_max_pixels": 120_000_000,
+    # Zorunlu downsample katsayisi: 1.0 kapali, 2.0 -> en/boy yariya iner.
+    # Kalite kritikse 1.0 kullan.
+    "smrf_downsample_factor": 1.0,
+    # SMRF hata verirse fallback (morfolojik DTM) kullanilsin mi?
     "allow_fallback": True,
+    # Fallback morfolojik acma pencere boyutu (metre).
     "opening_meters": 6.0,
+    # Fallback gaussian yumusatma sigma degeri (piksel).
     "smooth_sigma_px": 1.5,
+    # Fallback karo (tile) boyutu (piksel).
     "tile_size": 2048,
+    # Cikti nodata degeri.
     "nodata": -9999.0,
-    "compression": "LZW",  # LZW | DEFLATE | NONE
-    "log_level": "INFO",   # DEBUG | INFO | WARNING | ERROR
+    # GeoTIFF sikistirma tipi: LZW | DEFLATE | NONE.
+    "compression": "LZW",
+    # Log seviyesi: DEBUG | INFO | WARNING | ERROR.
+    "log_level": "INFO",
+    # Ilerleme cubuklari acik/kapali.
     "progress": True,
 }
 # ===============================================
@@ -65,6 +84,20 @@ CONFIG: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class SmrfParams:
+    """
+    PDAL `filters.smrf` parametreleri.
+
+    cell:
+        Izgara hucre boyutu (metre). Buyuk deger daha az RAM/CPU, ama daha az detay.
+    slope:
+        Eğim toleransi. Buyudukce zemin siniflamasi daha yumusak olur.
+    threshold:
+        Yukseklik fark esigi. Buyuk degerde daha fazla nokta zemin kalabilir.
+    window:
+        Maksimum pencere boyutu (metre). Buyuk yapilarin zemin kabulune etki eder.
+    scalar:
+        SMRF karar mekanizmasi carpan katsayisi.
+    """
     cell: float
     slope: float
     threshold: float
@@ -612,18 +645,47 @@ def _parse_args() -> argparse.Namespace:
         default=str(CONFIG["output"]),
         help="Uretilecek DTM GeoTIFF yolu.",
     )
-    parser.add_argument("--cell", type=float, default=CONFIG["cell"], help="SMRF cell parametresi (metre). Bossa DSM piksel boyutu kullanilir.")
-    parser.add_argument("--slope", type=float, default=float(CONFIG["slope"]), help="SMRF slope parametresi.")
-    parser.add_argument("--threshold", type=float, default=float(CONFIG["threshold"]), help="SMRF threshold parametresi.")
-    parser.add_argument("--window", type=float, default=float(CONFIG["window"]), help="SMRF max window parametresi.")
-    parser.add_argument("--scalar", type=float, default=float(CONFIG["scalar"]), help="SMRF scalar parametresi.")
+    parser.add_argument(
+        "--cell",
+        type=float,
+        default=CONFIG["cell"],
+        help=(
+            "SMRF cell (metre). Bos/NONE ise DSM piksel boyutu kullanilir. "
+            "Buyuk deger daha az RAM/CPU, ama daha az detay."
+        ),
+    )
+    parser.add_argument(
+        "--slope",
+        type=float,
+        default=float(CONFIG["slope"]),
+        help="SMRF slope parametresi (egim toleransi).",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=float(CONFIG["threshold"]),
+        help="SMRF threshold parametresi (zemin ayrimi yukseklik esigi).",
+    )
+    parser.add_argument(
+        "--window",
+        type=float,
+        default=float(CONFIG["window"]),
+        help="SMRF max window (metre). Buyuk yapilarin zemin siniflamasina etki eder.",
+    )
+    parser.add_argument(
+        "--scalar",
+        type=float,
+        default=float(CONFIG["scalar"]),
+        help="SMRF scalar parametresi (karar mekanizmasi carpan katsayisi).",
+    )
     parser.add_argument(
         "--smrf-max-pixels",
         type=int,
         default=int(CONFIG["smrf_max_pixels"]),
         help=(
             "SMRF icin maksimum piksel/nokta limiti. "
-            "Asilirsa SMRF girdisi otomatik downsample edilir. <=0 ile kapat."
+            "Asilirsa SMRF girdisi otomatik downsample edilir. "
+            "Kalite kritikse <=0 ile kapat."
         ),
     )
     parser.add_argument(
@@ -632,7 +694,8 @@ def _parse_args() -> argparse.Namespace:
         default=float(CONFIG["smrf_downsample_factor"]),
         help=(
             "SMRF oncesi zorunlu downsample katsayisi. "
-            "1.0 -> kapali, 2.0 -> genislik/yukseklik yariya iner."
+            "1.0 -> kapali, 2.0 -> genislik/yukseklik yariya iner. "
+            "Kalite kritikse 1.0 kullan."
         ),
     )
     parser.add_argument(
