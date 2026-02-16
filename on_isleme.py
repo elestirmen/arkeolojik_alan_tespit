@@ -249,6 +249,10 @@ def _run_pdal_pipeline(
     progress_value = 0
     last_log_elapsed = -60.0
     start_time = time.time()
+    if show_progress:
+        LOGGER.info(
+            "SMRF gorunen ilerleme tahminidir; PDAL son asamada uzun sure 90-95%% araliginda kalabilir."
+        )
 
     while worker.is_alive():
         elapsed = time.time() - start_time
@@ -265,8 +269,8 @@ def _run_pdal_pipeline(
         if pbar is not None and target_value > progress_value:
             pbar.update(target_value - progress_value)
             progress_value = target_value
-        elif pbar is None and elapsed - last_log_elapsed >= 60.0:
-            LOGGER.info("SMRF devam ediyor... %.0f sn", elapsed)
+        elif elapsed - last_log_elapsed >= 60.0:
+            LOGGER.info("SMRF devam ediyor... %.0f sn (gorunen ilerleme: %d%%)", elapsed, progress_value)
             last_log_elapsed = elapsed
         time.sleep(1.0)
 
