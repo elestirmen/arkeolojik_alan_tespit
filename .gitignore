@@ -14,3 +14,6 @@
 # Meta dosyaları da izinli
 !.gitignore
 !.gitattributes
+
+# Yerel conda ortamı (repo'ya gönderilmesin)
+.conda_pdal_env/
