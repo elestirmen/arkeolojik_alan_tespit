@@ -246,6 +246,7 @@ python on_isleme.py \
 
 - `--input`, `--output`
 - `--cell`, `--slope`, `--threshold`, `--window`, `--scalar` (SMRF parameters)
+- `--smrf-max-pixels`, `--smrf-downsample-factor` (SMRF RAM control)
 - `--allow-fallback` / `--no-fallback`
 - `--opening-meters`, `--smooth-sigma-px`, `--tile-size` (fallback tuning)
 - `--nodata`, `--compression`, `--log-level`
@@ -260,6 +261,7 @@ conda install -n <env_name> -c conda-forge pdal python-pdal
 ```
 
 - Fallback method requires `scipy`.
+- Default `smrf_max_pixels` is `120000000`; if input exceeds this, SMRF input is downsampled automatically to reduce memory pressure.
 - On Windows, keep geospatial stack consistent in one environment (avoid mixing `pip` `gdal/rasterio` with conda GDAL libraries), otherwise GDAL plugin DLL errors may occur.
 - Runtime defaults are defined in `on_isleme.py` (`CONFIG` dict) and can be overridden via CLI.
 

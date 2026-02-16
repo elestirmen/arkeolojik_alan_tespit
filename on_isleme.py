@@ -18,13 +18,14 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
 from rasterio.windows import Window
 from rasterio.warp import reproject
 
@@ -48,6 +49,8 @@ CONFIG: dict[str, Any] = {
     "threshold": 0.45,
     "window": 16.0,
     "scalar": 1.25,
+    "smrf_max_pixels": 120_000_000,  # >0 ise asilirsa SMRF oncesi downsample yapilir
+    "smrf_downsample_factor": 1.0,   # 1.0 -> kapali
     "allow_fallback": True,
     "opening_meters": 6.0,
     "smooth_sigma_px": 1.5,
@@ -302,6 +305,99 @@ def _prepare_temp_output_path(output_path: Path) -> Path:
     return Path(temp_name)
 
 
+def _prepare_smrf_input(
+    input_path: Path,
+    temp_dir: Path,
+    max_pixels: Optional[int],
+    downsample_factor: float,
+    show_progress: bool,
+) -> tuple[Path, int, float]:
+    """
+    SMRF icin girdiyi gerekirse downsample eder.
+
+    Donus:
+    - smrf_input_path: PDAL'e verilecek raster yolu
+    - expected_points: SMRF tarafinda islenecek yaklasik nokta/piksel sayisi
+    - smrf_base_cell: SMRF girdisinin piksel boyutu (metre)
+    """
+    with rasterio.open(input_path) as src:
+        if src.count < 1:
+            raise ValueError(f"Girdi raster en az bir bant icermeli: {input_path}")
+        src_points = int(src.width * src.height)
+        xres, yres = src.res
+        src_cell = max(abs(float(xres)), abs(float(yres)))
+
+        factor = max(1.0, float(downsample_factor))
+        if max_pixels is not None and max_pixels > 0 and src_points > max_pixels:
+            auto_factor = math.sqrt(src_points / float(max_pixels))
+            factor = max(factor, auto_factor)
+
+        if factor <= 1.0001:
+            return input_path, src_points, src_cell
+
+        dst_width = max(1, int(round(src.width / factor)))
+        dst_height = max(1, int(round(src.height / factor)))
+        dst_points = int(dst_width * dst_height)
+        actual_factor = math.sqrt(src_points / max(dst_points, 1))
+        dst_cell = src_cell * actual_factor
+        dst_transform = from_bounds(*src.bounds, dst_width, dst_height)
+
+        smrf_input_path = temp_dir / "smrf_input_downsampled.tif"
+        profile = src.profile.copy()
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
+        profile.update(
+            width=dst_width,
+            height=dst_height,
+            transform=dst_transform,
+            tiled=False,
+            BIGTIFF="IF_SAFER",
+        )
+        if "compress" not in profile or not profile["compress"]:
+            profile["compress"] = "LZW"
+        if str(profile.get("dtype", "")).lower().startswith("float"):
+            profile["predictor"] = 3
+
+        LOGGER.warning(
+            "SMRF bellek korumasi: girdi downsample uygulanacak. "
+            "piksel=%d -> %d (%.2fx azalma), cell~%.4f -> %.4f",
+            src_points,
+            dst_points,
+            src_points / max(dst_points, 1),
+            src_cell,
+            dst_cell,
+        )
+
+        pbar = _open_progress(
+            total=src.count,
+            desc="SMRF input downsample",
+            unit="band",
+            enabled=show_progress,
+        )
+        try:
+            with rasterio.open(smrf_input_path, "w", **profile) as dst:
+                for band_idx in range(1, src.count + 1):
+                    reproject(
+                        source=rasterio.band(src, band_idx),
+                        destination=rasterio.band(dst, band_idx),
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        src_nodata=src.nodata,
+                        dst_transform=dst_transform,
+                        dst_crs=src.crs,
+                        dst_nodata=src.nodata,
+                        resampling=Resampling.bilinear,
+                        num_threads=2,
+                    )
+                    if pbar is not None:
+                        pbar.update(1)
+        finally:
+            if pbar is not None:
+                pbar.close()
+
+        return smrf_input_path, dst_points, dst_cell
+
+
 def _compute_fallback_dtm(
     input_dsm_path: Path,
     output_dtm_path: Path,
@@ -522,6 +618,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--window", type=float, default=float(CONFIG["window"]), help="SMRF max window parametresi.")
     parser.add_argument("--scalar", type=float, default=float(CONFIG["scalar"]), help="SMRF scalar parametresi.")
     parser.add_argument(
+        "--smrf-max-pixels",
+        type=int,
+        default=int(CONFIG["smrf_max_pixels"]),
+        help=(
+            "SMRF icin maksimum piksel/nokta limiti. "
+            "Asilirsa SMRF girdisi otomatik downsample edilir. <=0 ile kapat."
+        ),
+    )
+    parser.add_argument(
+        "--smrf-downsample-factor",
+        type=float,
+        default=float(CONFIG["smrf_downsample_factor"]),
+        help=(
+            "SMRF oncesi zorunlu downsample katsayisi. "
+            "1.0 -> kapali, 2.0 -> genislik/yukseklik yariya iner."
+        ),
+    )
+    parser.add_argument(
         "--allow-fallback",
         dest="allow_fallback",
         action="store_true",
@@ -600,7 +714,7 @@ def main() -> int:
         xres, yres = src.res
         base_cell = max(abs(float(xres)), abs(float(yres)))
         bounds = src.bounds
-        expected_points = int(src.width * src.height)
+        input_points = int(src.width * src.height)
 
     smrf_params = SmrfParams(
         cell=float(args.cell) if args.cell and args.cell > 0 else base_cell,
@@ -617,16 +731,46 @@ def main() -> int:
         smrf_params.window,
         smrf_params.scalar,
     )
+    smrf_max_pixels = int(args.smrf_max_pixels) if int(args.smrf_max_pixels) > 0 else None
+    smrf_downsample_factor = max(1.0, float(args.smrf_downsample_factor))
+    LOGGER.info(
+        "SMRF bellek limiti: max_pixels=%s downsample_factor=%.2f girdi_nokta=%d",
+        smrf_max_pixels if smrf_max_pixels is not None else "kapali",
+        smrf_downsample_factor,
+        input_points,
+    )
 
     smrf_completed = False
     with tempfile.TemporaryDirectory(prefix="on_isleme_smrf_") as temp_dir:
         raw_dtm_path = Path(temp_dir) / "dtm_smrf_raw.tif"
+        smrf_input_path, expected_points, smrf_base_cell = _prepare_smrf_input(
+            input_path=input_path,
+            temp_dir=Path(temp_dir),
+            max_pixels=smrf_max_pixels,
+            downsample_factor=smrf_downsample_factor,
+            show_progress=bool(args.progress),
+        )
+        if smrf_base_cell > smrf_params.cell:
+            LOGGER.warning(
+                "SMRF cell degeri downsample nedeniyle yukseltildi: %.4f -> %.4f",
+                smrf_params.cell,
+                smrf_base_cell,
+            )
+            smrf_params = replace(smrf_params, cell=smrf_base_cell)
+        if smrf_input_path == input_path:
+            LOGGER.info("SMRF girdi rasteri: orijinal cozumunurluk kullanilacak.")
+        else:
+            LOGGER.warning(
+                "SMRF girdi rasteri downsample edildi: %s (yaklasik nokta=%d)",
+                smrf_input_path,
+                expected_points,
+            )
         LOGGER.info("[2/4] SMRF asamasi baslatiliyor...")
         try:
-            source_dimension = _detect_pdal_height_dimension(input_path)
+            source_dimension = _detect_pdal_height_dimension(smrf_input_path)
             LOGGER.info("SMRF kaynak yukseklik boyutu: %s", source_dimension)
             pipeline = _build_pipeline(
-                input_path=input_path,
+                input_path=smrf_input_path,
                 temp_output_path=raw_dtm_path,
                 params=smrf_params,
                 nodata=float(args.nodata),
