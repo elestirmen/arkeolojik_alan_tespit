@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from egitim_verisi_olusturma import (
+    _is_positive_for_balance,
     _split_windows_for_train_val,
     _validate_tile_generation_params,
 )
@@ -70,3 +71,9 @@ def test_split_windows_spatial_falls_back_when_one_side_empty() -> None:
     assert discarded >= 0
     assert len(train) > 0
     assert len(val) > 0
+
+
+def test_is_positive_for_balance_handles_zero_threshold_correctly() -> None:
+    assert _is_positive_for_balance(positive_ratio=0.0, min_positive_ratio=0.0) is False
+    assert _is_positive_for_balance(positive_ratio=0.01, min_positive_ratio=0.0) is True
+    assert _is_positive_for_balance(positive_ratio=0.01, min_positive_ratio=0.02) is False

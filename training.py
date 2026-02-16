@@ -614,9 +614,15 @@ def train(config: TrainingConfig) -> Path:
     
     # Eğitim döngüsü
     best_val_loss = float("inf")
-    best_val_iou = 0.0
+    best_val_iou = float("-inf")
     patience_counter = 0
-    best_model_path = None
+    best_model_path: Optional[Path] = None
+    best_loss_model_path: Optional[Path] = None
+    best_iou_model_path: Optional[Path] = None
+
+    model_name = f"{config.arch}_{config.encoder}_{config.in_channels}ch"
+    if config.enable_attention:
+        model_name += "_attention"
     
     history = {
         "train_loss": [],
@@ -680,30 +686,25 @@ def train(config: TrainingConfig) -> Path:
         )
         
         # En iyi model kontrolü
-        improved = False
-        if val_loss < best_val_loss - config.min_delta:
+        val_iou = float(val_metrics["iou"])
+        loss_improved = val_loss < best_val_loss - config.min_delta
+        iou_improved = np.isfinite(val_iou) and (val_iou > best_val_iou)
+        improved = loss_improved or iou_improved
+
+        if loss_improved:
             best_val_loss = val_loss
-            improved = True
-        
-        if val_metrics["iou"] > best_val_iou:
-            best_val_iou = val_metrics["iou"]
-            improved = True
-        
+        if iou_improved:
+            best_val_iou = val_iou
+
         if improved:
             patience_counter = 0
-            
-            # Model kaydet
-            model_name = f"{config.arch}_{config.encoder}_{config.in_channels}ch"
-            if config.enable_attention:
-                model_name += "_attention"
-            best_model_path = config.output_dir / f"best_{model_name}.pth"
-            
-            torch.save({
+
+            checkpoint = {
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": val_loss,
-                "val_iou": val_metrics["iou"],
+                "val_iou": val_iou,
                 "config": {
                     "arch": config.arch,
                     "encoder": config.encoder,
@@ -711,9 +712,24 @@ def train(config: TrainingConfig) -> Path:
                     "enable_attention": config.enable_attention,
                     "attention_reduction": config.attention_reduction,
                 },
-            }, best_model_path)
-            
-            LOGGER.info(f"  → En iyi model kaydedildi: {best_model_path.name}")
+            }
+
+            if loss_improved:
+                best_loss_model_path = config.output_dir / f"best_loss_{model_name}.pth"
+                checkpoint["best_metric"] = "val_loss"
+                torch.save(checkpoint, best_loss_model_path)
+                LOGGER.info(f"  → En iyi loss modeli kaydedildi: {best_loss_model_path.name}")
+
+            if iou_improved:
+                best_iou_model_path = config.output_dir / f"best_iou_{model_name}.pth"
+                checkpoint["best_metric"] = "val_iou"
+                torch.save(checkpoint, best_iou_model_path)
+                LOGGER.info(f"  → En iyi IoU modeli kaydedildi: {best_iou_model_path.name}")
+
+                # Backward-compatible default path used by downstream scripts/docs.
+                best_model_path = config.output_dir / f"best_{model_name}.pth"
+                torch.save(checkpoint, best_model_path)
+                LOGGER.info(f"  → Varsayılan en iyi model güncellendi: {best_model_path.name}")
         else:
             patience_counter += 1
             if patience_counter >= config.patience:
@@ -734,10 +750,20 @@ def train(config: TrainingConfig) -> Path:
     LOGGER.info(f"Toplam süre: {total_time/60:.1f} dakika")
     LOGGER.info(f"En iyi Val Loss: {best_val_loss:.4f}")
     LOGGER.info(f"En iyi Val IoU: {best_val_iou:.4f}")
-    LOGGER.info(f"En iyi model: {best_model_path}")
+    LOGGER.info(f"En iyi loss modeli: {best_loss_model_path}")
+    LOGGER.info(f"En iyi IoU modeli: {best_iou_model_path}")
+    LOGGER.info(f"Varsayılan en iyi model: {best_model_path}")
     LOGGER.info(f"Eğitim geçmişi: {history_path}")
     LOGGER.info("=" * 60)
-    
+
+    if best_model_path is None:
+        if best_iou_model_path is not None:
+            best_model_path = best_iou_model_path
+        elif best_loss_model_path is not None:
+            best_model_path = best_loss_model_path
+        else:
+            raise RuntimeError("Hiç checkpoint kaydedilmedi; eğitim çıktıları oluşturulamadı.")
+
     return best_model_path
 
 

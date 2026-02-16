@@ -163,6 +163,24 @@ def _split_windows_for_train_val(
     return train_windows, val_windows, boundary_discarded, "spatial"
 
 
+def _is_positive_for_balance(
+    positive_ratio: float,
+    min_positive_ratio: float,
+) -> bool:
+    """
+    Decide whether a tile is positive for balancing.
+
+    Bug fix:
+    - `min_positive_ratio=0.0` should still treat fully empty masks (`ratio=0`) as negative.
+    """
+    if positive_ratio <= 0.0:
+        return False
+    threshold = float(min_positive_ratio)
+    if threshold <= 0.0:
+        return True
+    return positive_ratio >= threshold
+
+
 def create_training_tiles(
     input_tif: Path,
     mask_tif: Path,
@@ -245,6 +263,7 @@ def create_training_tiles(
         "selected_positive_count": 0,
         "selected_negative_count": 0,
         "discarded_negative_count": 0,
+        "ignored_low_positive_count": 0,
         "split_mode_requested": split_mode,
         "split_mode_effective": split_mode,
         "split_boundary_discarded": 0,
@@ -297,6 +316,7 @@ def create_training_tiles(
             LOGGER.info("\nTile'lar pozitif/negatif olarak analiz ediliyor...")
             positive_windows = []
             negative_windows = []
+            ignored_low_positive = 0
             
             for row_off, col_off in tqdm(windows, desc="Analiz"):
                 window = Window(col_off, row_off, tile_size, tile_size)
@@ -306,8 +326,14 @@ def create_training_tiles(
                     mask = mask_src.read(1, window=window).astype(np.float32)
                     positive_ratio = np.sum(mask > 0) / mask.size
                     
-                    if positive_ratio >= min_positive_ratio:
+                    if _is_positive_for_balance(
+                        positive_ratio=positive_ratio,
+                        min_positive_ratio=min_positive_ratio,
+                    ):
                         positive_windows.append((row_off, col_off))
+                    elif positive_ratio > 0:
+                        # Contains labels but does not meet positivity threshold for training tiles.
+                        ignored_low_positive += 1
                     else:
                         negative_windows.append((row_off, col_off))
                 except Exception:
@@ -315,9 +341,15 @@ def create_training_tiles(
             
             stats["original_positive_count"] = len(positive_windows)
             stats["original_negative_count"] = len(negative_windows)
+            stats["ignored_low_positive_count"] = int(ignored_low_positive)
             
             LOGGER.info(f"Pozitif tile (içerik var): {len(positive_windows)}")
             LOGGER.info(f"Negatif tile (sadece arka plan): {len(negative_windows)}")
+            if ignored_low_positive > 0:
+                LOGGER.info(
+                    "Pozitif içerikli ama min_positive_ratio altında kalan tile: %d",
+                    ignored_low_positive,
+                )
             
             # Negatif tile'ları örnekle
             if len(positive_windows) > 0:
