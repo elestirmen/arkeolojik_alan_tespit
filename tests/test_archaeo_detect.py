@@ -6,11 +6,14 @@ Testleri çalıştırmak için: pytest tests/ -v
 """
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import pytest
+import torch
 
 # Proje kök dizinini path'e ekle
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -30,6 +33,8 @@ from archaeo_detect import (
     generate_windows,
     build_filename_with_params,
     compute_fused_probability,
+    AttentionWrapper,
+    load_weights,
 )
 
 
@@ -466,6 +471,53 @@ class TestFusionProbability:
         # Her iki değer de NaN olan yerlerde sonuç NaN olmalı
         # En az birinin geçerli olduğu yerlerde hesaplanmalı
         assert np.isfinite(fused[0, 0])
+
+
+# ============================================================================
+# Weight Loading Compatibility Testleri
+# ============================================================================
+
+class TestWeightLoadingCompatibility:
+    """load_weights fonksiyonu icin uyumluluk testleri."""
+
+    @staticmethod
+    def _dummy_base_model(in_channels: int = 12) -> torch.nn.Module:
+        class DummyBaseModel(torch.nn.Module):
+            def __init__(self, channels: int):
+                super().__init__()
+                self.encoder = torch.nn.Module()
+                self.encoder.conv1 = torch.nn.Conv2d(channels, 8, kernel_size=3, padding=1)
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        return DummyBaseModel(in_channels)
+
+    def test_load_weights_accepts_model_state_dict_checkpoint(self):
+        """Egitim checkpoint formatindaki model_state_dict yuklenebilmeli."""
+        model = self._dummy_base_model(in_channels=12)
+        tmp_dir = Path("cache") / f"weight_loading_{uuid4().hex}"
+        tmp_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            ckpt_path = tmp_dir / "checkpoint_model_state_dict.pth"
+            torch.save({"epoch": 1, "model_state_dict": model.state_dict()}, ckpt_path)
+
+            load_weights(model, ckpt_path, map_location=torch.device("cpu"))
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_load_weights_accepts_attention_wrapper_model(self):
+        """AttentionWrapper iceren modellerde encoder kanali dogru cozulmeli."""
+        model = AttentionWrapper(self._dummy_base_model(in_channels=12), in_channels=12)
+        tmp_dir = Path("cache") / f"weight_loading_{uuid4().hex}"
+        tmp_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            ckpt_path = tmp_dir / "checkpoint_attention_wrapper.pth"
+            torch.save({"state_dict": model.state_dict()}, ckpt_path)
+
+            load_weights(model, ckpt_path, map_location=torch.device("cpu"))
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ============================================================================

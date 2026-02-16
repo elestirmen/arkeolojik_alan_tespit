@@ -1896,33 +1896,100 @@ def load_weights(
     map_location: torch.device,
 ) -> None:
     """Load model weights with helpful diagnostics on mismatch."""
+    def _resolve_expected_in_channels(target_model: torch.nn.Module) -> Optional[int]:
+        queue: List[torch.nn.Module] = [target_model]
+        visited: set[int] = set()
+        while queue:
+            current = queue.pop(0)
+            obj_id = id(current)
+            if obj_id in visited:
+                continue
+            visited.add(obj_id)
+
+            encoder = getattr(current, "encoder", None)
+            conv1 = getattr(encoder, "conv1", None) if encoder is not None else None
+            weight = getattr(conv1, "weight", None) if conv1 is not None else None
+            if isinstance(weight, torch.Tensor) and weight.ndim == 4:
+                return int(weight.shape[1])
+
+            for attr in ("base_model", "module"):
+                nested = getattr(current, attr, None)
+                if isinstance(nested, torch.nn.Module):
+                    queue.append(nested)
+        return None
+
+    def _state_first_conv_in_channels(state_dict: Dict[str, Any]) -> Optional[int]:
+        preferred_suffixes = (
+            "encoder.conv1.weight",
+            "base_model.encoder.conv1.weight",
+            "module.encoder.conv1.weight",
+            "module.base_model.encoder.conv1.weight",
+        )
+        for suffix in preferred_suffixes:
+            for key, tensor in state_dict.items():
+                if isinstance(key, str) and key.endswith(suffix):
+                    if isinstance(tensor, torch.Tensor) and tensor.ndim == 4:
+                        return int(tensor.shape[1])
+        for tensor in state_dict.values():
+            if isinstance(tensor, torch.Tensor) and tensor.ndim == 4:
+                return int(tensor.shape[1])
+        return None
+
     if not weights_path.exists():
         raise FileNotFoundError(f"Weights not found: {weights_path}")
-    state = torch.load(weights_path, map_location=map_location)
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
+    state_obj = torch.load(weights_path, map_location=map_location)
+    state = state_obj
+    if isinstance(state_obj, dict):
+        for key in ("state_dict", "model_state_dict"):
+            maybe_state = state_obj.get(key)
+            if isinstance(maybe_state, dict):
+                state = maybe_state
+                break
     if not isinstance(state, dict):
         raise RuntimeError("Weights file did not contain a valid state dict.")
+    if not any(isinstance(v, torch.Tensor) for v in state.values()):
+        raise RuntimeError(
+            "Weights file does not contain tensor weights. "
+            "Expected a state dict or a checkpoint with 'state_dict' / 'model_state_dict'."
+        )
 
-    expected_in_ch = model.encoder.conv1.weight.shape[1]
-    first_conv_key = None
-    for key, tensor in state.items():
-        if tensor.ndim == 4:
-            first_conv_key = key
-            break
-    if first_conv_key:
-        in_channels = state[first_conv_key].shape[1]
+    expected_in_ch = _resolve_expected_in_channels(model)
+    if expected_in_ch is None:
+        raise RuntimeError(
+            "Could not determine encoder input channels from model. "
+            "Expected an encoder.conv1 weight tensor."
+        )
+
+    in_channels = _state_first_conv_in_channels(state)
+    if in_channels is not None:
         if in_channels != expected_in_ch:
             raise RuntimeError(
                 f"Encoder expects {expected_in_ch} channels but weights provide {in_channels}. "
-                "Ensure the model was trained with nine-channel input."
+                "Ensure training and inference use the same channel configuration."
             )
 
-    try:
-        model.load_state_dict(state, strict=True)
-    except RuntimeError:
-        stripped_state = {k.replace("module.", "", 1): v for k, v in state.items()}
-        model.load_state_dict(stripped_state, strict=True)
+    candidate_states: List[Dict[str, Any]] = [state]
+    stripped_state: Dict[str, Any] = {}
+    stripped_changed = False
+    for key, value in state.items():
+        if isinstance(key, str) and key.startswith("module."):
+            stripped_state[key.replace("module.", "", 1)] = value
+            stripped_changed = True
+        else:
+            stripped_state[key] = value
+    if stripped_changed:
+        candidate_states.append(stripped_state)
+
+    last_error: Optional[RuntimeError] = None
+    for candidate in candidate_states:
+        try:
+            model.load_state_dict(candidate, strict=True)
+            return
+        except RuntimeError as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise RuntimeError(f"Unable to load weights from {weights_path}: {last_error}") from last_error
 
 
 def generate_windows(
