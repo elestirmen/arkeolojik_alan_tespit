@@ -15,6 +15,7 @@ This project combines **deep learning** and **classical image processing** metho
 - [🎯 What It Does](#-what-it-does)
 - [🚀 Quick Start](#-quick-start)
 - [📦 Installation](#-installation)
+- [DSM to DTM Preprocessing (`on_isleme.py`)](#dsm-to-dtm-preprocessing-on_islemepy)
 - [🎮 Usage](#-usage)
 - [⚙️ Configuration](#️-configuration)
 - [📂 Output Files](#-output-files)
@@ -219,6 +220,48 @@ GPU check:
 import torch
 print(torch.cuda.is_available())  # Should be True
 ```
+
+---
+
+## DSM to DTM Preprocessing (`on_isleme.py`)
+
+`on_isleme.py` converts a DSM GeoTIFF into a DTM GeoTIFF.
+
+Current processing flow in code:
+- `[1/4]` Read input raster metadata.
+- `[2/4]` Run PDAL SMRF pipeline.
+- `[3/4]` Snap output DTM to the exact source grid (resolution/transform/extent).
+- `[4/4]` If SMRF fails and fallback is enabled, run morphological fallback DTM.
+
+### Quick Run
+
+```bash
+python on_isleme.py \
+  --input veri/karlik_dag_dsm.tif \
+  --output veri/karlik_dag_dtm_smrf.tif \
+  --progress
+```
+
+### Key CLI Parameters
+
+- `--input`, `--output`
+- `--cell`, `--slope`, `--threshold`, `--window`, `--scalar` (SMRF parameters)
+- `--allow-fallback` / `--no-fallback`
+- `--opening-meters`, `--smooth-sigma-px`, `--tile-size` (fallback tuning)
+- `--nodata`, `--compression`, `--log-level`
+- `--progress` / `--no-progress`
+
+### Dependencies and Environment Notes
+
+- SMRF requires Python PDAL module in the same environment:
+
+```bash
+conda install -n <env_name> -c conda-forge pdal python-pdal
+```
+
+- Fallback method requires `scipy`.
+- On Windows, keep geospatial stack consistent in one environment (avoid mixing `pip` `gdal/rasterio` with conda GDAL libraries), otherwise GDAL plugin DLL errors may occur.
+- Runtime defaults are defined in `on_isleme.py` (`CONFIG` dict) and can be overridden via CLI.
 
 ---
 
