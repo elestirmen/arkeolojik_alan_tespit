@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
@@ -79,6 +80,9 @@ CONFIG: dict[str, Any] = {
     # SMRF tiled modunda karo bindirme miktari (piksel).
     # 0 ise otomatik hesaplanir (window/cell tabanli).
     "smrf_overlap_px": 0,
+    # SMRF tiled modunda paralel karo isci sayisi.
+    # 1 => seri (varsayilan). >1 => ProcessPool ile paralel.
+    "smrf_tile_workers": 4,
     # SMRF hata verirse fallback (morfolojik DTM) kullanilsin mi?
     "allow_fallback": True,
     # Fallback morfolojik acma pencere boyutu (metre).
@@ -331,6 +335,124 @@ def _estimate_las_cell_from_header(input_las_path: Path, fallback_cell: float) -
         return est_cell, f"otomatik tahmin (n={point_count}, span=({span_x:.1f}m,{span_y:.1f}m))"
     except (ValueError, struct.error) as exc:
         return fallback_cell, f"header parse hatasi ({exc})"
+
+
+def _run_smrf_tiled_worker(
+    input_dsm_path: str,
+    temp_dir: str,
+    params: SmrfParams,
+    nodata: float,
+    source_dimension: str,
+    task: tuple[int, int, int, int, int, int, int, int, int],
+) -> tuple[int, int, int, int, int, str, str]:
+    """
+    Tek bir SMRF karosunu izole process'te isler ve cekirdek sonucu .npy olarak yazar.
+    """
+    (
+        tile_idx,
+        row0,
+        row1,
+        col0,
+        col1,
+        pad_row0,
+        pad_row1,
+        pad_col0,
+        pad_col1,
+    ) = task
+
+    temp_dir_path = Path(temp_dir)
+    input_path = Path(input_dsm_path)
+    core_h = row1 - row0
+    core_w = col1 - col0
+    pad_h = pad_row1 - pad_row0
+    pad_w = pad_col1 - pad_col0
+    core_window = Window(col0, row0, core_w, core_h)
+    pad_window = Window(pad_col0, pad_row0, pad_w, pad_h)
+
+    tile_input_path = temp_dir_path / f"smrf_tile_{tile_idx:06d}_in.tif"
+    tile_raw_path = temp_dir_path / f"smrf_tile_{tile_idx:06d}_raw.tif"
+    core_arr_path = temp_dir_path / f"smrf_tile_{tile_idx:06d}_core.npy"
+    core_mask_path = temp_dir_path / f"smrf_tile_{tile_idx:06d}_mask.npy"
+
+    with rasterio.open(input_path) as src:
+        if src.crs is None:
+            raise ValueError(f"Girdi raster CRS icermiyor: {input_path}")
+
+        arr_ma = src.read(1, window=pad_window, masked=True)
+        src_nodata = src.nodata if src.nodata is not None else nodata
+        arr = np.ma.filled(arr_ma.astype(np.float32), src_nodata)
+        tile_transform = src.window_transform(pad_window)
+        tile_bounds_tuple = src.window_bounds(pad_window)
+        tile_bounds = rasterio.coords.BoundingBox(
+            left=tile_bounds_tuple[0],
+            bottom=tile_bounds_tuple[1],
+            right=tile_bounds_tuple[2],
+            top=tile_bounds_tuple[3],
+        )
+
+        tile_profile = src.profile.copy()
+        tile_profile.pop("blockxsize", None)
+        tile_profile.pop("blockysize", None)
+        tile_profile.update(
+            width=pad_w,
+            height=pad_h,
+            transform=tile_transform,
+            count=1,
+            dtype="float32",
+            nodata=src_nodata,
+            compress="LZW",
+            predictor=3,
+            tiled=False,
+            BIGTIFF="IF_SAFER",
+        )
+        with rasterio.open(tile_input_path, "w", **tile_profile) as tile_dst:
+            tile_dst.write(arr, 1)
+            tile_mask = src.read_masks(1, window=pad_window)
+            tile_dst.write_mask(tile_mask)
+
+        pipeline = _build_pipeline(
+            input_path=tile_input_path,
+            temp_output_path=tile_raw_path,
+            params=params,
+            nodata=nodata,
+            bounds=tile_bounds,
+            source_dimension=source_dimension,
+        )
+        _run_pdal_pipeline(
+            pipeline=pipeline,
+            show_progress=False,
+            expected_points=pad_w * pad_h,
+            log_completion=False,
+            status_label=None,
+            log_interval_sec=1_000_000.0,
+        )
+
+        core_arr = np.full((core_h, core_w), nodata, dtype=np.float32)
+        with rasterio.open(tile_raw_path) as tile_raw:
+            reproject(
+                source=rasterio.band(tile_raw, 1),
+                destination=core_arr,
+                src_transform=tile_raw.transform,
+                src_crs=tile_raw.crs if tile_raw.crs is not None else src.crs,
+                src_nodata=tile_raw.nodata if tile_raw.nodata is not None else nodata,
+                dst_transform=src.window_transform(core_window),
+                dst_crs=src.crs,
+                dst_nodata=nodata,
+                resampling=Resampling.bilinear,
+                num_threads=2,
+            )
+        core_mask = src.read_masks(1, window=core_window)
+
+    np.save(core_arr_path, core_arr, allow_pickle=False)
+    np.save(core_mask_path, core_mask, allow_pickle=False)
+
+    try:
+        tile_input_path.unlink(missing_ok=True)
+        tile_raw_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    return tile_idx, row0, col0, core_h, core_w, str(core_arr_path), str(core_mask_path)
 
 
 def _run_pdal_pipeline(
@@ -636,6 +758,7 @@ def _compute_smrf_tiled(
     source_dimension: str,
     tile_size: int,
     overlap_px: int,
+    tile_workers: int,
     show_progress: bool,
     temp_dir: Path,
 ) -> None:
@@ -649,6 +772,17 @@ def _compute_smrf_tiled(
     overlap_px = max(0, int(overlap_px))
     tile_size = max(128, int(tile_size))
 
+    tile_workers = max(1, int(tile_workers))
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    if tile_workers > cpu_count:
+        LOGGER.warning(
+            "SMRF tiled worker sayisi CPU cekirdegi ustunde (%d>%d). %d'e kisitlandi.",
+            tile_workers,
+            cpu_count,
+            cpu_count,
+        )
+        tile_workers = cpu_count
+
     with rasterio.open(input_dsm_path) as src:
         if src.count < 1:
             raise ValueError(f"Girdi raster en az bir bant icermeli: {input_dsm_path}")
@@ -657,10 +791,22 @@ def _compute_smrf_tiled(
 
         total_rows = src.height
         total_cols = src.width
-        tiles_y = (total_rows + tile_size - 1) // tile_size
-        tiles_x = (total_cols + tile_size - 1) // tile_size
-        total_tiles = tiles_y * tiles_x
+        tasks: list[tuple[int, int, int, int, int, int, int, int, int]] = []
+        tile_idx = 0
+        for row0 in range(0, total_rows, tile_size):
+            row1 = min(row0 + tile_size, total_rows)
+            for col0 in range(0, total_cols, tile_size):
+                col1 = min(col0 + tile_size, total_cols)
+                tile_idx += 1
+                pad_row0 = max(0, row0 - overlap_px)
+                pad_row1 = min(total_rows, row1 + overlap_px)
+                pad_col0 = max(0, col0 - overlap_px)
+                pad_col1 = min(total_cols, col1 + overlap_px)
+                tasks.append(
+                    (tile_idx, row0, row1, col0, col1, pad_row0, pad_row1, pad_col0, pad_col1)
+                )
 
+        total_tiles = len(tasks)
         profile = src.profile.copy()
         profile.pop("blockxsize", None)
         profile.pop("blockysize", None)
@@ -675,10 +821,11 @@ def _compute_smrf_tiled(
         )
 
         LOGGER.info(
-            "SMRF tiled basladi: tile=%d overlap=%d toplam_karo=%d",
+            "SMRF tiled basladi: tile=%d overlap=%d toplam_karo=%d workers=%d",
             tile_size,
             overlap_px,
             total_tiles,
+            tile_workers,
         )
 
         pbar = _open_progress(
@@ -687,25 +834,27 @@ def _compute_smrf_tiled(
             unit="tile",
             enabled=show_progress,
         )
-        tile_idx = 0
         tiled_start = time.time()
+        completed_tiles = 0
 
         try:
             with rasterio.open(output_dtm_path, "w", **profile) as dst:
-                for row0 in range(0, total_rows, tile_size):
-                    row1 = min(row0 + tile_size, total_rows)
-                    for col0 in range(0, total_cols, tile_size):
-                        col1 = min(col0 + tile_size, total_cols)
-                        tile_idx += 1
-
+                if tile_workers == 1:
+                    for task in tasks:
+                        (
+                            tile_idx,
+                            row0,
+                            row1,
+                            col0,
+                            col1,
+                            pad_row0,
+                            pad_row1,
+                            pad_col0,
+                            pad_col1,
+                        ) = task
                         core_h = row1 - row0
                         core_w = col1 - col0
                         core_window = Window(col0, row0, core_w, core_h)
-
-                        pad_row0 = max(0, row0 - overlap_px)
-                        pad_row1 = min(total_rows, row1 + overlap_px)
-                        pad_col0 = max(0, col0 - overlap_px)
-                        pad_col1 = min(total_cols, col1 + overlap_px)
                         pad_h = pad_row1 - pad_row0
                         pad_w = pad_col1 - pad_col0
                         pad_window = Window(pad_col0, pad_row0, pad_w, pad_h)
@@ -788,18 +937,112 @@ def _compute_smrf_tiled(
                         except OSError:
                             pass
 
+                        completed_tiles += 1
                         if pbar is not None:
                             pbar.update(1)
                             elapsed = max(1e-6, time.time() - tiled_start)
-                            avg_tile = elapsed / max(tile_idx, 1)
-                            remaining = max(0, total_tiles - tile_idx)
+                            avg_tile = elapsed / max(completed_tiles, 1)
+                            remaining = max(0, total_tiles - completed_tiles)
                             eta_sec = int(round(avg_tile * remaining))
                             _set_progress_postfix(
                                 pbar,
                                 f"avg={avg_tile:.2f}s/tile eta={eta_sec}s",
                             )
-                        elif tile_idx % 10 == 0 or tile_idx == total_tiles:
-                            LOGGER.info("SMRF tiled ilerleme: %d/%d karo", tile_idx, total_tiles)
+                        elif completed_tiles % 10 == 0 or completed_tiles == total_tiles:
+                            LOGGER.info(
+                                "SMRF tiled ilerleme: %d/%d karo",
+                                completed_tiles,
+                                total_tiles,
+                            )
+                else:
+                    pending: dict[Any, int] = {}
+                    tasks_iter = iter(tasks)
+                    max_inflight = max(tile_workers, tile_workers * 2)
+                    last_wait_log = 0.0
+
+                    def _submit_next(executor: ProcessPoolExecutor) -> bool:
+                        try:
+                            next_task = next(tasks_iter)
+                        except StopIteration:
+                            return False
+                        next_idx = next_task[0]
+                        future = executor.submit(
+                            _run_smrf_tiled_worker,
+                            str(input_dsm_path),
+                            str(temp_dir),
+                            params,
+                            nodata,
+                            source_dimension,
+                            next_task,
+                        )
+                        pending[future] = next_idx
+                        return True
+
+                    with ProcessPoolExecutor(max_workers=tile_workers) as executor:
+                        while len(pending) < max_inflight and _submit_next(executor):
+                            pass
+
+                        while pending:
+                            done, _ = wait(
+                                tuple(pending.keys()),
+                                timeout=2.0,
+                                return_when=FIRST_COMPLETED,
+                            )
+                            if not done:
+                                elapsed = time.time() - tiled_start
+                                if elapsed - last_wait_log >= 30.0:
+                                    LOGGER.info(
+                                        "SMRF tiled devam ediyor... tamamlanan=%d/%d aktif_is=%d",
+                                        completed_tiles,
+                                        total_tiles,
+                                        len(pending),
+                                    )
+                                    last_wait_log = elapsed
+                                continue
+
+                            for future in done:
+                                pending.pop(future, None)
+                                (
+                                    done_idx,
+                                    row0,
+                                    col0,
+                                    core_h,
+                                    core_w,
+                                    core_arr_path,
+                                    core_mask_path,
+                                ) = future.result()
+                                core_window = Window(col0, row0, core_w, core_h)
+                                core_arr = np.load(core_arr_path, allow_pickle=False)
+                                core_mask = np.load(core_mask_path, allow_pickle=False)
+                                dst.write(core_arr.astype(np.float32, copy=False), 1, window=core_window)
+                                dst.write_mask(core_mask.astype(np.uint8, copy=False), window=core_window)
+
+                                try:
+                                    Path(core_arr_path).unlink(missing_ok=True)
+                                    Path(core_mask_path).unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+
+                                completed_tiles += 1
+                                if pbar is not None:
+                                    pbar.update(1)
+                                    elapsed = max(1e-6, time.time() - tiled_start)
+                                    avg_tile = elapsed / max(completed_tiles, 1)
+                                    remaining = max(0, total_tiles - completed_tiles)
+                                    eta_sec = int(round(avg_tile * remaining))
+                                    _set_progress_postfix(
+                                        pbar,
+                                        f"done={completed_tiles}/{total_tiles} active={len(pending)} "
+                                        f"last_tile={done_idx} avg={avg_tile:.2f}s/tile eta={eta_sec}s",
+                                    )
+                                elif completed_tiles % 10 == 0 or completed_tiles == total_tiles:
+                                    LOGGER.info(
+                                        "SMRF tiled ilerleme: %d/%d karo",
+                                        completed_tiles,
+                                        total_tiles,
+                                    )
+                                while len(pending) < max_inflight and _submit_next(executor):
+                                    pass
         finally:
             if pbar is not None:
                 pbar.close()
@@ -1119,6 +1362,15 @@ def _parse_args() -> argparse.Namespace:
         help="SMRF tiled modunda karo bindirmesi (piksel). 0 ise otomatik.",
     )
     parser.add_argument(
+        "--smrf-tile-workers",
+        type=int,
+        default=int(CONFIG["smrf_tile_workers"]),
+        help=(
+            "SMRF tiled modunda paralel karo isci sayisi. "
+            "1: seri, 2-4: genelde daha hizli (RAM ve disk I/O artar)."
+        ),
+    )
+    parser.add_argument(
         "--allow-fallback",
         dest="allow_fallback",
         action="store_true",
@@ -1283,6 +1535,7 @@ def main() -> int:
     smrf_tiled = bool(args.smrf_tiled)
     smrf_tile_size = max(128, int(args.smrf_tile_size))
     smrf_overlap_px_arg = max(0, int(args.smrf_overlap_px))
+    smrf_tile_workers = max(1, int(args.smrf_tile_workers))
     LOGGER.info(
         "SMRF bellek limiti: max_pixels=%s downsample_factor=%.2f girdi_nokta=%d",
         smrf_max_pixels if smrf_max_pixels is not None else "kapali",
@@ -1290,10 +1543,11 @@ def main() -> int:
         input_points,
     )
     LOGGER.info(
-        "SMRF isleme modu: tiled=%s tile_size=%d overlap_px=%d",
+        "SMRF isleme modu: tiled=%s tile_size=%d overlap_px=%d tile_workers=%d",
         smrf_tiled,
         smrf_tile_size,
         smrf_overlap_px_arg,
+        smrf_tile_workers,
     )
 
     smrf_completed = False
@@ -1331,6 +1585,7 @@ def main() -> int:
                         source_dimension=source_dimension,
                         tile_size=smrf_tile_size,
                         overlap_px=smrf_overlap_px,
+                        tile_workers=smrf_tile_workers,
                         show_progress=bool(args.progress),
                         temp_dir=Path(temp_dir),
                     )

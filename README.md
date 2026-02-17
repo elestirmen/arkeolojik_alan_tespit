@@ -261,6 +261,7 @@ python on_isleme.py \
   - LAS/LAZ input: if `--cell` is not provided, cell is auto-estimated from LAS header (point count + XY extent).
 - `--smrf-max-pixels`, `--smrf-downsample-factor` (SMRF RAM control)
 - `--smrf-tiled`, `--smrf-tile-size`, `--smrf-overlap-px` (quality-preserving low-RAM SMRF)
+- `--smrf-tile-workers` (parallel tile workers for SMRF tiled mode)
 - `--allow-fallback` / `--no-fallback`
 - `--opening-meters`, `--smooth-sigma-px`, `--tile-size` (fallback tuning)
 - `--nodata`, `--compression`, `--log-level`
