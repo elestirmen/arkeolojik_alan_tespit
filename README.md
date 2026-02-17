@@ -225,7 +225,7 @@ print(torch.cuda.is_available())  # Should be True
 
 ## DSM to DTM Preprocessing (`on_isleme.py`)
 
-`on_isleme.py` converts a DSM GeoTIFF into a DTM GeoTIFF.
+`on_isleme.py` converts DSM GeoTIFF or LAS/LAZ point cloud input into a DTM GeoTIFF.
 
 Current processing flow in code:
 - `[1/4]` Read input raster metadata.
@@ -242,15 +242,30 @@ python on_isleme.py \
   --progress
 ```
 
+LAS/LAZ input example:
+
+```bash
+python on_isleme.py \
+  --input veri/karlik_dag_dsm.las \
+  --output veri/karlik_dag_dtm_smrf.tif \
+  --method smrf \
+  --cell 0.5 \
+  --progress
+```
+
 ### Key CLI Parameters
 
 - `--input`, `--output`
+- `--method` (`auto` | `smrf` | `fallback`, default: `fallback`)
 - `--cell`, `--slope`, `--threshold`, `--window`, `--scalar` (SMRF parameters)
+  - LAS/LAZ input: if `--cell` is not provided, cell is auto-estimated from LAS header (point count + XY extent).
 - `--smrf-max-pixels`, `--smrf-downsample-factor` (SMRF RAM control)
+- `--smrf-tiled`, `--smrf-tile-size`, `--smrf-overlap-px` (quality-preserving low-RAM SMRF)
 - `--allow-fallback` / `--no-fallback`
 - `--opening-meters`, `--smooth-sigma-px`, `--tile-size` (fallback tuning)
 - `--nodata`, `--compression`, `--log-level`
 - `--progress` / `--no-progress`
+- Note: `fallback` is raster-only; LAS/LAZ input runs with SMRF.
 
 ### Dependencies and Environment Notes
 
@@ -261,7 +276,21 @@ conda install -n <env_name> -c conda-forge pdal python-pdal
 ```
 
 - Fallback method requires `scipy`.
+- LAS/LAZ input requires PDAL (`readers.las` + `writers.gdal`).
 - Default `smrf_max_pixels` is `120000000`; if input exceeds this, SMRF input is downsampled automatically to reduce memory pressure.
+- `smrf_tiled=true` keeps quality by processing SMRF in overlapping tiles instead of downsampling.
+- For large files and quality-critical runs, prefer:
+
+```bash
+python on_isleme.py \
+  --method smrf \
+  --smrf-tiled \
+  --smrf-max-pixels 0 \
+  --smrf-downsample-factor 1.0 \
+  --smrf-tile-size 4096 \
+  --smrf-overlap-px 0
+```
+
 - On Windows, keep geospatial stack consistent in one environment (avoid mixing `pip` `gdal/rasterio` with conda GDAL libraries), otherwise GDAL plugin DLL errors may occur.
 - Runtime defaults are defined in `on_isleme.py` (`CONFIG` dict) and can be overridden via CLI.
 
