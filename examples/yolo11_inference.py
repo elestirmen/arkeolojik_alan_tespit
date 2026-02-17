@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 import rasterio
@@ -335,7 +335,7 @@ def main() -> None:
     geometries: List[Optional[Polygon]] = []
     total_tiles = 0
 
-    def run_predict(image: np.ndarray, name: str) -> "ultralytics.engine.results.Results":  # type: ignore[name-defined]
+    def run_predict(image: np.ndarray, name: str) -> Any:
         kwargs = predict_kwargs.copy()
         kwargs["name"] = name
         results = model.predict(image, **kwargs)

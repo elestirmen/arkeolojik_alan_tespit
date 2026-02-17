@@ -15,7 +15,7 @@ This project combines **deep learning** and **classical image processing** metho
 - [🎯 What It Does](#-what-it-does)
 - [🚀 Quick Start](#-quick-start)
 - [📦 Installation](#-installation)
-- [DSM to DTM Preprocessing (`on_isleme.py`)](#dsm-to-dtm-preprocessing-on_islemepy)
+- [DSM to DTM Preprocessing (`veri_on_isleme.py`)](#dsm-to-dtm-preprocessing-veri_on_islemepy)
 - [🎮 Usage](#-usage)
 - [⚙️ Configuration](#️-configuration)
 - [📂 Output Files](#-output-files)
@@ -223,9 +223,9 @@ print(torch.cuda.is_available())  # Should be True
 
 ---
 
-## DSM to DTM Preprocessing (`on_isleme.py`)
+## DSM to DTM Preprocessing (`veri_on_isleme.py`)
 
-`on_isleme.py` converts DSM GeoTIFF or LAS/LAZ point cloud input into a DTM GeoTIFF.
+`veri_on_isleme.py` converts DSM GeoTIFF or LAS/LAZ point cloud input into a DTM GeoTIFF.
 
 Current processing flow in code:
 - `[1/4]` Read input raster metadata.
@@ -236,7 +236,7 @@ Current processing flow in code:
 ### Quick Run
 
 ```bash
-python on_isleme.py \
+python veri_on_isleme.py \
   --input veri/karlik_dag_dsm.tif \
   --output veri/karlik_dag_dtm_smrf.tif \
   --progress
@@ -245,7 +245,7 @@ python on_isleme.py \
 LAS/LAZ input example:
 
 ```bash
-python on_isleme.py \
+python veri_on_isleme.py \
   --input veri/karlik_dag_dsm.las \
   --output veri/karlik_dag_dtm_smrf.tif \
   --method smrf \
@@ -256,7 +256,7 @@ python on_isleme.py \
 LAS/LAZ tiled example (large files):
 
 ```bash
-python on_isleme.py \
+python veri_on_isleme.py \
   --input veri/karlik_dag_dsm.las \
   --output veri/karlik_dag_dtm_smrf.tif \
   --method smrf \
@@ -298,7 +298,7 @@ conda install -n <env_name> -c conda-forge pdal python-pdal
 - For large files and quality-critical runs, prefer:
 
 ```bash
-python on_isleme.py \
+python veri_on_isleme.py \
   --method smrf \
   --smrf-tiled \
   --smrf-max-pixels 0 \
@@ -308,7 +308,7 @@ python on_isleme.py \
 ```
 
 - On Windows, keep geospatial stack consistent in one environment (avoid mixing `pip` `gdal/rasterio` with conda GDAL libraries), otherwise GDAL plugin DLL errors may occur.
-- Runtime defaults are defined in `on_isleme.py` (`CONFIG` dict) and can be overridden via CLI.
+- Runtime defaults are defined in `veri_on_isleme.py` (`CONFIG` dict) and can be overridden via CLI.
 
 ---
 

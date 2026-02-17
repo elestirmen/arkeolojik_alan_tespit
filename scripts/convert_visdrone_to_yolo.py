@@ -86,7 +86,7 @@ def convert_visdrone_to_yolo(
                 from PIL import Image
                 with Image.open(img_file) as img:
                     img_width, img_height = img.size
-            except Exception as e:
+            except Exception:
                 print(f"    ⚠️ Görüntü okunamadı: {img_file}")
                 continue
             
@@ -148,25 +148,25 @@ def convert_visdrone_to_yolo(
     # data.yaml oluştur
     data_yaml = output_dir / "data.yaml"
     with open(data_yaml, 'w') as f:
-        f.write(f"# VisDrone → YOLO dönüştürülmüş veri seti\n\n")
+        f.write("# VisDrone → YOLO dönüştürülmüş veri seti\n\n")
         f.write(f"path: {output_dir.absolute()}\n")
-        f.write(f"train: images/train\n")
-        f.write(f"val: images/val\n")
-        f.write(f"test: images/val  # Test seti yok, val kullan\n\n")
-        f.write(f"# Sınıflar (VisDrone classes 1-10)\n")
-        f.write(f"names:\n")
+        f.write("train: images/train\n")
+        f.write("val: images/val\n")
+        f.write("test: images/val  # Test seti yok, val kullan\n\n")
+        f.write("# Sınıflar (VisDrone classes 1-10)\n")
+        f.write("names:\n")
         # 0 ve 11'i çıkardık, kalan 1-10 -> 0-9
         for class_id in range(1, 11):
             yolo_id = class_id - 1
             class_name = VISDRONE_CLASSES[class_id]
             f.write(f"  {yolo_id}: {class_name}\n")
-        f.write(f"\n# Toplam sınıf sayısı\n")
-        f.write(f"nc: 10\n")
+        f.write("\n# Toplam sınıf sayısı\n")
+        f.write("nc: 10\n")
     
-    print(f"\n✅ Dönüştürme tamamlandı!")
+    print("\n✅ Dönüştürme tamamlandı!")
     print(f"   YOLO veri seti: {output_dir}")
     print(f"   data.yaml: {data_yaml}")
-    print(f"\n🚀 Eğitim başlatmak için:")
+    print("\n🚀 Eğitim başlatmak için:")
     print(f"   yolo segment train data={data_yaml} model=yolo11s-seg.pt epochs=100")
 
 

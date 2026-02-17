@@ -571,8 +571,17 @@ def train(config: TrainingConfig) -> Path:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     
     # Dataset ve DataLoader
-    train_dataset = ArchaeologyDataset(config.data_dir / "train", augment=True)
-    val_dataset = ArchaeologyDataset(config.data_dir / "val", augment=False)
+    file_format = _infer_file_format(config.data_dir)
+    train_dataset = ArchaeologyDataset(
+        config.data_dir / "train",
+        augment=True,
+        file_format=file_format,
+    )
+    val_dataset = ArchaeologyDataset(
+        config.data_dir / "val",
+        augment=False,
+        file_format=file_format,
+    )
     
     train_loader = DataLoader(
         train_dataset,

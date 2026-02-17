@@ -10,6 +10,7 @@
 !*.yaml
 !*.yml
 !requirements.txt
+!LICENSE
 
 # Meta dosyaları da izinli
 !.gitignore
@@ -17,3 +18,17 @@
 
 # Yerel conda ortamı (repo'ya gönderilmesin)
 .conda_pdal_env/
+
+# Sanal ortamlar ve geçici çalışma çıktıları
+.venv310/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+.cursor/
+cache/
+checkpoints/
+ciktilar/
+training_data/
+veri/

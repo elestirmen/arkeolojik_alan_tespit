@@ -6,7 +6,7 @@ Bu repository üç bağımsız arkeolojik alan tespit yöntemi içerir. Her biri
 
 ```
 arkeolojik_alan_tespit/
-├── archaeo_detect_base/      # 9 kanallı derin öğrenme yöntemi
+├── archaeo_detect_base/      # 12 kanallı derin öğrenme yöntemi
 ├── archaeo_detect_enki/      # Enki yöntemi
 ├── archaeo_detect_adaf/      # ADAF yöntemi
 └── README_PROJECTS.md        # Bu dosya
@@ -15,9 +15,9 @@ arkeolojik_alan_tespit/
 ## 🎯 Projeler
 
 ### 1. archaeo_detect_base
-**9 Kanallı Derin Öğrenme Yöntemi**
+**12 Kanallı Derin Öğrenme Yöntemi**
 
-- **Girdi**: RGB + SVF + Openness + LRM + Slope + nDSM (9 kanal)
+- **Girdi**: RGB + SVF + Openness + LRM + Slope + nDSM + Curvature + TPI (12 kanal)
 - **Model**: U-Net, DeepLabV3+ (Segmentation Models PyTorch)
 - **Encoder**: ResNet, EfficientNet, DenseNet, vb.
 - **Özellikler**: 
@@ -87,7 +87,7 @@ python adaf_inference.py
 
 | Özellik | Base | Enki | ADAF |
 |---------|------|------|------|
-| **Girdi Kanalları** | 9 (RGB + RVT) | Değişken | ALS tabanlı |
+| **Girdi Kanalları** | 12 (RGB + RVT + Curvature + TPI) | Değişken | ALS tabanlı |
 | **Framework** | PyTorch | TensorFlow/Keras | PyTorch (AiTLAS) |
 | **Eğitim Verisi** | Genel | Tell verileri | İrlanda ALS |
 | **Tespit Türleri** | Genel arkeolojik | Tell, yerleşim | Barrows, Ringforts, Enclosures |

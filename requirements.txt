@@ -1,22 +1,22 @@
-# ============================================================================
-# Arkeolojik Alan Tespiti - Base (9 Kanallı Derin Öğrenme)
-# Bağımlılıklar
+﻿# ============================================================================
+# Arkeolojik Alan Tespiti - Base (12 KanallÄ± Derin Ã–ÄŸrenme)
+# BaÄŸÄ±mlÄ±lÄ±klar
 # ============================================================================
 
 # Temel bilimsel hesaplama
 numpy>=1.24.0,<2.0.0
 scipy>=1.10.0,<2.0.0
 
-# Derin öğrenme
+# Derin Ã¶ÄŸrenme
 torch>=2.0.0,<3.0.0
 torchvision>=0.15.0,<1.0.0
 segmentation-models-pytorch>=0.3.2,<0.4.0
 
-# Görüntü işleme
+# GÃ¶rÃ¼ntÃ¼ iÅŸleme
 opencv-python>=4.7.0,<5.0.0
 scikit-image>=0.20.0,<1.0.0
 
-# Coğrafi veri işleme
+# CoÄŸrafi veri iÅŸleme
 rasterio>=1.3.0,<2.0.0
 fiona>=1.9.0,<2.0.0
 geopandas>=0.12.0,<1.0.0
@@ -27,13 +27,14 @@ pyproj>=3.5.0,<4.0.0
 rvt-py>=2.2.0; python_version < "3.11"
 rvt>=2.0.0; python_version >= "3.11"
 
-# Yardımcı kütüphaneler
+# YardÄ±mcÄ± kÃ¼tÃ¼phaneler
 tqdm>=4.65.0,<5.0.0
 pyyaml>=6.0,<7.0.0
 
-# Opsiyonel: YOLO11 desteği
-# ultralytics>=8.1.0,<9.0.0
+# YOLO11 desteÄŸi
+ultralytics>=8.1.0,<9.0.0
 
-# Opsiyonel: Test için
+# Opsiyonel: Test iÃ§in
 # pytest>=7.0.0,<8.0.0
 # pytest-cov>=4.0.0,<5.0.0
+

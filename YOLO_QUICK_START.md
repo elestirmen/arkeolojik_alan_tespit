@@ -1,8 +1,8 @@
 # 🚀 YOLO Hızlı Başlangıç - Kuş Bakışı Görüntüler
 
-## ✅ YOLOv8 ile Hemen Başlayın (ÖNERİLEN)
+## ✅ YOLO11 ile Hemen Başlayın (Varsayılan)
 
-Sisteminiz hem YOLOv8 hem de YOLO11'i destekler. YOLOv8 daha olgun ve daha fazla topluluk desteğine sahip.
+Sistem hem YOLO11 hem YOLOv8 modellerini destekler. Varsayılan akışta YOLO11 kullanılır.
 
 ---
 
@@ -15,7 +15,7 @@ python archaeo_detect.py
 ```
 
 **Sonuç:**
-- ✅ YOLOv8 otomatik indirilir
+- ✅ YOLO11 otomatik indirilir
 - ⚠️ Uyarı mesajı görünür (kuş bakışı için optimize değil)
 - 📊 Genel envanter çıktısı (düşük doğruluk)
 

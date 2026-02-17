@@ -2820,10 +2820,9 @@ def infer_yolo_tiled(
     
     # Load YOLO model
     if yolo_weights is None:
-        # YOLOv8 daha olgun ve daha fazla topluluk desteği var
-        yolo_weights = "yolov8s-seg.pt"
+        yolo_weights = "yolo11n-seg.pt"
         LOGGER.info("YOLO ağırlık dosyası belirtilmedi, varsayılan kullanılıyor: %s", yolo_weights)
-        LOGGER.info("Not: YOLOv8 (daha olgun) kullanılıyor. YOLO11 için: yolo_weights='yolo11s-seg.pt'")
+        LOGGER.info("Not: Daha güçlü model için yolo_weights='yolo11s-seg.pt' kullanabilirsiniz.")
     
     LOGGER.info("YOLO modeli yükleniyor: %s", yolo_weights)
     

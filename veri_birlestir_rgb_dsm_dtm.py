@@ -1,12 +1,12 @@
 """
-RGB(1,2,3) + DTM + DSM rasterlarini tek bir 5-band GeoTIFF dosyasina birlestirir.
+RGB(1,2,3) + DSM + DTM rasterlarini tek bir 5-band GeoTIFF dosyasina birlestirir.
 
 Bant sirasi:
 1: RGB Red
 2: RGB Green
 3: RGB Blue
-4: DTM
-5: DSM
+4: DSM
+5: DTM
 """
 
 from __future__ import annotations
@@ -228,8 +228,8 @@ def _compose_rgb_dtm_dsm_5band(
                     dst.write(r, 1, window=window)
                     dst.write(g, 2, window=window)
                     dst.write(b, 3, window=window)
-                    dst.write(dtm_arr, 4, window=window)
-                    dst.write(dsm_arr, 5, window=window)
+                    dst.write(dsm_arr, 4, window=window)
+                    dst.write(dtm_arr, 5, window=window)
 
                     if pbar is not None:
                         pbar.update(1)
@@ -249,7 +249,7 @@ def _compose_rgb_dtm_dsm_5band(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="RGB(1,2,3) + DTM + DSM rasterlarini tek bir 5-band GeoTIFF olarak birlestir."
+        description="RGB(1,2,3) + DSM + DTM rasterlarini tek bir 5-band GeoTIFF olarak birlestir."
     )
     parser.set_defaults(progress=bool(CONFIG["progress"]))
     parser.add_argument(
@@ -338,10 +338,10 @@ def main() -> int:
             raise FileNotFoundError(f"{name} girdi rasteri bulunamadi: {path}")
 
     LOGGER.info(
-        "5-band birlestirme basliyor: RGB(1,2,3)=%s | DTM=%s | DSM=%s | OUTPUT=%s",
+        "5-band birlestirme basliyor: RGB(1,2,3)=%s | DSM=%s | DTM=%s | OUTPUT=%s",
         rgb_input_path,
-        dtm_input_path,
         dsm_input_path,
+        dtm_input_path,
         output_path,
     )
     _compose_rgb_dtm_dsm_5band(
