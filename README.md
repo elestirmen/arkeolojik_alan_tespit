@@ -253,6 +253,20 @@ python on_isleme.py \
   --progress
 ```
 
+LAS/LAZ tiled example (large files):
+
+```bash
+python on_isleme.py \
+  --input veri/karlik_dag_dsm.las \
+  --output veri/karlik_dag_dtm_smrf.tif \
+  --method smrf \
+  --smrf-tiled \
+  --smrf-tile-size 4096 \
+  --smrf-overlap-px 0 \
+  --smrf-tile-workers 2 \
+  --progress
+```
+
 ### Key CLI Parameters
 
 - `--input`, `--output`
@@ -260,7 +274,7 @@ python on_isleme.py \
 - `--cell`, `--slope`, `--threshold`, `--window`, `--scalar` (SMRF parameters)
   - LAS/LAZ input: if `--cell` is not provided, cell is auto-estimated from LAS header (point count + XY extent).
 - `--smrf-max-pixels`, `--smrf-downsample-factor` (SMRF RAM control)
-- `--smrf-tiled`, `--smrf-tile-size`, `--smrf-overlap-px` (quality-preserving low-RAM SMRF)
+- `--smrf-tiled`, `--smrf-tile-size`, `--smrf-overlap-px` (quality-preserving low-RAM SMRF for raster and LAS/LAZ)
 - `--smrf-tile-workers` (parallel tile workers for SMRF tiled mode)
 - `--allow-fallback` / `--no-fallback`
 - `--opening-meters`, `--smooth-sigma-px`, `--tile-size` (fallback tuning)

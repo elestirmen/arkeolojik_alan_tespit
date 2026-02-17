@@ -72,7 +72,7 @@ CONFIG: dict[str, Any] = {
     # Zorunlu downsample katsayisi: 1.0 kapali, 2.0 -> en/boy yariya iner.
     # Kalite kritikse 1.0 kullan.
     "smrf_downsample_factor": 1.0,
-    # True ise SMRF islemi tum raster yerine ortusmeli karolarla yapilir.
+    # True ise SMRF islemi (raster ve LAS/LAZ) ortusmeli karolarla yapilir.
     # Buyuk dosyalarda RAM'i ciddi dusurur; kaliteyi korumak icin onerilir.
     "smrf_tiled": True,
     # SMRF tiled modunda karo boyutu (piksel). Buyudukce hiz artar, RAM artar.
@@ -239,6 +239,8 @@ def _build_las_pipeline(
     params: SmrfParams,
     nodata: float,
     compression: str,
+    reader_bounds: Optional[str] = None,
+    writer_bounds: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     gdalopts: list[str] = []
     comp = str(compression).upper()
@@ -261,11 +263,18 @@ def _build_las_pipeline(
     if gdalopts:
         writer_stage["gdalopts"] = ",".join(gdalopts)
 
+    reader_stage: dict[str, Any] = {
+        "type": "readers.las",
+        "filename": str(input_path),
+    }
+    if reader_bounds:
+        reader_stage["bounds"] = reader_bounds
+
+    if writer_bounds:
+        writer_stage["bounds"] = writer_bounds
+
     stages: list[dict[str, Any]] = [
-        {
-            "type": "readers.las",
-            "filename": str(input_path),
-        },
+        reader_stage,
         {
             "type": "filters.smrf",
             "cell": params.cell,
@@ -335,6 +344,37 @@ def _estimate_las_cell_from_header(input_las_path: Path, fallback_cell: float) -
         return est_cell, f"otomatik tahmin (n={point_count}, span=({span_x:.1f}m,{span_y:.1f}m))"
     except (ValueError, struct.error) as exc:
         return fallback_cell, f"header parse hatasi ({exc})"
+
+
+def _read_las_xy_bounds_from_header(input_las_path: Path) -> tuple[float, float, float, float, str]:
+    """
+    LAS/LAZ header'dan XY min/max degerlerini okur.
+    """
+    try:
+        with input_las_path.open("rb") as fh:
+            header = fh.read(375)
+    except OSError as exc:
+        raise RuntimeError(f"LAS header okunamadi: {exc}") from exc
+
+    if len(header) < 227:
+        raise RuntimeError("LAS header cok kisa.")
+    if header[0:4] != b"LASF":
+        raise RuntimeError("LAS imzasi (LASF) bulunamadi.")
+
+    try:
+        max_x, min_x, max_y, min_y, _max_z, _min_z = struct.unpack_from("<dddddd", header, 179)
+    except struct.error as exc:
+        raise RuntimeError(f"LAS header parse hatasi: {exc}") from exc
+
+    if not (math.isfinite(min_x) and math.isfinite(max_x) and math.isfinite(min_y) and math.isfinite(max_y)):
+        raise RuntimeError("LAS XY sinirlari gecersiz.")
+    if max_x <= min_x or max_y <= min_y:
+        raise RuntimeError(
+            f"LAS XY sinirlari gecersiz: min=({min_x},{min_y}) max=({max_x},{max_y})"
+        )
+
+    bounds_str = f"([{min_x},{max_x}],[{min_y},{max_y}])"
+    return float(min_x), float(min_y), float(max_x), float(max_y), bounds_str
 
 
 def _run_smrf_tiled_worker(
@@ -654,6 +694,435 @@ def _run_las_smrf(
                 temp_output_path.unlink()
             except OSError:
                 pass
+
+
+def _run_las_smrf_tiled_worker(
+    input_las_path: str,
+    temp_dir: str,
+    params: SmrfParams,
+    nodata: float,
+    compression: str,
+    task: tuple[
+        int,
+        int,
+        int,
+        int,
+        int,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+        float,
+    ],
+) -> tuple[int, int, int, int, int, str, str, str, str]:
+    """
+    LAS/LAZ icin tek bir karoyu (pad + cekirdek) isler.
+    """
+    (
+        tile_idx,
+        row0,
+        row1,
+        col0,
+        col1,
+        pad_left,
+        pad_bottom,
+        pad_right,
+        pad_top,
+        core_left,
+        core_bottom,
+        core_right,
+        core_top,
+    ) = task
+
+    core_h = row1 - row0
+    core_w = col1 - col0
+
+    temp_dir_path = Path(temp_dir)
+    las_path = Path(input_las_path)
+    tile_raw_path = temp_dir_path / f"las_smrf_tile_{tile_idx:06d}_raw.tif"
+    core_arr_path = temp_dir_path / f"las_smrf_tile_{tile_idx:06d}_core.npy"
+    core_mask_path = temp_dir_path / f"las_smrf_tile_{tile_idx:06d}_mask.npy"
+
+    pad_bounds_str = f"([{pad_left},{pad_right}],[{pad_bottom},{pad_top}])"
+
+    crs_wkt = ""
+    warning_msg = ""
+
+    try:
+        pipeline = _build_las_pipeline(
+            input_path=las_path,
+            temp_output_path=tile_raw_path,
+            params=params,
+            nodata=nodata,
+            compression=compression,
+            reader_bounds=pad_bounds_str,
+            writer_bounds=pad_bounds_str,
+        )
+        _run_pdal_pipeline(
+            pipeline=pipeline,
+            show_progress=False,
+            expected_points=None,
+            log_completion=False,
+            status_label=None,
+            log_interval_sec=1_000_000.0,
+        )
+
+        with rasterio.open(tile_raw_path) as tile_raw:
+            src_window = rasterio.windows.from_bounds(
+                core_left,
+                core_bottom,
+                core_right,
+                core_top,
+                transform=tile_raw.transform,
+            )
+            core_arr = tile_raw.read(
+                1,
+                window=src_window,
+                out_shape=(core_h, core_w),
+                resampling=Resampling.bilinear,
+                boundless=True,
+                fill_value=nodata,
+            ).astype(np.float32, copy=False)
+            core_mask = np.where(
+                np.isfinite(core_arr) & (core_arr != nodata),
+                255,
+                0,
+            ).astype(np.uint8, copy=False)
+            if tile_raw.crs is not None:
+                crs_wkt = tile_raw.crs.to_wkt() or ""
+    except Exception as exc:
+        exc_msg = str(exc)
+        if "no points" in exc_msg.lower():
+            core_arr = np.full((core_h, core_w), nodata, dtype=np.float32)
+            core_mask = np.zeros((core_h, core_w), dtype=np.uint8)
+            warning_msg = exc_msg
+        else:
+            raise
+    finally:
+        try:
+            tile_raw_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    np.save(core_arr_path, core_arr, allow_pickle=False)
+    np.save(core_mask_path, core_mask, allow_pickle=False)
+
+    return (
+        tile_idx,
+        row0,
+        col0,
+        core_h,
+        core_w,
+        str(core_arr_path),
+        str(core_mask_path),
+        crs_wkt,
+        warning_msg,
+    )
+
+
+def _run_las_smrf_tiled(
+    input_las_path: Path,
+    output_dtm_path: Path,
+    params: SmrfParams,
+    nodata: float,
+    compression: str,
+    tile_size: int,
+    overlap_px: int,
+    tile_workers: int,
+    show_progress: bool,
+    temp_dir: Path,
+) -> None:
+    tile_size = max(128, int(tile_size))
+    overlap_px = max(0, int(overlap_px))
+    tile_workers = max(1, int(tile_workers))
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    if tile_workers > cpu_count:
+        LOGGER.warning(
+            "LAS tiled worker sayisi CPU cekirdegi ustunde (%d>%d). %d'e kisitlandi.",
+            tile_workers,
+            cpu_count,
+            cpu_count,
+        )
+        tile_workers = cpu_count
+
+    min_x, min_y, max_x, max_y, _ = _read_las_xy_bounds_from_header(input_las_path)
+    cell = max(float(params.cell), 1e-6)
+
+    left = math.floor(min_x / cell) * cell
+    bottom = math.floor(min_y / cell) * cell
+    right = math.ceil(max_x / cell) * cell
+    top = math.ceil(max_y / cell) * cell
+    width = max(1, int(math.ceil((right - left) / cell)))
+    height = max(1, int(math.ceil((top - bottom) / cell)))
+    # Yuvarlama kaymalarini sifirlamak icin extenti tekrar piksel boyutuna sabitle.
+    right = left + width * cell
+    top = bottom + height * cell
+    transform = from_bounds(left, bottom, right, top, width, height)
+
+    tasks: list[
+        tuple[
+            int,
+            int,
+            int,
+            int,
+            int,
+            float,
+            float,
+            float,
+            float,
+            float,
+            float,
+            float,
+            float,
+        ]
+    ] = []
+    tile_idx = 0
+    for row0 in range(0, height, tile_size):
+        row1 = min(row0 + tile_size, height)
+        for col0 in range(0, width, tile_size):
+            col1 = min(col0 + tile_size, width)
+            tile_idx += 1
+
+            core_w = col1 - col0
+            core_h = row1 - row0
+            core_window = Window(col0, row0, core_w, core_h)
+            core_left, core_bottom, core_right, core_top = rasterio.windows.bounds(core_window, transform)
+
+            pad_left = max(left, core_left - overlap_px * cell)
+            pad_bottom = max(bottom, core_bottom - overlap_px * cell)
+            pad_right = min(right, core_right + overlap_px * cell)
+            pad_top = min(top, core_top + overlap_px * cell)
+
+            tasks.append(
+                (
+                    tile_idx,
+                    row0,
+                    row1,
+                    col0,
+                    col1,
+                    float(pad_left),
+                    float(pad_bottom),
+                    float(pad_right),
+                    float(pad_top),
+                    float(core_left),
+                    float(core_bottom),
+                    float(core_right),
+                    float(core_top),
+                )
+            )
+
+    total_tiles = len(tasks)
+    LOGGER.info(
+        "LAS SMRF tiled basladi: tile=%d overlap=%d toplam_karo=%d workers=%d width=%d height=%d",
+        tile_size,
+        overlap_px,
+        total_tiles,
+        tile_workers,
+        width,
+        height,
+    )
+
+    base_profile: dict[str, Any] = {
+        "driver": "GTiff",
+        "width": width,
+        "height": height,
+        "count": 1,
+        "dtype": "float32",
+        "transform": transform,
+        "nodata": nodata,
+        "compress": compression,
+        "predictor": 3,
+        "tiled": False,
+        "BIGTIFF": "IF_SAFER",
+    }
+
+    pbar = _open_progress(
+        total=total_tiles,
+        desc="LAS SMRF (PDAL tiled)",
+        unit="tile",
+        enabled=show_progress,
+    )
+    start_t = time.time()
+    temp_output_path = _prepare_temp_output_path(output_dtm_path)
+    dst = None
+    completed_tiles = 0
+    no_point_tiles = 0
+
+    try:
+        if tile_workers == 1:
+            for task in tasks:
+                result = _run_las_smrf_tiled_worker(
+                    input_las_path=str(input_las_path),
+                    temp_dir=str(temp_dir),
+                    params=params,
+                    nodata=nodata,
+                    compression=compression,
+                    task=task,
+                )
+                (
+                    done_idx,
+                    row0,
+                    col0,
+                    core_h,
+                    core_w,
+                    core_arr_path,
+                    core_mask_path,
+                    crs_wkt,
+                    warning_msg,
+                ) = result
+                if warning_msg:
+                    no_point_tiles += 1
+                    LOGGER.debug("LAS tiled karo bos gecti (%d): %s", done_idx, warning_msg)
+
+                if dst is None:
+                    profile = base_profile.copy()
+                    if crs_wkt:
+                        profile["crs"] = crs_wkt
+                    dst = rasterio.open(temp_output_path, "w", **profile)
+
+                core_window = Window(col0, row0, core_w, core_h)
+                core_arr = np.load(core_arr_path, allow_pickle=False)
+                core_mask = np.load(core_mask_path, allow_pickle=False)
+                dst.write(core_arr.astype(np.float32, copy=False), 1, window=core_window)
+                dst.write_mask(core_mask.astype(np.uint8, copy=False), window=core_window)
+
+                try:
+                    Path(core_arr_path).unlink(missing_ok=True)
+                    Path(core_mask_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+                completed_tiles += 1
+                if pbar is not None:
+                    pbar.update(1)
+                    elapsed = max(1e-6, time.time() - start_t)
+                    avg_tile = elapsed / max(completed_tiles, 1)
+                    remaining = max(0, total_tiles - completed_tiles)
+                    eta_sec = int(round(avg_tile * remaining))
+                    _set_progress_postfix(
+                        pbar,
+                        f"done={completed_tiles}/{total_tiles} last_tile={done_idx} "
+                        f"avg={avg_tile:.2f}s/tile eta={eta_sec}s",
+                    )
+        else:
+            pending: dict[Any, int] = {}
+            tasks_iter = iter(tasks)
+            max_inflight = max(tile_workers, tile_workers * 2)
+            last_wait_log = 0.0
+
+            def _submit_next(executor: ProcessPoolExecutor) -> bool:
+                try:
+                    next_task = next(tasks_iter)
+                except StopIteration:
+                    return False
+                next_idx = next_task[0]
+                future = executor.submit(
+                    _run_las_smrf_tiled_worker,
+                    str(input_las_path),
+                    str(temp_dir),
+                    params,
+                    nodata,
+                    compression,
+                    next_task,
+                )
+                pending[future] = next_idx
+                return True
+
+            with ProcessPoolExecutor(max_workers=tile_workers) as executor:
+                while len(pending) < max_inflight and _submit_next(executor):
+                    pass
+
+                while pending:
+                    done, _ = wait(
+                        tuple(pending.keys()),
+                        timeout=2.0,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    if not done:
+                        elapsed = time.time() - start_t
+                        if elapsed - last_wait_log >= 30.0:
+                            LOGGER.info(
+                                "LAS SMRF tiled devam ediyor... tamamlanan=%d/%d aktif_is=%d",
+                                completed_tiles,
+                                total_tiles,
+                                len(pending),
+                            )
+                            last_wait_log = elapsed
+                        continue
+
+                    for future in done:
+                        pending.pop(future, None)
+                        (
+                            done_idx,
+                            row0,
+                            col0,
+                            core_h,
+                            core_w,
+                            core_arr_path,
+                            core_mask_path,
+                            crs_wkt,
+                            warning_msg,
+                        ) = future.result()
+                        if warning_msg:
+                            no_point_tiles += 1
+                            LOGGER.debug("LAS tiled karo bos gecti (%d): %s", done_idx, warning_msg)
+
+                        if dst is None:
+                            profile = base_profile.copy()
+                            if crs_wkt:
+                                profile["crs"] = crs_wkt
+                            dst = rasterio.open(temp_output_path, "w", **profile)
+
+                        core_window = Window(col0, row0, core_w, core_h)
+                        core_arr = np.load(core_arr_path, allow_pickle=False)
+                        core_mask = np.load(core_mask_path, allow_pickle=False)
+                        dst.write(core_arr.astype(np.float32, copy=False), 1, window=core_window)
+                        dst.write_mask(core_mask.astype(np.uint8, copy=False), window=core_window)
+
+                        try:
+                            Path(core_arr_path).unlink(missing_ok=True)
+                            Path(core_mask_path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+
+                        completed_tiles += 1
+                        if pbar is not None:
+                            pbar.update(1)
+                            elapsed = max(1e-6, time.time() - start_t)
+                            avg_tile = elapsed / max(completed_tiles, 1)
+                            remaining = max(0, total_tiles - completed_tiles)
+                            eta_sec = int(round(avg_tile * remaining))
+                            _set_progress_postfix(
+                                pbar,
+                                f"done={completed_tiles}/{total_tiles} active={len(pending)} "
+                                f"last_tile={done_idx} avg={avg_tile:.2f}s/tile eta={eta_sec}s",
+                            )
+                        while len(pending) < max_inflight and _submit_next(executor):
+                            pass
+
+        if dst is None:
+            profile = base_profile.copy()
+            dst = rasterio.open(temp_output_path, "w", **profile)
+
+        dst.close()
+        dst = None
+        os.replace(temp_output_path, output_dtm_path)
+    finally:
+        if dst is not None:
+            dst.close()
+        if pbar is not None:
+            pbar.close()
+        if temp_output_path.exists():
+            try:
+                temp_output_path.unlink()
+            except OSError:
+                pass
+
+    if no_point_tiles > 0:
+        LOGGER.info("LAS SMRF tiled: bos karo sayisi=%d/%d", no_point_tiles, total_tiles)
 
 
 def _prepare_smrf_input(
@@ -1444,6 +1913,10 @@ def main() -> int:
 
     method = str(args.method).strip().lower()
     is_las_input = input_path.suffix.lower() in {".las", ".laz"}
+    smrf_tiled = bool(args.smrf_tiled)
+    smrf_tile_size = max(128, int(args.smrf_tile_size))
+    smrf_overlap_px_arg = max(0, int(args.smrf_overlap_px))
+    smrf_tile_workers = max(1, int(args.smrf_tile_workers))
 
     if is_las_input:
         if method == "fallback":
@@ -1493,16 +1966,49 @@ def main() -> int:
             smrf_params.window,
             smrf_params.scalar,
         )
-        LOGGER.info("[2/2] LAS/LAZ SMRF asamasi baslatiliyor...")
-        _run_las_smrf(
-            input_las_path=input_path,
-            output_dtm_path=output_path,
-            params=smrf_params,
-            nodata=float(args.nodata),
-            compression=str(args.compression),
-            show_progress=bool(args.progress),
+        LOGGER.info(
+            "LAS SMRF isleme modu: tiled=%s tile_size=%d overlap_px=%d tile_workers=%d",
+            smrf_tiled,
+            smrf_tile_size,
+            smrf_overlap_px_arg,
+            smrf_tile_workers,
         )
-        LOGGER.info("DTM basariyla yazildi (LAS SMRF): %s", output_path)
+        LOGGER.info("[2/2] LAS/LAZ SMRF asamasi baslatiliyor...")
+        if smrf_tiled:
+            auto_overlap = max(
+                32,
+                int(math.ceil(smrf_params.window / max(smrf_params.cell, 1e-6))) + 8,
+            )
+            smrf_overlap_px = smrf_overlap_px_arg if smrf_overlap_px_arg > 0 else auto_overlap
+            LOGGER.info(
+                "LAS SMRF tiled overlap: %d px (auto=%d)",
+                smrf_overlap_px,
+                auto_overlap,
+            )
+            with tempfile.TemporaryDirectory(prefix="on_isleme_las_smrf_") as temp_dir:
+                _run_las_smrf_tiled(
+                    input_las_path=input_path,
+                    output_dtm_path=output_path,
+                    params=smrf_params,
+                    nodata=float(args.nodata),
+                    compression=str(args.compression),
+                    tile_size=smrf_tile_size,
+                    overlap_px=smrf_overlap_px,
+                    tile_workers=smrf_tile_workers,
+                    show_progress=bool(args.progress),
+                    temp_dir=Path(temp_dir),
+                )
+            LOGGER.info("DTM basariyla yazildi (LAS SMRF tiled): %s", output_path)
+        else:
+            _run_las_smrf(
+                input_las_path=input_path,
+                output_dtm_path=output_path,
+                params=smrf_params,
+                nodata=float(args.nodata),
+                compression=str(args.compression),
+                show_progress=bool(args.progress),
+            )
+            LOGGER.info("DTM basariyla yazildi (LAS SMRF): %s", output_path)
         return 0
 
     LOGGER.info("[1/4] Girdi raster bilgisi okunuyor...")
@@ -1532,10 +2038,6 @@ def main() -> int:
     )
     smrf_max_pixels = int(args.smrf_max_pixels) if int(args.smrf_max_pixels) > 0 else None
     smrf_downsample_factor = max(1.0, float(args.smrf_downsample_factor))
-    smrf_tiled = bool(args.smrf_tiled)
-    smrf_tile_size = max(128, int(args.smrf_tile_size))
-    smrf_overlap_px_arg = max(0, int(args.smrf_overlap_px))
-    smrf_tile_workers = max(1, int(args.smrf_tile_workers))
     LOGGER.info(
         "SMRF bellek limiti: max_pixels=%s downsample_factor=%.2f girdi_nokta=%d",
         smrf_max_pixels if smrf_max_pixels is not None else "kapali",
