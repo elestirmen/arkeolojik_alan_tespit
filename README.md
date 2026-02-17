@@ -272,7 +272,8 @@ python on_isleme.py \
 - `--input`, `--output`
 - `--method` (`auto` | `smrf` | `fallback`, default: `fallback`)
 - `--cell`, `--slope`, `--threshold`, `--window`, `--scalar` (SMRF parameters)
-  - LAS/LAZ input: if `--cell` is not provided, cell is auto-estimated from LAS header (point count + XY extent).
+  - LAS/LAZ input: if `--cell` is not provided, sibling `*.tif/*.tiff` pixel size is preferred; otherwise LAS header density is used.
+- `--las-crs` (LAS/LAZ output CRS override, e.g. `EPSG:32636`)
 - `--smrf-max-pixels`, `--smrf-downsample-factor` (SMRF RAM control)
 - `--smrf-tiled`, `--smrf-tile-size`, `--smrf-overlap-px` (quality-preserving low-RAM SMRF for raster and LAS/LAZ)
 - `--smrf-tile-workers` (parallel tile workers for SMRF tiled mode)

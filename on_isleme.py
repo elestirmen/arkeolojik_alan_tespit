@@ -26,6 +26,7 @@ from typing import Any, Optional
 
 import numpy as np
 import rasterio
+from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 from rasterio.windows import Window
@@ -46,18 +47,20 @@ _LAS_DEFAULT_CELL = 0.5
 # Komut satiri argumanlari her zaman bu degerleri ezer.
 CONFIG: dict[str, Any] = {
     # Girdi DSM GeoTIFF veya LAS/LAZ yolu.
-    "input": "/veri/karlik_dag_dsm.tif",
+    "input": "/veri/karlik_dag_dsm.las",
     # Uretilecek DTM GeoTIFF yolu.
-    "output": "/veri/karlik_dag_dtm_smrf.tif",
+    "output": "/veri/karlik_dag_dtm_las.tif",
     # Isleme yontemi:
     # - "auto": Once SMRF dener, hata olursa (allow_fallback=True ise) fallback'e gecer.
     # - "smrf": Yalnizca SMRF (hata olursa durur).
     # - "fallback": SMRF'i atlar, dogrudan fallback calisir.
     # Not: Bu projede bircok sahada fallback kalitesi daha iyi oldugu icin varsayilan fallback.
-    "method": "auto",
+    "method": "fallback",
     # SMRF cell boyutu (metre). None -> raster girdide piksel boyutu, LAS/LAZ girdide
     # nokta yogunlugundan otomatik tahmin (hesaplanamazsa _LAS_DEFAULT_CELL).
     "cell": None,
+    # LAS/LAZ girdi icin cikti CRS (ornek: "EPSG:32636"). None ise otomatik tespit denenir.
+    "las_crs": None,
     # SMRF slope: buyudukce zemin siniflamasi daha toleransli olur.
     "slope": 0.2,
     # SMRF threshold: zemin/saha ayrimi icin yukseklik fark esigi.
@@ -267,28 +270,35 @@ def _build_las_pipeline(
         "type": "readers.las",
         "filename": str(input_path),
     }
-    if reader_bounds:
-        reader_stage["bounds"] = reader_bounds
 
     if writer_bounds:
         writer_stage["bounds"] = writer_bounds
 
-    stages: list[dict[str, Any]] = [
-        reader_stage,
-        {
-            "type": "filters.smrf",
-            "cell": params.cell,
-            "slope": params.slope,
-            "threshold": params.threshold,
-            "window": params.window,
-            "scalar": params.scalar,
-        },
-        {
-            "type": "filters.range",
-            "limits": "Classification[2:2]",
-        },
-        writer_stage,
-    ]
+    stages: list[dict[str, Any]] = [reader_stage]
+    if reader_bounds:
+        stages.append(
+            {
+                "type": "filters.crop",
+                "bounds": reader_bounds,
+            }
+        )
+    stages.extend(
+        [
+            {
+                "type": "filters.smrf",
+                "cell": params.cell,
+                "slope": params.slope,
+                "threshold": params.threshold,
+                "window": params.window,
+                "scalar": params.scalar,
+            },
+            {
+                "type": "filters.range",
+                "limits": "Classification[2:2]",
+            },
+            writer_stage,
+        ]
+    )
     return stages
 
 
@@ -346,6 +356,25 @@ def _estimate_las_cell_from_header(input_las_path: Path, fallback_cell: float) -
         return fallback_cell, f"header parse hatasi ({exc})"
 
 
+def _find_sibling_raster_cell(input_las_path: Path) -> tuple[Optional[float], Optional[Path], str]:
+    """
+    LAS/LAZ ile ayni kok ada sahip rasterdan piksel boyutu bulmaya calisir.
+    """
+    for ext in (".tif", ".tiff"):
+        candidate = input_las_path.with_suffix(ext)
+        if not candidate.exists():
+            continue
+        try:
+            with rasterio.open(candidate) as src:
+                xres, yres = src.res
+                cell = max(abs(float(xres)), abs(float(yres)))
+                if math.isfinite(cell) and cell > 0:
+                    return cell, candidate, "es raster piksel boyutu"
+        except Exception as exc:
+            return None, candidate, f"es raster okunamadi ({exc})"
+    return None, None, "es raster bulunamadi"
+
+
 def _read_las_xy_bounds_from_header(input_las_path: Path) -> tuple[float, float, float, float, str]:
     """
     LAS/LAZ header'dan XY min/max degerlerini okur.
@@ -375,6 +404,80 @@ def _read_las_xy_bounds_from_header(input_las_path: Path) -> tuple[float, float,
 
     bounds_str = f"([{min_x},{max_x}],[{min_y},{max_y}])"
     return float(min_x), float(min_y), float(max_x), float(max_y), bounds_str
+
+
+def _resolve_las_output_crs(input_las_path: Path, explicit_crs: Optional[str]) -> Optional[CRS]:
+    """
+    LAS/LAZ cikti CRS'ini su sirayla belirlemeye calisir:
+    1) --las-crs / config (explicit)
+    2) laspy header CRS
+    3) Ayni klasordeki ayni kok ada sahip .tif/.tiff dosyasinin CRS'i
+    """
+    if explicit_crs is not None and str(explicit_crs).strip():
+        return CRS.from_user_input(str(explicit_crs).strip())
+
+    try:
+        import laspy
+
+        with laspy.open(str(input_las_path)) as las_reader:
+            parsed = las_reader.header.parse_crs()
+        if parsed is not None:
+            try:
+                return CRS.from_user_input(parsed)
+            except Exception:
+                wkt = getattr(parsed, "to_wkt", None)
+                if callable(wkt):
+                    return CRS.from_wkt(wkt())
+    except Exception:
+        pass
+
+    for ext in (".tif", ".tiff"):
+        candidate = input_las_path.with_suffix(ext)
+        if candidate.exists():
+            try:
+                with rasterio.open(candidate) as src:
+                    if src.crs is not None:
+                        return src.crs
+            except Exception:
+                continue
+
+    return None
+
+
+def _ensure_raster_crs(output_path: Path, target_crs: CRS) -> None:
+    """
+    Cikti rasterin CRS bilgisini garanti eder.
+    """
+    try:
+        with rasterio.open(output_path) as src:
+            if src.crs == target_crs:
+                return
+    except Exception:
+        return
+
+    try:
+        with rasterio.open(output_path, "r+") as ds:
+            ds.crs = target_crs
+            return
+    except Exception:
+        pass
+
+    temp_output_path = _prepare_temp_output_path(output_path)
+    try:
+        with rasterio.open(output_path) as src:
+            profile = src.profile.copy()
+            profile["crs"] = target_crs
+            with rasterio.open(temp_output_path, "w", **profile) as dst:
+                for bidx in range(1, src.count + 1):
+                    dst.write(src.read(bidx), bidx)
+                dst.write_mask(src.read_masks(1))
+        os.replace(temp_output_path, output_path)
+    finally:
+        if temp_output_path.exists():
+            try:
+                temp_output_path.unlink()
+            except OSError:
+                pass
 
 
 def _run_smrf_tiled_worker(
@@ -671,6 +774,7 @@ def _run_las_smrf(
     params: SmrfParams,
     nodata: float,
     compression: str,
+    output_crs: Optional[CRS],
     show_progress: bool,
 ) -> None:
     temp_output_path = _prepare_temp_output_path(output_dtm_path)
@@ -688,6 +792,8 @@ def _run_las_smrf(
             expected_points=None,
         )
         os.replace(temp_output_path, output_dtm_path)
+        if output_crs is not None:
+            _ensure_raster_crs(output_dtm_path, output_crs)
     finally:
         if temp_output_path.exists():
             try:
@@ -829,6 +935,7 @@ def _run_las_smrf_tiled(
     params: SmrfParams,
     nodata: float,
     compression: str,
+    output_crs: Optional[CRS],
     tile_size: int,
     overlap_px: int,
     tile_workers: int,
@@ -938,6 +1045,8 @@ def _run_las_smrf_tiled(
         "tiled": False,
         "BIGTIFF": "IF_SAFER",
     }
+    if output_crs is not None:
+        base_profile["crs"] = output_crs
 
     pbar = _open_progress(
         total=total_tiles,
@@ -979,7 +1088,7 @@ def _run_las_smrf_tiled(
 
                 if dst is None:
                     profile = base_profile.copy()
-                    if crs_wkt:
+                    if output_crs is None and crs_wkt:
                         profile["crs"] = crs_wkt
                     dst = rasterio.open(temp_output_path, "w", **profile)
 
@@ -1072,7 +1181,7 @@ def _run_las_smrf_tiled(
 
                         if dst is None:
                             profile = base_profile.copy()
-                            if crs_wkt:
+                            if output_crs is None and crs_wkt:
                                 profile["crs"] = crs_wkt
                             dst = rasterio.open(temp_output_path, "w", **profile)
 
@@ -1110,6 +1219,8 @@ def _run_las_smrf_tiled(
         dst.close()
         dst = None
         os.replace(temp_output_path, output_dtm_path)
+        if output_crs is not None:
+            _ensure_raster_crs(output_dtm_path, output_crs)
     finally:
         if dst is not None:
             dst.close()
@@ -1758,8 +1869,17 @@ def _parse_args() -> argparse.Namespace:
         default=CONFIG["cell"],
         help=(
             "SMRF cell (metre). Bos/NONE ise raster girdide piksel boyutu, "
-            "LAS/LAZ girdide header'dan otomatik tahmin kullanilir. "
+            "LAS/LAZ girdide once es .tif/.tiff piksel boyutu, yoksa header yogunlugundan tahmin kullanilir. "
             "Buyuk deger daha az RAM/CPU, ama daha az detay."
+        ),
+    )
+    parser.add_argument(
+        "--las-crs",
+        type=str,
+        default=CONFIG["las_crs"],
+        help=(
+            "LAS/LAZ girdide cikti CRS'i (ornek: EPSG:32636). "
+            "Verilmezse otomatik tespit denenir."
         ),
     )
     parser.add_argument(
@@ -1927,27 +2047,57 @@ def main() -> int:
         elif method == "auto" and bool(args.allow_fallback):
             LOGGER.info("LAS/LAZ girdide fallback uygulanmaz; auto mod yalnizca SMRF calistirir.")
 
+        try:
+            las_output_crs = _resolve_las_output_crs(
+                input_las_path=input_path,
+                explicit_crs=args.las_crs,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"LAS CRS cozulurken hata olustu. --las-crs ile acik belirtin. Hata: {exc}"
+            ) from exc
+        if las_output_crs is not None:
+            LOGGER.info("LAS cikti CRS: %s", las_output_crs)
+        else:
+            LOGGER.warning(
+                "LAS cikti CRS otomatik tespit edilemedi. "
+                "Cikti koordinat sistemi bos kalabilir; --las-crs ile belirtin."
+            )
+
         if args.cell and float(args.cell) > 0:
             las_cell = float(args.cell)
             LOGGER.info("LAS/LAZ girdide kullanici cell degeri kullaniliyor: %.4f m", las_cell)
         else:
-            las_cell, reason = _estimate_las_cell_from_header(
-                input_las_path=input_path,
-                fallback_cell=float(_LAS_DEFAULT_CELL),
-            )
-            if abs(las_cell - float(_LAS_DEFAULT_CELL)) < 1e-9 and not reason.startswith("otomatik tahmin"):
-                LOGGER.warning(
-                    "LAS/LAZ girdide --cell verilmedi; otomatik tahmin basarisiz (%s). "
-                    "Varsayilan cell=%.2f m kullaniliyor.",
-                    reason,
-                    float(_LAS_DEFAULT_CELL),
-                )
-            else:
+            sibling_cell, sibling_path, sibling_reason = _find_sibling_raster_cell(input_path)
+            if sibling_cell is not None:
+                las_cell = float(sibling_cell)
                 LOGGER.info(
-                    "LAS/LAZ girdide --cell verilmedi; %s -> cell=%.4f m",
-                    reason,
+                    "LAS/LAZ girdide --cell verilmedi; %s (%s) -> cell=%.4f m",
+                    sibling_reason,
+                    sibling_path,
                     las_cell,
                 )
+            else:
+                las_cell, reason = _estimate_las_cell_from_header(
+                    input_las_path=input_path,
+                    fallback_cell=float(_LAS_DEFAULT_CELL),
+                )
+                if abs(las_cell - float(_LAS_DEFAULT_CELL)) < 1e-9 and not reason.startswith("otomatik tahmin"):
+                    LOGGER.warning(
+                        "LAS/LAZ girdide --cell verilmedi; es raster bulunamadi (%s), "
+                        "ve otomatik yogunluk tahmini basarisiz (%s). "
+                        "Varsayilan cell=%.2f m kullaniliyor.",
+                        sibling_reason,
+                        reason,
+                        float(_LAS_DEFAULT_CELL),
+                    )
+                else:
+                    LOGGER.info(
+                        "LAS/LAZ girdide --cell verilmedi; es raster yok (%s), %s -> cell=%.4f m",
+                        sibling_reason,
+                        reason,
+                        las_cell,
+                    )
 
         smrf_params = SmrfParams(
             cell=las_cell,
@@ -1992,6 +2142,7 @@ def main() -> int:
                     params=smrf_params,
                     nodata=float(args.nodata),
                     compression=str(args.compression),
+                    output_crs=las_output_crs,
                     tile_size=smrf_tile_size,
                     overlap_px=smrf_overlap_px,
                     tile_workers=smrf_tile_workers,
@@ -2006,6 +2157,7 @@ def main() -> int:
                 params=smrf_params,
                 nodata=float(args.nodata),
                 compression=str(args.compression),
+                output_crs=las_output_crs,
                 show_progress=bool(args.progress),
             )
             LOGGER.info("DTM basariyla yazildi (LAS SMRF): %s", output_path)
