@@ -53,7 +53,7 @@ CONFIG: dict[str, Any] = {
     # - "smrf": Yalnizca SMRF (hata olursa durur).
     # - "fallback": SMRF'i atlar, dogrudan fallback calisir.
     # Not: Bu projede bircok sahada fallback kalitesi daha iyi oldugu icin varsayilan fallback.
-    "method": "fallback",
+    "method": "auto",
     # SMRF cell boyutu (metre). None -> raster girdide piksel boyutu, LAS/LAZ girdide
     # nokta yogunlugundan otomatik tahmin (hesaplanamazsa _LAS_DEFAULT_CELL).
     "cell": None,
