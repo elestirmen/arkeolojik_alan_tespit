@@ -165,7 +165,7 @@ encoders: "resnet34,resnet50,efficientnet-b3,DenseNet121"
 # - null ise: ImageNet ağırlıkları kullanılır (zero-shot)
 # - Örnek: "models/unet_resnet34_5ep.pth"
 # NOT: Bu parametre yalnızca tek encoder modunda (encoders: "none") kullanılır
-weights: null
+weights: "checkpoints/epochs/epoch_005_Unet_resnet34_12ch_attention.pth"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir
@@ -189,7 +189,17 @@ weights_template: null
 #   + Transfer öğrenme etkisi
 #   - Yükseklik kanalları (DSM/DTM) için öğrenme gerektirilebilir
 # ÖNERİ: Özel modeliniz yoksa true yapın, genellikle daha iyi sonuç verir
-zero_shot_imagenet: true
+zero_shot_imagenet: false
+
+# trained_model_only: Sadece kendi egittigin modeli kullan (onerilen odak modu)
+# - true: Tek model + egitilmis checkpoint zorlanir
+#         * encoders otomatik none'a cekilir (tek model)
+#         * zero_shot_imagenet devre disi kalir
+#         * yolo kapatilir (farkli model oldugu icin)
+#         * classic ve fusion istersen acik kalabilir
+#         * weights zorunlu olur
+# - false: Mevcut normal davranis (multi/zero-shot fallback mumkun)
+trained_model_only: true
 
 # th: Derin öğrenme olasılık eşiği
 # - Olasılık haritasını (0-1 arası) ikili maskeye (0 veya 1) çevirmek için

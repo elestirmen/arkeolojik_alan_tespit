@@ -116,6 +116,40 @@ class TestPipelineDefaultsValidation:
         config = PipelineDefaults(device="cuda:0")
         assert config.device == "cuda:0"
 
+    def test_single_mode_rejects_weights_template(self):
+        """Tek-model modunda weights_template hata vermeli."""
+        with pytest.raises(ValueError, match=r"weights_template"):
+            PipelineDefaults(encoders="none", weights_template="models/unet_{encoder}.pth")
+
+    def test_single_mode_requires_weights_or_zeroshot_when_dl_enabled(self):
+        """Tek-model + DL açıkken weights/zeroshot yoksa hata vermeli."""
+        with pytest.raises(ValueError, match=r"Single-model mode icin weights"):
+            PipelineDefaults(encoders="none", weights=None, zero_shot_imagenet=False)
+
+    def test_single_mode_allows_no_weights_when_dl_disabled(self):
+        """DL kapalıysa tek-model ayarlarında weights zorunlu olmamalı."""
+        config = PipelineDefaults(
+            encoders="none",
+            enable_deep_learning=False,
+            weights=None,
+            zero_shot_imagenet=False,
+        )
+        assert config.enable_deep_learning is False
+
+    def test_trained_model_only_requires_weights(self):
+        """trained_model_only etkinse weights zorunlu olmali."""
+        with pytest.raises(ValueError, match=r"trained_model_only.*weights"):
+            PipelineDefaults(trained_model_only=True, weights=None)
+
+    def test_trained_model_only_requires_deep_learning(self):
+        """trained_model_only etkinse deep learning acik olmali."""
+        with pytest.raises(ValueError, match=r"trained_model_only.*enable_deep_learning"):
+            PipelineDefaults(
+                trained_model_only=True,
+                enable_deep_learning=False,
+                weights="checkpoints/dummy.pth",
+            )
+
 
 # ============================================================================
 # Normalizasyon ve Veri İşleme Testleri

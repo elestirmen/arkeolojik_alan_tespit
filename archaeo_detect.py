@@ -377,6 +377,10 @@ class PipelineDefaults:
         default=True,
         metadata={"help": "Ağırlık dosyası yoksa ImageNet encoder'ını 9 kanala genişletip zero-shot çalıştır"},
     )
+    trained_model_only: bool = field(
+        default=False,
+        metadata={"help": "Sadece egitilmis DL checkpointini kullan; multi/zeroshot kapatilir (classic/fusion kalabilir)."},
+    )
     th: float = field(
         default=0.6,
         metadata={"help": "DL olasılık haritasını maskeye çevirmek için eşik (0-1 arası); düşük değer daha fazla tespit üretir"},
@@ -688,8 +692,27 @@ class PipelineDefaults:
             errors.append(f"deriv_cache_chunk pozitif olmalı, verilen: {self.deriv_cache_chunk}")
         if self.deriv_cache_halo is not None and self.deriv_cache_halo < 0:
             errors.append(f"deriv_cache_halo negatif olamaz, verilen: {self.deriv_cache_halo}")
+
+        # Single-model (encoders=none) consistency checks
+        enc_mode = (self.encoders or "").strip().lower()
+        single_mode = enc_mode in ("", "none", "single")
+        if single_mode and self.weights_template:
+            errors.append(
+                "encoders=none (single-model) iken weights_template kullanilamaz; weights kullanin."
+            )
+        if single_mode and not str(self.encoder or "").strip():
+            errors.append("Single-model mode icin encoder degeri bos olamaz.")
+        if single_mode and self.enable_deep_learning and not self.weights and not self.zero_shot_imagenet:
+            errors.append("Single-model mode icin weights veya zero_shot_imagenet=true gereklidir.")
         
         # Tüm hataları topla ve fırlat
+        # trained_model_only: strict trained-checkpoint path
+        if self.trained_model_only:
+            if not self.enable_deep_learning:
+                errors.append("trained_model_only icin enable_deep_learning=true olmalidir.")
+            if not self.weights:
+                errors.append("trained_model_only icin weights zorunludur.")
+
         if errors:
             error_msg = "Konfigürasyon doğrulama hataları:\n" + "\n".join(f"  - {e}" for e in errors)
             raise ValueError(error_msg)
@@ -5476,6 +5499,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("zero_shot_imagenet", "(toggle with --no-zero-shot-imagenet when supplying weights)."),
     )
     parser.add_argument(
+        "--trained-model-only",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("trained_model_only"),
+        dest="trained_model_only",
+        help=cli_help("trained_model_only", "(force single trained checkpoint path; disable zero-shot/multi fallbacks)."),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -5611,14 +5641,45 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if not input_path.exists():
         parser.error(f"Input raster not found: {input_path}")
 
+    if config.trained_model_only:
+        if not config.enable_deep_learning:
+            parser.error("--trained-model-only requires --enable-deep-learning.")
+        if not config.weights:
+            parser.error("--trained-model-only requires --weights.")
+        if config.enable_yolo:
+            LOGGER.info("trained_model_only active: disabling YOLO branch.")
+            config.enable_yolo = False
+        if config.zero_shot_imagenet:
+            LOGGER.info("trained_model_only active: forcing zero_shot_imagenet=false.")
+            config.zero_shot_imagenet = False
+        if config.weights_template:
+            LOGGER.info("trained_model_only active: ignoring weights_template.")
+            config.weights_template = None
+        raw_enc_mode = (config.encoders or "").strip().lower()
+        if raw_enc_mode not in ("", "none", "single"):
+            LOGGER.info("trained_model_only active: forcing encoders=none (single-model).")
+            config.encoders = "none"
+
     enc_mode = (config.encoders or "").strip().lower()
     if enc_mode == "single":
         LOGGER.info("'single' encoder modu, tek-model modu olarak yorumlandı (encoders=none).")
         enc_mode = "none"
     ran_multi = enc_mode not in ("", "none")
-    if enc_mode in ("", "none"):
+    if config.enable_deep_learning and enc_mode in ("", "none"):
+        if config.weights_template:
+            parser.error("--weights-template cannot be used in single-model mode (encoders=none).")
+        if not str(config.encoder or "").strip():
+            parser.error("Single-model mode requires a non-empty --encoder value.")
+        single_encoder_name, _ = normalize_encoder(config.encoder)
+        if smp is not None:
+            try:
+                _ = smp.encoders.get_encoder(single_encoder_name, in_channels=3)
+            except Exception:
+                avail = ", ".join(available_encoders_list())
+                parser.error(f"Unknown encoder '{config.encoder}'. Supported: {avail}")
+        config.encoder = single_encoder_name
         if not config.zero_shot_imagenet and not config.weights:
-            parser.error("Either provide --weights or use --zero-shot-imagenet for zero-shot inference.")
+            parser.error("Single-model mode requires --weights or --zero-shot-imagenet.")
 
     weights_path: Optional[Path] = None
     if config.weights:
@@ -5818,6 +5879,25 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             if enc_mode == "all"
             else [enc.strip() for enc in config.encoders.split(",") if enc.strip()]
         )
+        single_weight_fallback_path: Optional[Path] = None
+        single_weight_fallback_suffix: Optional[str] = None
+        if config.weights:
+            single_weight_fallback_path = Path(config.weights)
+            _, single_weight_fallback_suffix = normalize_encoder(config.encoder)
+            if not config.weights_template:
+                if single_weight_fallback_suffix and single_weight_fallback_suffix in {
+                    normalize_encoder(enc)[1] for enc in enc_list
+                }:
+                    LOGGER.info(
+                        "Multi-encoder mode: --weights will be used only for '%s'; "
+                        "other encoders require --weights-template or will fallback.",
+                        single_weight_fallback_suffix,
+                    )
+                else:
+                    LOGGER.warning(
+                        "Multi-encoder mode: --weights is set but does not match requested encoders; "
+                        "provide --weights-template to avoid fallback runs."
+                    )
         
         # Cache kullanılıyorsa ilerleme mesajı
         if precomputed_deriv is not None or derivative_cache_tif is not None:
@@ -5845,6 +5925,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     per_weights = cand
                 else:
                     LOGGER.info("[%s] No weights at %s; falling back to zero-shot.", suffix, cand)
+            if (
+                per_weights is None
+                and single_weight_fallback_path is not None
+                and single_weight_fallback_suffix is not None
+                and suffix == single_weight_fallback_suffix
+                and single_weight_fallback_path.exists()
+            ):
+                per_weights = single_weight_fallback_path
+                LOGGER.info("[%s] Using --weights fallback: %s", suffix, per_weights)
 
             # Kanal sayısını hesapla (9, 10, 11 veya 12)
             num_channels = get_num_channels(
@@ -5853,31 +5942,43 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
             
             if per_weights is not None:
-                LOGGER.info("[%s] Eğitilmiş ağırlıklar yükleniyor: %s", suffix, per_weights)
+                LOGGER.info("[%s] Loading trained weights: %s", suffix, per_weights)
                 model = build_model(
-                    arch=config.arch, 
-                    encoder=smp_name, 
+                    arch=config.arch,
+                    encoder=smp_name,
                     in_ch=num_channels,
                     enable_attention=config.enable_attention,
                     attention_reduction=config.attention_reduction,
                 )
                 load_weights(model, per_weights, map_location=device)
-            else:
-                LOGGER.info("[%s] Zero-shot modunda başlatılıyor (ImageNet 3->%d genişletme)", suffix, num_channels)
+                wt = "trained"
+            elif config.zero_shot_imagenet:
+                LOGGER.info("[%s] Starting in zero-shot mode (ImageNet 3->%d inflate)", suffix, num_channels)
                 model = build_model_with_imagenet_inflated(
-                    arch=config.arch, 
-                    encoder=smp_name, 
+                    arch=config.arch,
+                    encoder=smp_name,
                     in_ch=num_channels,
                     enable_attention=config.enable_attention,
                     attention_reduction=config.attention_reduction,
                 )
+                wt = "imagenet"
+            else:
+                LOGGER.warning(
+                    "[%s] No weights found and zero_shot_imagenet is disabled; using random init model.",
+                    suffix,
+                )
+                model = build_model(
+                    arch=config.arch,
+                    encoder=smp_name,
+                    in_ch=num_channels,
+                    enable_attention=config.enable_attention,
+                    attention_reduction=config.attention_reduction,
+                )
+                wt = "random"
 
             enc_prefix = out_prefix.with_suffix("")
             enc_prefix = enc_prefix.parent / f"{enc_prefix.name}_{suffix}"
 
-            # Weight type belirleme (eğitilmiş mi, ImageNet mi)
-            wt = "trained" if per_weights else "imagenet"
-            
             outputs = infer_tiled(
                 model=model,
                 input_path=input_path,
@@ -5955,28 +6056,36 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         enable_tpi=config.enable_tpi
     )
     
-    if enc_mode in ("", "none") and config.enable_deep_learning and config.zero_shot_imagenet:
+    if enc_mode in ("", "none") and config.enable_deep_learning and weights_path is not None:
+        LOGGER.info("Loading trained weights in single-encoder mode: %s", weights_path)
+        model = build_model(
+            arch=config.arch,
+            encoder=config.encoder,
+            in_ch=num_channels,
+            enable_attention=config.enable_attention,
+            attention_reduction=config.attention_reduction,
+        )
+        load_weights(model, weights_path, map_location=device)
+    elif enc_mode in ("", "none") and config.enable_deep_learning and config.zero_shot_imagenet:
         LOGGER.info(f"Zero-shot mode: using ImageNet-pretrained encoder inflated to {num_channels} channels.")
         if config.enable_attention:
-            LOGGER.info("CBAM Attention modülü aktif.")
+            LOGGER.info("CBAM Attention module is active.")
         model = build_model_with_imagenet_inflated(
-            arch=config.arch, 
-            encoder=config.encoder, 
+            arch=config.arch,
+            encoder=config.encoder,
             in_ch=num_channels,
             enable_attention=config.enable_attention,
             attention_reduction=config.attention_reduction,
         )
     elif enc_mode in ("", "none") and config.enable_deep_learning:
+        LOGGER.warning("No weights provided and zero_shot_imagenet is disabled; using random init model.")
         model = build_model(
-            arch=config.arch, 
-            encoder=config.encoder, 
+            arch=config.arch,
+            encoder=config.encoder,
             in_ch=num_channels,
             enable_attention=config.enable_attention,
             attention_reduction=config.attention_reduction,
         )
-        # weights_path is guaranteed to be set in this branch
-        if weights_path is not None:
-            load_weights(model, weights_path, map_location=device)
     else:
         model = None
 
@@ -5989,7 +6098,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     outputs = None
     if enc_mode in ("", "none") and config.enable_deep_learning and model is not None:
         # Weight type belirleme (eğitilmiş mi, ImageNet mi)
-        single_wt = "trained" if weights_path else "imagenet"
+        single_wt = "trained" if weights_path is not None else ("imagenet" if config.zero_shot_imagenet else "random")
         
         outputs = infer_tiled(
             model=model,

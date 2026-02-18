@@ -10,9 +10,11 @@ The output is a single-band GeoTIFF mask:
 
 Controls:
     Left mouse drag : draw a box
+    Ctrl + wheel    : zoom in/out at cursor
     d               : draw mode
     e               : erase mode
     k               : toggle square lock
+    z               : reset zoom to fit
     u               : undo last box
     c               : clear all labels
     r               : reset to initial mask
@@ -194,10 +196,19 @@ def _preview_box_to_full(
     return x0, y0, x1, y1
 
 
+def _get_wheel_delta(flags: int) -> int:
+    """Decode OpenCV wheel delta from mouse callback flags."""
+    raw = (int(flags) >> 16) & 0xFFFF
+    if raw >= 0x8000:
+        raw -= 0x10000
+    return int(raw)
+
+
 @dataclass
 class EditorState:
     preview_bgr: np.ndarray
     mask_full: np.ndarray
+    mask_preview: np.ndarray
     scale_x: float
     scale_y: float
     positive_value: int
@@ -206,8 +217,16 @@ class EditorState:
     dragging: bool = False
     start_pt: Optional[tuple[int, int]] = None
     current_pt: Optional[tuple[int, int]] = None
-    history: list[tuple[int, int, int, int, np.ndarray]] = field(default_factory=list)
+    history: list[tuple[int, int, int, int, np.ndarray, int, int, int, int, np.ndarray]] = field(
+        default_factory=list
+    )
     initial_mask: Optional[np.ndarray] = None
+    initial_mask_preview: Optional[np.ndarray] = None
+    zoom: float = 1.0
+    zoom_min: float = 1.0
+    zoom_max: float = 24.0
+    view_x: float = 0.0
+    view_y: float = 0.0
 
     @property
     def preview_h(self) -> int:
@@ -225,6 +244,43 @@ class EditorState:
     def full_w(self) -> int:
         return int(self.mask_full.shape[1])
 
+    def _view_size(self) -> tuple[float, float]:
+        return float(self.preview_w) / self.zoom, float(self.preview_h) / self.zoom
+
+    def clamp_view(self) -> None:
+        view_w, view_h = self._view_size()
+        max_x = max(0.0, float(self.preview_w) - view_w)
+        max_y = max(0.0, float(self.preview_h) - view_h)
+        self.view_x = float(np.clip(self.view_x, 0.0, max_x))
+        self.view_y = float(np.clip(self.view_y, 0.0, max_y))
+
+    def display_to_preview(self, x: int, y: int) -> tuple[int, int]:
+        self.clamp_view()
+        px = self.view_x + (float(x) / self.zoom)
+        py = self.view_y + (float(y) / self.zoom)
+        px_i = int(np.clip(np.round(px), 0, self.preview_w - 1))
+        py_i = int(np.clip(np.round(py), 0, self.preview_h - 1))
+        return px_i, py_i
+
+    def zoom_at_display(self, x: int, y: int, wheel_delta: int) -> None:
+        old_zoom = float(self.zoom)
+        factor = 1.2 if wheel_delta > 0 else (1.0 / 1.2)
+        new_zoom = float(np.clip(old_zoom * factor, self.zoom_min, self.zoom_max))
+        if abs(new_zoom - old_zoom) < 1e-9:
+            return
+
+        focus_x = self.view_x + (float(x) / old_zoom)
+        focus_y = self.view_y + (float(y) / old_zoom)
+        self.zoom = new_zoom
+        self.view_x = focus_x - (float(x) / new_zoom)
+        self.view_y = focus_y - (float(y) / new_zoom)
+        self.clamp_view()
+
+    def reset_zoom(self) -> None:
+        self.zoom = 1.0
+        self.view_x = 0.0
+        self.view_y = 0.0
+
     def apply_box_from_preview(self, pbox: tuple[int, int, int, int]) -> None:
         x0, y0, x1, y1 = _preview_box_to_full(
             pbox=pbox,
@@ -233,43 +289,51 @@ class EditorState:
             full_w=self.full_w,
             full_h=self.full_h,
         )
+        px0, py0, px1_inc, py1_inc = pbox[0], pbox[1], pbox[2] + 1, pbox[3] + 1
+        px0 = int(np.clip(px0, 0, self.preview_w - 1))
+        py0 = int(np.clip(py0, 0, self.preview_h - 1))
+        px1_inc = int(np.clip(px1_inc, px0 + 1, self.preview_w))
+        py1_inc = int(np.clip(py1_inc, py0 + 1, self.preview_h))
+
         if x1 <= x0 or y1 <= y0:
             return
 
         previous = self.mask_full[y0:y1, x0:x1].copy()
+        previous_preview = self.mask_preview[py0:py1_inc, px0:px1_inc].copy()
         if self.mode == "draw":
             self.mask_full[y0:y1, x0:x1] = np.uint8(self.positive_value)
+            self.mask_preview[py0:py1_inc, px0:px1_inc] = np.uint8(self.positive_value)
         else:
             self.mask_full[y0:y1, x0:x1] = np.uint8(0)
-        self.history.append((x0, y0, x1, y1, previous))
+            self.mask_preview[py0:py1_inc, px0:px1_inc] = np.uint8(0)
+        self.history.append((x0, y0, x1, y1, previous, px0, py0, px1_inc, py1_inc, previous_preview))
 
     def undo(self) -> None:
         if not self.history:
             return
-        x0, y0, x1, y1, previous = self.history.pop()
+        x0, y0, x1, y1, previous, px0, py0, px1_inc, py1_inc, previous_preview = self.history.pop()
         self.mask_full[y0:y1, x0:x1] = previous
+        self.mask_preview[py0:py1_inc, px0:px1_inc] = previous_preview
 
     def clear_all(self) -> None:
         self.mask_full.fill(0)
+        self.mask_preview.fill(0)
         self.history.clear()
 
     def reset_initial(self) -> None:
         if self.initial_mask is not None:
             self.mask_full[:, :] = self.initial_mask
+            if self.initial_mask_preview is not None:
+                self.mask_preview[:, :] = self.initial_mask_preview
             self.history.clear()
 
 
 def _render_canvas(state: EditorState) -> np.ndarray:
-    canvas = state.preview_bgr.copy()
-    mask_preview = cv2.resize(
-        (state.mask_full > 0).astype(np.uint8),
-        (state.preview_w, state.preview_h),
-        interpolation=cv2.INTER_NEAREST,
-    )
-    idx = mask_preview > 0
+    canvas_full = state.preview_bgr.copy()
+    idx = state.mask_preview > 0
     if np.any(idx):
-        blended = (1.0 - OVERLAY_ALPHA) * canvas[idx].astype(np.float32) + OVERLAY_ALPHA * OVERLAY_COLOR_BGR
-        canvas[idx] = blended.astype(np.uint8)
+        blended = (1.0 - OVERLAY_ALPHA) * canvas_full[idx].astype(np.float32) + OVERLAY_ALPHA * OVERLAY_COLOR_BGR
+        canvas_full[idx] = blended.astype(np.uint8)
 
     if state.dragging and state.start_pt is not None and state.current_pt is not None:
         xmin, ymin, xmax, ymax = _normalize_preview_box(
@@ -280,14 +344,30 @@ def _render_canvas(state: EditorState) -> np.ndarray:
             square_mode=state.square_mode,
         )
         color = (0, 255, 0) if state.mode == "draw" else (0, 255, 255)
-        cv2.rectangle(canvas, (xmin, ymin), (xmax, ymax), color, 2)
+        cv2.rectangle(canvas_full, (xmin, ymin), (xmax, ymax), color, 2)
+
+    state.clamp_view()
+    transform = np.array(
+        [[1.0 / state.zoom, 0.0, state.view_x], [0.0, 1.0 / state.zoom, state.view_y]],
+        dtype=np.float32,
+    )
+    canvas = cv2.warpAffine(
+        canvas_full,
+        transform,
+        (state.preview_w, state.preview_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
 
     pos_count = int(np.count_nonzero(state.mask_full))
     total = int(state.mask_full.size)
     ratio = (100.0 * pos_count / total) if total > 0 else 0.0
-    line1 = f"mode: {state.mode} | square: {'on' if state.square_mode else 'off'} | labels: {len(state.history)}"
+    line1 = (
+        f"mode: {state.mode} | square: {'on' if state.square_mode else 'off'} "
+        f"| zoom: {state.zoom:.2f}x | labels: {len(state.history)}"
+    )
     line2 = f"positive pixels: {pos_count} / {total} ({ratio:.2f}%)"
-    line3 = "keys: d draw | e erase | k square | u undo | c clear | r reset | s save | q quit"
+    line3 = "keys: Ctrl+wheel zoom | z fit | d/e mode | k square | u/c/r | s save | q quit"
     cv2.putText(canvas, line1, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(canvas, line1, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 1, cv2.LINE_AA)
     cv2.putText(canvas, line2, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
@@ -297,18 +377,25 @@ def _render_canvas(state: EditorState) -> np.ndarray:
     return canvas
 
 
-def _mouse_callback(event: int, x: int, y: int, _flags: int, state: EditorState) -> None:
+def _mouse_callback(event: int, x: int, y: int, flags: int, state: EditorState) -> None:
     x = int(np.clip(x, 0, state.preview_w - 1))
     y = int(np.clip(y, 0, state.preview_h - 1))
+    if event == cv2.EVENT_MOUSEWHEEL and (flags & cv2.EVENT_FLAG_CTRLKEY):
+        delta = _get_wheel_delta(flags)
+        if delta != 0:
+            state.zoom_at_display(x=x, y=y, wheel_delta=delta)
+        return
+
+    px, py = state.display_to_preview(x, y)
 
     if event == cv2.EVENT_LBUTTONDOWN:
         state.dragging = True
-        state.start_pt = (x, y)
-        state.current_pt = (x, y)
+        state.start_pt = (px, py)
+        state.current_pt = (px, py)
     elif event == cv2.EVENT_MOUSEMOVE and state.dragging:
-        state.current_pt = (x, y)
+        state.current_pt = (px, py)
     elif event == cv2.EVENT_LBUTTONUP and state.dragging:
-        state.current_pt = (x, y)
+        state.current_pt = (px, py)
         if state.start_pt is not None and state.current_pt is not None:
             pbox = _normalize_preview_box(
                 state.start_pt,
@@ -422,14 +509,23 @@ def main() -> int:
     if args.free_rectangle:
         square_mode = False
 
+    initial_mask_preview = cv2.resize(
+        (initial_mask > 0).astype(np.uint8),
+        (preview_bgr.shape[1], preview_bgr.shape[0]),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    initial_mask_preview[initial_mask_preview > 0] = np.uint8(int(args.positive_value))
+
     state = EditorState(
         preview_bgr=preview_bgr,
         mask_full=initial_mask.copy(),
+        mask_preview=initial_mask_preview.copy(),
         scale_x=scale_x,
         scale_y=scale_y,
         positive_value=int(args.positive_value),
         square_mode=square_mode,
         initial_mask=initial_mask.copy(),
+        initial_mask_preview=initial_mask_preview.copy(),
     )
 
     print("=" * 72)
@@ -438,8 +534,8 @@ def main() -> int:
     print(f"Cikti maske  : {output_path}")
     print(f"Raster boyutu: {state.full_w}x{state.full_h}")
     print("Kontroller   :")
-    print("  Sol fare: ciz | d: draw | e: erase | k: square toggle")
-    print("  u: undo | c: clear | r: reset | s: save | q/ESC: quit")
+    print("  Sol fare: ciz | Ctrl+Tekerlek: zoom | z: zoom reset")
+    print("  d/e: mode | k: square | u: undo | c: clear | r: reset | s: save | q/ESC: quit")
     print("=" * 72)
 
     try:
@@ -472,6 +568,8 @@ def main() -> int:
             state.clear_all()
         elif key == ord("r"):
             state.reset_initial()
+        elif key == ord("z"):
+            state.reset_zoom()
         elif key == ord("s"):
             _save_mask(output_path=output_path, profile=profile, mask=state.mask_full)
             pos_count = int(np.count_nonzero(state.mask_full))
@@ -489,4 +587,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
