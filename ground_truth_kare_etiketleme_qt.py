@@ -194,7 +194,10 @@ class Session:
 
     def _build_preview(self, max_size: int, bands: tuple[int, int, int]) -> tuple[np.ndarray, float, float]:
         h, w = self.src.height, self.src.width
-        scale = min(1.0, float(max_size) / float(max(h, w)))
+        if max_size <= 0:
+            scale = 1.0
+        else:
+            scale = min(1.0, float(max_size) / float(max(h, w)))
         ph = max(1, int(round(h * scale)))
         pw = max(1, int(round(w * scale)))
         rgb = np.zeros((ph, pw, 3), dtype=np.uint8)
@@ -271,7 +274,7 @@ class AnnotView(QGraphicsView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        self.setRenderHints(QPainter.RenderHint.Antialiasing)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
@@ -413,7 +416,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
 
         self.base_item = QGraphicsPixmapItem()
+        self.base_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
         self.mask_item = QGraphicsPixmapItem()
+        self.mask_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
         self.scene.addItem(self.base_item)
         self.scene.addItem(self.mask_item)
 
@@ -727,7 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--input", "-i", type=str, default="")
     p.add_argument("--output", "-o", type=str, default="")
     p.add_argument("--existing-mask", type=str, default="")
-    p.add_argument("--preview-max-size", type=int, default=1800)
+    p.add_argument("--preview-max-size", type=int, default=0)
     p.add_argument("--bands", type=str, default="1,2,3")
     p.add_argument("--positive-value", type=int, default=1)
     p.add_argument("--square-mode", action="store_true")
@@ -742,8 +747,8 @@ def main() -> int:
     app.setApplicationName(APP_TITLE)
     preview_max = int(args.preview_max_size)
     positive = int(args.positive_value)
-    if preview_max <= 0:
-        QMessageBox.critical(None, APP_TITLE, "--preview-max-size pozitif olmali")
+    if preview_max < 0:
+        QMessageBox.critical(None, APP_TITLE, "--preview-max-size 0 veya pozitif olmali (0=tam cozumurluk)")
         return 1
     if not (1 <= positive <= 255):
         QMessageBox.critical(None, APP_TITLE, "--positive-value 1-255 araliginda olmali")
