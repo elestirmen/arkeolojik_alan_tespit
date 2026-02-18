@@ -20,9 +20,7 @@ Kanal Yapısı (12 kanal):
 
 Kullanım:
     python egitim_verisi_olusturma.py --input kesif_alani.tif --mask ground_truth.tif --output training_data
-    
-    Veya interaktif mod:
-    python egitim_verisi_olusturma.py
+    python egitim_verisi_olusturma.py  # CONFIG bolumundeki varsayilanlarla calisir
 
 Gereksinimler:
     - Çok bantlı GeoTIFF (RGB + DSM + DTM)
@@ -66,6 +64,35 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 LOGGER = logging.getLogger("egitim_verisi")
+
+# ==================== CONFIG ====================
+# IDE uzerinden dogrudan "Run" ettiginizde bu degerler kullanilir.
+# Komut satirindan verilen argumanlar her zaman bu degerleri ezer.
+CONFIG: dict[str, object] = {
+    # Girdi cok bantli raster (RGB + DSM + DTM)
+    "input": "veri/karlik_dag_rgb_dtm_dsm_5band.tif",
+    # Ground-truth maske (arkeolojik alan=1, arka plan=0)
+    "mask": "ground_truth.tif",
+    # Cikti dizini
+    "output": "training_data",
+    # Tile ayarlari
+    "tile_size": 256,
+    "overlap": 64,
+    # Bant sirasi: R,G,B,DSM,DTM
+    "bands": "1,2,3,4,5",
+    # TPI yaricaplari
+    "tpi_radii": (5, 15, 30),
+    # Filtreleme/split
+    "min_positive": 0.0,
+    "max_nodata": 0.3,
+    "train_ratio": 0.8,
+    "split_mode": "spatial",  # spatial | random
+    # On-isleme/kayit
+    "normalize": True,
+    "format": "npz",  # npy | npz
+    "balance_ratio": None,  # Ornek: 0.4
+}
+# ===============================================
 
 
 def _validate_tile_generation_params(
@@ -632,68 +659,83 @@ def create_tiles_from_multiple_sources(
 
 
 def main():
+    config_input = str(CONFIG.get("input", "")).strip()
+    config_mask = str(CONFIG.get("mask", "")).strip()
+    config_output = str(CONFIG.get("output", "training_data")).strip() or "training_data"
+    config_tpi_radii = CONFIG.get("tpi_radii", (5, 15, 30))
+    if isinstance(config_tpi_radii, (list, tuple)):
+        tpi_default = ",".join(str(int(r)) for r in config_tpi_radii)
+    else:
+        tpi_default = str(config_tpi_radii).strip() or "5,15,30"
+
+    config_balance_ratio = CONFIG.get("balance_ratio", None)
+    if config_balance_ratio is not None:
+        config_balance_ratio = float(config_balance_ratio)
+
     parser = argparse.ArgumentParser(
-        description="12 kanallı arkeolojik tespit eğitim verisi oluşturma",
+        description="12 kanalli arkeolojik tespit egitim verisi olusturma",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    
+
     parser.add_argument(
         "--input", "-i",
         type=str,
-        help="Çok bantlı GeoTIFF dosyası (RGB + DSM + DTM)",
+        default=config_input if config_input else None,
+        help="Cok bantli GeoTIFF dosyasi (RGB + DSM + DTM)",
     )
     parser.add_argument(
         "--mask", "-m",
         type=str,
-        help="Ground truth maske dosyası (arkeolojik alanlar = 1)",
+        default=config_mask if config_mask else None,
+        help="Ground truth maske dosyasi (arkeolojik alanlar = 1)",
     )
     parser.add_argument(
         "--output", "-o",
         type=str,
-        default="training_data",
-        help="Çıktı dizini",
+        default=config_output,
+        help="Cikti dizini",
     )
     parser.add_argument(
         "--tile-size", "-t",
         type=int,
-        default=256,
+        default=int(CONFIG.get("tile_size", 256)),
         help="Tile boyutu (piksel)",
     )
     parser.add_argument(
         "--overlap",
         type=int,
-        default=64,
-        help="Tile örtüşme miktarı (piksel)",
+        default=int(CONFIG.get("overlap", 64)),
+        help="Tile ortusme miktari (piksel)",
     )
     parser.add_argument(
         "--bands", "-b",
         type=str,
-        default="1,2,3,4,5",
-        help="Bant sırası (R,G,B,DSM,DTM)",
+        default=str(CONFIG.get("bands", "1,2,3,4,5")),
+        help="Bant sirasi (R,G,B,DSM,DTM)",
     )
     parser.add_argument(
         "--tpi-radii",
         type=str,
-        default="5,15,30",
-        help="TPI yarıçapları (virgülle ayrılmış)",
+        default=tpi_default,
+        help="TPI yaricaplari (virgulle ayrilmis)",
     )
     parser.add_argument(
         "--min-positive",
         type=float,
-        default=0.0,
-        help="Minimum pozitif piksel oranı (0-1). 0=tüm tile'lar dahil",
+        default=float(CONFIG.get("min_positive", 0.0)),
+        help="Minimum pozitif piksel orani (0-1). 0=tum tile'lar dahil",
     )
     parser.add_argument(
         "--max-nodata",
         type=float,
-        default=0.3,
-        help="Maksimum nodata oranı (0-1)",
+        default=float(CONFIG.get("max_nodata", 0.3)),
+        help="Maksimum nodata orani (0-1)",
     )
     parser.add_argument(
         "--train-ratio",
         type=float,
-        default=0.8,
-        help="Eğitim/toplam oranı",
+        default=float(CONFIG.get("train_ratio", 0.8)),
+        help="Egitim/toplam orani",
     )
     parser.add_argument(
         "--no-normalize",
@@ -704,67 +746,55 @@ def main():
         "--format",
         type=str,
         choices=["npy", "npz"],
-        default="npz",
-        help="Kayıt formatı",
+        default=str(CONFIG.get("format", "npz")),
+        help="Kayit formati",
     )
     parser.add_argument(
         "--balance-ratio",
         type=float,
-        default=None,
-        help="Pozitif/negatif dengeleme oranı (0-1). Örn: 0.4 = %%40 pozitif, %%60 negatif. "
-             "None = dengeleme yok. Önerilen: 0.4 (hafif dengeli)",
+        default=config_balance_ratio,
+        help=(
+            "Pozitif/negatif dengeleme orani (0-1). Ornek: 0.4 = %%40 pozitif, %%60 negatif. "
+            "None = dengeleme yok. Onerilen: 0.4 (hafif dengeli)"
+        ),
     )
     parser.add_argument(
         "--split-mode",
         type=str,
         choices=["spatial", "random"],
-        default="spatial",
-        help="Train/val bölme modu. spatial önerilir (mekansal sızıntıyı azaltır).",
+        default=str(CONFIG.get("split_mode", "spatial")),
+        help="Train/val bolme modu. spatial onerilir (mekansal sizintiyi azaltir).",
     )
-    
+    parser.set_defaults(no_normalize=not bool(CONFIG.get("normalize", True)))
+
     args = parser.parse_args()
-    
-    # İnteraktif mod (argüman verilmemişse)
-    if args.input is None or args.mask is None:
-        print("\n" + "=" * 60)
-        print("ARKEOLOJİK ALAN TESPİTİ - EĞİTİM VERİSİ OLUŞTURMA")
-        print("=" * 60)
-        print("\nLütfen gerekli dosyaları girin:")
-        
-        args.input = input("Girdi GeoTIFF dosyası [kesif_alani.tif]: ").strip()
-        if not args.input:
-            args.input = "kesif_alani.tif"
-        
-        args.mask = input("Ground truth maske dosyası: ").strip()
-        if not args.mask:
-            print("HATA: Maske dosyası gerekli!")
-            print("\nİpucu: Ground truth maske, arkeolojik alanların")
-            print("       işaretlendiği tek bantlı bir GeoTIFF olmalıdır.")
-            print("       Arkeolojik alan = 1, Arka plan = 0")
-            sys.exit(1)
-        
-        args.output = input(f"Çıktı dizini [{args.output}]: ").strip() or args.output
-        
-        tile_input = input(f"Tile boyutu [{args.tile_size}]: ").strip()
-        if tile_input:
-            args.tile_size = int(tile_input)
-    
-    # TPI yarıçaplarını parse et
-    tpi_radii = tuple(int(r) for r in args.tpi_radii.split(","))
-    
-    # Dosya kontrolü
+
+    if not args.input:
+        parser.error("Girdi dosyasi icin CONFIG['input'] veya --input belirtin.")
+    if not args.mask:
+        parser.error("Maske dosyasi icin CONFIG['mask'] veya --mask belirtin.")
+
+    try:
+        tpi_radii = tuple(
+            int(r.strip()) for r in str(args.tpi_radii).split(",") if r.strip()
+        )
+    except ValueError:
+        parser.error(f"Gecersiz --tpi-radii degeri: {args.tpi_radii}")
+
+    if not tpi_radii:
+        parser.error("TPI yaricaplari bos olamaz. Ornek: 5,15,30")
+
     input_path = Path(args.input)
     mask_path = Path(args.mask)
-    
+
     if not input_path.exists():
-        print(f"HATA: Girdi dosyası bulunamadı: {input_path}")
+        print(f"HATA: Girdi dosyasi bulunamadi: {input_path}")
         sys.exit(1)
-    
+
     if not mask_path.exists():
-        print(f"HATA: Maske dosyası bulunamadı: {mask_path}")
+        print(f"HATA: Maske dosyasi bulunamadi: {mask_path}")
         sys.exit(1)
-    
-    # Tile oluştur
+
     try:
         create_training_tiles(
             input_tif=input_path,
@@ -785,15 +815,15 @@ def main():
     except Exception as e:
         LOGGER.error(f"Hata: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
-    
-    print("\n✓ Eğitim verisi oluşturma tamamlandı!")
-    print("  Şimdi training.py ile model eğitebilirsiniz:")
+
+    print("\nOK - Egitim verisi olusturma tamamlandi!")
+    print("  Simdi training.py ile model egitebilirsiniz:")
     print(f"  python training.py --data {args.output}")
 
 
 if __name__ == "__main__":
     main()
-
 
