@@ -18,6 +18,9 @@ Controls:
     k               : toggle square lock
     z               : reset zoom to fit
     u               : undo last box
+    Ctrl+Z          : undo last box
+    + / -           : zoom in / zoom out (center)
+    i               : invert mouse wheel zoom direction
     c               : clear all labels
     r               : reset to initial mask
     s               : save and continue
@@ -351,7 +354,7 @@ def _open_launcher_dialog(defaults: dict[str, Any]) -> Optional[dict[str, Any]]:
         root,
         text=(
             "Editorde: Sol fare ile ciz, sag fare ile gezin (pan), tekerlek ile zoom.\n"
-            "s: kaydet | a: farkli kaydet | x: kaydet+cik | q/ESC: cikis"
+            "u/Ctrl+Z: geri al | +/-: zoom | i: tekerlek yonu | s: kaydet | q/ESC: cikis"
         ),
         justify="left",
         fg="#333333",
@@ -475,6 +478,11 @@ def _preview_box_to_full(
 
 def _get_wheel_delta(flags: int) -> int:
     """Decode OpenCV wheel delta from mouse callback flags."""
+    if hasattr(cv2, "getMouseWheelDelta"):
+        try:
+            return int(cv2.getMouseWheelDelta(flags))
+        except Exception:
+            pass
     raw = (int(flags) >> 16) & 0xFFFF
     if raw >= 0x8000:
         raw -= 0x10000
@@ -510,6 +518,11 @@ class EditorState:
     dirty: bool = False
     button_regions: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
     pending_action: Optional[str] = None
+    wheel_direction: int = 1  # 1:normal, -1:inverted
+    src: Optional[Any] = None
+    src_bands: tuple[int, int, int] = (1, 1, 1)
+    native_bg_cache_key: Optional[tuple[int, int, int, int, int, int]] = None
+    native_bg_cache_bgr: Optional[np.ndarray] = None
 
     @property
     def preview_h(self) -> int:
@@ -676,12 +689,78 @@ def _hit_action_button(state: EditorState, x: int, y: int) -> Optional[str]:
     return None
 
 
+def _get_viewport_bounds(state: EditorState) -> tuple[int, int, int, int]:
+    state.clamp_view()
+    view_w_f, view_h_f = state._view_size()
+    vx0 = int(np.floor(state.view_x))
+    vy0 = int(np.floor(state.view_y))
+    vx1 = int(np.ceil(state.view_x + view_w_f))
+    vy1 = int(np.ceil(state.view_y + view_h_f))
+    vx0 = int(np.clip(vx0, 0, state.preview_w - 1))
+    vy0 = int(np.clip(vy0, 0, state.preview_h - 1))
+    vx1 = int(np.clip(vx1, vx0 + 1, state.preview_w))
+    vy1 = int(np.clip(vy1, vy0 + 1, state.preview_h))
+    return vx0, vy0, vx1, vy1
+
+
+def _get_native_background(
+    state: EditorState,
+    vx0: int,
+    vy0: int,
+    vx1: int,
+    vy1: int,
+) -> np.ndarray:
+    if state.src is None:
+        raise RuntimeError("Raster source not available for native rendering.")
+
+    display_h, display_w = state.preview_h, state.preview_w
+    fx0 = int(np.floor(vx0 * state.scale_x))
+    fy0 = int(np.floor(vy0 * state.scale_y))
+    fx1 = int(np.ceil(vx1 * state.scale_x))
+    fy1 = int(np.ceil(vy1 * state.scale_y))
+    fx0 = int(np.clip(fx0, 0, state.full_w - 1))
+    fy0 = int(np.clip(fy0, 0, state.full_h - 1))
+    fx1 = int(np.clip(fx1, fx0 + 1, state.full_w))
+    fy1 = int(np.clip(fy1, fy0 + 1, state.full_h))
+
+    fw = fx1 - fx0
+    fh = fy1 - fy0
+    cache_key = (fx0, fy0, fw, fh, display_w, display_h)
+    if state.native_bg_cache_key == cache_key and state.native_bg_cache_bgr is not None:
+        return state.native_bg_cache_bgr.copy()
+
+    window = rasterio.windows.Window(col_off=fx0, row_off=fy0, width=fw, height=fh)
+    rgb = np.zeros((display_h, display_w, 3), dtype=np.uint8)
+    for i, band in enumerate(state.src_bands):
+        arr = state.src.read(
+            band,
+            window=window,
+            out_shape=(display_h, display_w),
+            resampling=Resampling.bilinear,
+        ).astype(np.float32, copy=False)
+        rgb[:, :, i] = _stretch_to_uint8(arr)
+
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    state.native_bg_cache_key = cache_key
+    state.native_bg_cache_bgr = bgr.copy()
+    return bgr
+
+
 def _render_canvas(state: EditorState) -> np.ndarray:
-    canvas_full = state.preview_bgr.copy()
-    idx = state.mask_preview > 0
-    if np.any(idx):
-        blended = (1.0 - OVERLAY_ALPHA) * canvas_full[idx].astype(np.float32) + OVERLAY_ALPHA * OVERLAY_COLOR_BGR
-        canvas_full[idx] = blended.astype(np.uint8)
+    vx0, vy0, vx1, vy1 = _get_viewport_bounds(state)
+    if state.src is not None and state.zoom > 1.0:
+        canvas = _get_native_background(state, vx0, vy0, vx1, vy1)
+    else:
+        bg_crop = state.preview_bgr[vy0:vy1, vx0:vx1]
+        bg_interp = cv2.INTER_LINEAR if state.zoom >= 1.0 else cv2.INTER_AREA
+        canvas = cv2.resize(bg_crop, (state.preview_w, state.preview_h), interpolation=bg_interp)
+
+    mask_crop = state.mask_preview[vy0:vy1, vx0:vx1]
+    mask_canvas = cv2.resize(mask_crop, (state.preview_w, state.preview_h), interpolation=cv2.INTER_NEAREST)
+    mask_idx = mask_canvas > 0
+    if np.any(mask_idx):
+        blended = (1.0 - OVERLAY_ALPHA) * canvas[mask_idx].astype(np.float32) + OVERLAY_ALPHA * OVERLAY_COLOR_BGR
+        canvas[mask_idx] = blended.astype(np.uint8)
 
     if state.dragging and state.start_pt is not None and state.current_pt is not None:
         xmin, ymin, xmax, ymax = _normalize_preview_box(
@@ -691,21 +770,18 @@ def _render_canvas(state: EditorState) -> np.ndarray:
             max_h=state.preview_h,
             square_mode=state.square_mode,
         )
+        sx = float(state.preview_w) / float(vx1 - vx0)
+        sy = float(state.preview_h) / float(vy1 - vy0)
+        dx0 = int(np.round((xmin - vx0) * sx))
+        dy0 = int(np.round((ymin - vy0) * sy))
+        dx1 = int(np.round((xmax - vx0) * sx))
+        dy1 = int(np.round((ymax - vy0) * sy))
+        dx0 = int(np.clip(dx0, 0, state.preview_w - 1))
+        dy0 = int(np.clip(dy0, 0, state.preview_h - 1))
+        dx1 = int(np.clip(dx1, 0, state.preview_w - 1))
+        dy1 = int(np.clip(dy1, 0, state.preview_h - 1))
         color = (0, 255, 0) if state.mode == "draw" else (0, 255, 255)
-        cv2.rectangle(canvas_full, (xmin, ymin), (xmax, ymax), color, 2)
-
-    state.clamp_view()
-    transform = np.array(
-        [[1.0 / state.zoom, 0.0, state.view_x], [0.0, 1.0 / state.zoom, state.view_y]],
-        dtype=np.float32,
-    )
-    canvas = cv2.warpAffine(
-        canvas_full,
-        transform,
-        (state.preview_w, state.preview_h),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
+        cv2.rectangle(canvas, (dx0, dy0), (dx1, dy1), color, 2)
 
     pos_count = int(np.count_nonzero(state.mask_full))
     total = int(state.mask_full.size)
@@ -717,8 +793,10 @@ def _render_canvas(state: EditorState) -> np.ndarray:
     )
     line2 = f"positive pixels: {pos_count} / {total} ({ratio:.2f}%)"
     line3 = "mouse: left draw | right drag pan | wheel zoom | d/e mode | k square | z fit"
-    line4 = "keys: u undo | c clear | r reset | s save | a save as | x save+exit | q quit"
-    line5 = "buttons: top-right Save / Save As / Save+Exit / Quit"
+    wheel_dir_txt = "normal" if state.wheel_direction > 0 else "inverted"
+    line4 = "keys: u/Ctrl+Z undo | c clear | r reset | + / - zoom | i invert wheel"
+    line5 = f"keys: s save | a save as | x save+exit | q quit | wheel-dir: {wheel_dir_txt}"
+    line6 = "buttons: top-right Save / Save As / Save+Exit / Quit"
     cv2.putText(canvas, line1, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(canvas, line1, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 1, cv2.LINE_AA)
     cv2.putText(canvas, line2, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
@@ -729,6 +807,8 @@ def _render_canvas(state: EditorState) -> np.ndarray:
     cv2.putText(canvas, line4, (12, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
     cv2.putText(canvas, line5, (12, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(canvas, line5, (12, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.putText(canvas, line6, (12, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(canvas, line6, (12, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
     _draw_action_buttons(canvas, state)
     return canvas
 
@@ -736,10 +816,11 @@ def _render_canvas(state: EditorState) -> np.ndarray:
 def _mouse_callback(event: int, x: int, y: int, flags: int, state: EditorState) -> None:
     x = int(np.clip(x, 0, state.preview_w - 1))
     y = int(np.clip(y, 0, state.preview_h - 1))
-    if event == cv2.EVENT_MOUSEWHEEL:
+    if event in (cv2.EVENT_MOUSEWHEEL, cv2.EVENT_MOUSEHWHEEL):
         delta = _get_wheel_delta(flags)
         if delta != 0:
-            state.zoom_at_display(x=x, y=y, wheel_delta=delta)
+            # Zoom yonu sabit tutulur; yalnizca kullanici 'i' tusuyla tersleyebilir.
+            state.zoom_at_display(x=x, y=y, wheel_delta=int(delta * state.wheel_direction))
         return
 
     if event == cv2.EVENT_RBUTTONDOWN:
@@ -926,18 +1007,21 @@ def main() -> int:
     if str(args.existing_mask).strip():
         existing_mask = Path(str(args.existing_mask).strip()).expanduser()
 
+    src = None
     try:
-        with rasterio.open(input_path) as src:
-            bands = _parse_bands(str(args.bands), src.count)
-            preview_bgr, scale_x, scale_y = _build_preview(src, bands, int(args.preview_max_size))
-            profile = src.profile.copy()
-            initial_mask = _load_initial_mask(
-                existing_mask=existing_mask,
-                height=src.height,
-                width=src.width,
-                positive_value=int(args.positive_value),
-            )
+        src = rasterio.open(input_path)
+        bands = _parse_bands(str(args.bands), src.count)
+        preview_bgr, scale_x, scale_y = _build_preview(src, bands, int(args.preview_max_size))
+        profile = src.profile.copy()
+        initial_mask = _load_initial_mask(
+            existing_mask=existing_mask,
+            height=src.height,
+            width=src.width,
+            positive_value=int(args.positive_value),
+        )
     except Exception as exc:
+        if src is not None:
+            src.close()
         print(f"HATA: Raster acilamadi veya onizleme olusturulamadi: {exc}")
         return 1
 
@@ -965,6 +1049,9 @@ def main() -> int:
         square_mode=square_mode,
         initial_mask=initial_mask.copy(),
         initial_mask_preview=initial_mask_preview.copy(),
+        zoom_max=max(24.0, float(max(scale_x, scale_y)) * 2.0),
+        src=src,
+        src_bands=bands,
     )
 
     print("=" * 78)
@@ -974,7 +1061,8 @@ def main() -> int:
     print(f"Raster boyutu: {state.full_w}x{state.full_h}")
     print("Kontroller   :")
     print("  Sol fare: ciz | Sag fare: pan | Tekerlek: zoom | z: zoom reset")
-    print("  d/e: mode | k: square | u: undo | c: clear | r: reset")
+    print("  d/e: mode | k: square | u veya Ctrl+Z: undo | c: clear | r: reset")
+    print("  + / -: zoom in/out | i: tekerlek zoom yonunu tersle")
     print("  s: kaydet | a: farkli kaydet | x: kaydet+cik | q/ESC: cik")
     print("  Sag ust butonlar: Kaydet | Farkli Kaydet | Kaydet+Cik | Cikis")
     print("=" * 78)
@@ -984,6 +1072,8 @@ def main() -> int:
         cv2.resizeWindow(WINDOW_NAME, min(state.preview_w, 1600), min(state.preview_h, 1000))
         cv2.setMouseCallback(WINDOW_NAME, _mouse_callback, state)
     except cv2.error as exc:
+        if src is not None:
+            src.close()
         print("HATA: OpenCV pencere acilamadi. Masaustu GUI ortaminda calistirin.")
         print(f"Detay: {exc}")
         return 1
@@ -1003,6 +1093,8 @@ def main() -> int:
             key_char = chr(key).lower() if 32 <= key <= 126 else ""
             if key == 27 or key_char == "q":
                 action = "quit"
+            elif key == 26:  # Ctrl+Z
+                action = "undo"
             elif key_char == "d":
                 action = "draw"
             elif key_char == "e":
@@ -1017,6 +1109,12 @@ def main() -> int:
                 action = "reset_initial"
             elif key_char == "z":
                 action = "zoom_reset"
+            elif key_char in ("+", "="):
+                action = "zoom_in"
+            elif key_char in ("-", "_"):
+                action = "zoom_out"
+            elif key_char == "i":
+                action = "invert_wheel"
             elif key_char == "s":
                 action = "save"
             elif key_char == "a":
@@ -1057,6 +1155,12 @@ def main() -> int:
             state.reset_initial()
         elif action == "zoom_reset":
             state.reset_zoom()
+        elif action == "zoom_in":
+            state.zoom_at_display(x=state.preview_w // 2, y=state.preview_h // 2, wheel_delta=120)
+        elif action == "zoom_out":
+            state.zoom_at_display(x=state.preview_w // 2, y=state.preview_h // 2, wheel_delta=-120)
+        elif action == "invert_wheel":
+            state.wheel_direction *= -1
         elif action == "save":
             if _save_with_feedback(state=state, output_path=output_path, profile=profile):
                 saved_once = True
@@ -1072,6 +1176,8 @@ def main() -> int:
                 break
 
     cv2.destroyAllWindows()
+    if src is not None:
+        src.close()
     if quit_without_save:
         print("Kaydedilmeden cikildi.")
     elif not saved_once and not state.dirty:
