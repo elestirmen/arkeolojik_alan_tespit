@@ -143,7 +143,7 @@ arch: "Unet"
 #   - "vgg16"             → Klasik, basit
 #   - "densenet121"       → Yoğun bağlantılar
 # ÖNERİ: "resnet34" ile başlayın, sonra "efficientnet-b3" deneyin
-encoder: "resnet34"
+encoder: "resnet50"
 
 # encoders: ÇOKLU ENCODER modu
 # - "all"  : Tüm desteklenen encoder'ları kullan (ensemble öğrenme)
@@ -165,7 +165,7 @@ encoders: "resnet34,resnet50,efficientnet-b3,DenseNet121"
 # - null ise: ImageNet ağırlıkları kullanılır (zero-shot)
 # - Örnek: "models/unet_resnet34_5ep.pth"
 # NOT: Bu parametre yalnızca tek encoder modunda (encoders: "none") kullanılır
-weights: "checkpoints/epochs/epoch_005_Unet_resnet34_12ch_attention.pth"
+weights: "checkpoints/epochs/epoch_006_Unet_resnet50_12ch_attention.pth"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir

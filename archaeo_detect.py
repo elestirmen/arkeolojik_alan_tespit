@@ -1913,6 +1913,45 @@ def build_model_with_imagenet_inflated(
     return model
 
 
+def safe_torch_load(weights_path: Path, map_location: Any) -> Any:
+    """Load checkpoints safely when possible, with backward-compatible fallbacks."""
+    try:
+        return torch.load(weights_path, map_location=map_location, weights_only=True)
+    except TypeError:
+        # Older torch versions do not support `weights_only`.
+        return torch.load(weights_path, map_location=map_location)
+    except Exception as exc:
+        LOGGER.debug(
+            "weights_only checkpoint load failed for %s (%s). Retrying full load.",
+            weights_path,
+            exc,
+        )
+        return torch.load(weights_path, map_location=map_location, weights_only=False)
+
+
+def get_checkpoint_model_hints(weights_path: Path) -> Dict[str, Any]:
+    """Extract optional model metadata from a checkpoint."""
+    if not weights_path.exists():
+        return {}
+    try:
+        state_obj = safe_torch_load(weights_path, map_location="cpu")
+    except Exception as exc:
+        LOGGER.debug("Could not inspect checkpoint metadata from %s: %s", weights_path, exc)
+        return {}
+
+    if not isinstance(state_obj, dict):
+        return {}
+    cfg = state_obj.get("config")
+    if not isinstance(cfg, dict):
+        return {}
+
+    hints: Dict[str, Any] = {}
+    for key in ("arch", "encoder", "in_channels", "enable_attention", "attention_reduction"):
+        if key in cfg:
+            hints[key] = cfg[key]
+    return hints
+
+
 def load_weights(
     model: torch.nn.Module,
     weights_path: Path,
@@ -1958,9 +1997,40 @@ def load_weights(
                 return int(tensor.shape[1])
         return None
 
+    def _resolve_model_encoder_name(target_model: torch.nn.Module) -> Optional[str]:
+        queue: List[torch.nn.Module] = [target_model]
+        visited: set[int] = set()
+        while queue:
+            current = queue.pop(0)
+            obj_id = id(current)
+            if obj_id in visited:
+                continue
+            visited.add(obj_id)
+
+            encoder = getattr(current, "encoder", None)
+            name = getattr(encoder, "name", None) if encoder is not None else None
+            if isinstance(name, str) and name:
+                return name
+
+            for attr in ("base_model", "module"):
+                nested = getattr(current, attr, None)
+                if isinstance(nested, torch.nn.Module):
+                    queue.append(nested)
+        return None
+
+    def _resolve_model_arch_name(target_model: torch.nn.Module) -> str:
+        base_model = getattr(target_model, "base_model", target_model)
+        return base_model.__class__.__name__
+
+    def _checkpoint_cfg(obj: Any) -> Dict[str, Any]:
+        if not isinstance(obj, dict):
+            return {}
+        cfg = obj.get("config")
+        return cfg if isinstance(cfg, dict) else {}
+
     if not weights_path.exists():
         raise FileNotFoundError(f"Weights not found: {weights_path}")
-    state_obj = torch.load(weights_path, map_location=map_location)
+    state_obj = safe_torch_load(weights_path, map_location=map_location)
     state = state_obj
     if isinstance(state_obj, dict):
         for key in ("state_dict", "model_state_dict"):
@@ -2012,7 +2082,28 @@ def load_weights(
             last_error = exc
 
     if last_error is not None:
-        raise RuntimeError(f"Unable to load weights from {weights_path}: {last_error}") from last_error
+        details: List[str] = []
+        ck_cfg = _checkpoint_cfg(state_obj)
+        ck_encoder = str(ck_cfg.get("encoder", "")).strip()
+        ck_arch = str(ck_cfg.get("arch", "")).strip()
+        ck_in_ch = ck_cfg.get("in_channels")
+        model_encoder = _resolve_model_encoder_name(model)
+        model_arch = _resolve_model_arch_name(model)
+
+        if ck_encoder and model_encoder and ck_encoder != model_encoder:
+            details.append(f"encoder mismatch (checkpoint={ck_encoder}, model={model_encoder})")
+        if ck_arch and model_arch and ck_arch != model_arch:
+            details.append(f"arch mismatch (checkpoint={ck_arch}, model={model_arch})")
+        if isinstance(ck_in_ch, int) and ck_in_ch != expected_in_ch:
+            details.append(f"in_channels mismatch (checkpoint={ck_in_ch}, model={expected_in_ch})")
+
+        error_head = str(last_error).splitlines()[0].strip()
+        if details:
+            raise RuntimeError(
+                f"Unable to load weights from {weights_path}: {error_head}. "
+                f"{'; '.join(details)}. Check --encoder/--arch/channel settings."
+            ) from last_error
+        raise RuntimeError(f"Unable to load weights from {weights_path}: {error_head}") from last_error
 
 
 def generate_windows(
@@ -5606,7 +5697,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(argv)
-    config = build_config_from_args(args, cli_overrides=collect_cli_overrides(parser, argv_list))
+    cli_overrides = collect_cli_overrides(parser, argv_list)
+    config = build_config_from_args(args, cli_overrides=cli_overrides)
 
     ENCODER_ALIASES = {
         "efficientnet-b3": "timm-efficientnet-b3",
@@ -5664,6 +5756,48 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if enc_mode == "single":
         LOGGER.info("'single' encoder modu, tek-model modu olarak yorumlandı (encoders=none).")
         enc_mode = "none"
+
+    checkpoint_hints: Dict[str, Any] = {}
+    if config.enable_deep_learning and enc_mode in ("", "none") and config.weights:
+        probe_weights_path = Path(config.weights)
+        if probe_weights_path.exists():
+            checkpoint_hints = get_checkpoint_model_hints(probe_weights_path)
+            hint_encoder_raw = str(checkpoint_hints.get("encoder", "")).strip()
+            if hint_encoder_raw:
+                hint_encoder, _ = normalize_encoder(hint_encoder_raw)
+                if hint_encoder != config.encoder:
+                    if "encoder" in cli_overrides:
+                        LOGGER.warning(
+                            "Checkpoint encoder '%s' ile --encoder '%s' farkli; explicit CLI degeri korunuyor.",
+                            hint_encoder,
+                            config.encoder,
+                        )
+                    else:
+                        LOGGER.info(
+                            "Checkpoint metadata: encoder '%s' bulundu, encoder '%s' -> '%s' guncellendi.",
+                            hint_encoder,
+                            config.encoder,
+                            hint_encoder,
+                        )
+                        config.encoder = hint_encoder
+
+            hint_arch = str(checkpoint_hints.get("arch", "")).strip()
+            if hint_arch and hint_arch != config.arch:
+                if "arch" in cli_overrides:
+                    LOGGER.warning(
+                        "Checkpoint arch '%s' ile --arch '%s' farkli; explicit CLI degeri korunuyor.",
+                        hint_arch,
+                        config.arch,
+                    )
+                else:
+                    LOGGER.info(
+                        "Checkpoint metadata: arch '%s' bulundu, arch '%s' -> '%s' guncellendi.",
+                        hint_arch,
+                        config.arch,
+                        hint_arch,
+                    )
+                    config.arch = hint_arch
+
     ran_multi = enc_mode not in ("", "none")
     if config.enable_deep_learning and enc_mode in ("", "none"):
         if config.weights_template:
@@ -6057,6 +6191,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     
     if enc_mode in ("", "none") and config.enable_deep_learning and weights_path is not None:
+        ckpt_in_ch = checkpoint_hints.get("in_channels")
+        if isinstance(ckpt_in_ch, int) and ckpt_in_ch != num_channels:
+            parser.error(
+                f"Checkpoint in_channels={ckpt_in_ch} fakat mevcut ayarlar {num_channels} kanal uretiyor. "
+                "enable_curvature/enable_tpi ayarlarinizi egitim konfigurasyonuyla eslestirin."
+            )
         LOGGER.info("Loading trained weights in single-encoder mode: %s", weights_path)
         model = build_model(
             arch=config.arch,
