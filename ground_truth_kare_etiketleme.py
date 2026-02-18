@@ -32,6 +32,7 @@ Controls:
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -62,6 +63,7 @@ CONFIG: dict[str, object] = {
     "positive_value": 1,  # labeled pixels
     "square_mode": True,  # True => lock drawing to square
     "use_launcher": True,  # acilista dosya/secenek penceresi
+    "native_render_during_pan": False,  # buyuk dosyalarda pan sirasinda hiz icin
 }
 # ===============================================
 
@@ -161,25 +163,40 @@ def _build_default_output_path(input_path: Path) -> Path:
     return input_path.with_name(f"{input_path.stem}_ground_truth.tif")
 
 
-def _stretch_to_uint8(arr: np.ndarray, low: float = 2.0, high: float = 98.0) -> np.ndarray:
-    """Percentile stretch to uint8 for visualization."""
-    out = np.zeros(arr.shape, dtype=np.uint8)
+def _compute_stretch_bounds(arr: np.ndarray, low: float = 2.0, high: float = 98.0) -> tuple[float, float]:
     valid = np.isfinite(arr)
     if not np.any(valid):
-        return out
-
+        return 0.0, 255.0
     values = arr[valid].astype(np.float32, copy=False)
     lo = float(np.percentile(values, low))
     hi = float(np.percentile(values, high))
     if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        clipped = np.clip(values, 0.0, 255.0)
+        lo = float(np.nanmin(values))
+        hi = float(np.nanmax(values))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return 0.0, 255.0
+    return lo, hi
+
+
+def _stretch_to_uint8_with_bounds(arr: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    out = np.zeros(arr.shape, dtype=np.uint8)
+    valid = np.isfinite(arr)
+    if not np.any(valid):
+        return out
+    if hi <= lo:
+        clipped = np.clip(arr[valid], 0.0, 255.0)
         out[valid] = clipped.astype(np.uint8)
         return out
-
     scaled = (arr.astype(np.float32) - lo) / (hi - lo)
     scaled = np.clip(scaled, 0.0, 1.0)
     out[valid] = (scaled[valid] * 255.0).astype(np.uint8)
     return out
+
+
+def _stretch_to_uint8(arr: np.ndarray, low: float = 2.0, high: float = 98.0) -> np.ndarray:
+    """Percentile stretch to uint8 for visualization."""
+    lo, hi = _compute_stretch_bounds(arr, low=low, high=high)
+    return _stretch_to_uint8_with_bounds(arr, lo=lo, hi=hi)
 
 
 def _parse_bands(raw: str, band_count: int) -> tuple[int, int, int]:
@@ -378,7 +395,7 @@ def _build_preview(
     src: rasterio.io.DatasetReader,
     bands: tuple[int, int, int],
     preview_max_size: int,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, float, float, tuple[tuple[float, float], tuple[float, float], tuple[float, float]]]:
     h = src.height
     w = src.width
     scale = min(1.0, float(preview_max_size) / float(max(h, w)))
@@ -386,18 +403,21 @@ def _build_preview(
     preview_w = max(1, int(round(w * scale)))
 
     rgb = np.zeros((preview_h, preview_w, 3), dtype=np.uint8)
+    stretch_bounds: list[tuple[float, float]] = []
     for i, band in enumerate(bands):
         arr = src.read(
             band,
             out_shape=(preview_h, preview_w),
             resampling=Resampling.bilinear,
         ).astype(np.float32, copy=False)
-        rgb[:, :, i] = _stretch_to_uint8(arr)
+        lo, hi = _compute_stretch_bounds(arr)
+        stretch_bounds.append((lo, hi))
+        rgb[:, :, i] = _stretch_to_uint8_with_bounds(arr, lo=lo, hi=hi)
 
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     scale_x = float(w) / float(preview_w)
     scale_y = float(h) / float(preview_h)
-    return bgr, scale_x, scale_y
+    return bgr, scale_x, scale_y, (stretch_bounds[0], stretch_bounds[1], stretch_bounds[2])
 
 
 def _load_initial_mask(
@@ -521,8 +541,15 @@ class EditorState:
     wheel_direction: int = 1  # 1:normal, -1:inverted
     src: Optional[Any] = None
     src_bands: tuple[int, int, int] = (1, 1, 1)
+    stretch_bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = (
+        (0.0, 255.0),
+        (0.0, 255.0),
+        (0.0, 255.0),
+    )
+    native_render_during_pan: bool = False
     native_bg_cache_key: Optional[tuple[int, int, int, int, int, int]] = None
     native_bg_cache_bgr: Optional[np.ndarray] = None
+    needs_render: bool = True
 
     @property
     def preview_h(self) -> int:
@@ -571,16 +598,19 @@ class EditorState:
         self.view_x = focus_x - (float(x) / new_zoom)
         self.view_y = focus_y - (float(y) / new_zoom)
         self.clamp_view()
+        self.needs_render = True
 
     def reset_zoom(self) -> None:
         self.zoom = 1.0
         self.view_x = 0.0
         self.view_y = 0.0
+        self.needs_render = True
 
     def start_pan(self, x: int, y: int) -> None:
         self.panning = True
         self.pan_start_display = (x, y)
         self.pan_start_view = (self.view_x, self.view_y)
+        self.needs_render = True
 
     def update_pan(self, x: int, y: int) -> None:
         if not self.panning or self.pan_start_display is None or self.pan_start_view is None:
@@ -592,11 +622,13 @@ class EditorState:
         self.view_x = origin_x - dx
         self.view_y = origin_y - dy
         self.clamp_view()
+        self.needs_render = True
 
     def stop_pan(self) -> None:
         self.panning = False
         self.pan_start_display = None
         self.pan_start_view = None
+        self.needs_render = True
 
     def apply_box_from_preview(self, pbox: tuple[int, int, int, int]) -> None:
         x0, y0, x1, y1 = _preview_box_to_full(
@@ -625,6 +657,7 @@ class EditorState:
             self.mask_preview[py0:py1_inc, px0:px1_inc] = np.uint8(0)
         self.history.append((x0, y0, x1, y1, previous, px0, py0, px1_inc, py1_inc, previous_preview))
         self.dirty = True
+        self.needs_render = True
 
     def undo(self) -> None:
         if not self.history:
@@ -633,6 +666,7 @@ class EditorState:
         self.mask_full[y0:y1, x0:x1] = previous
         self.mask_preview[py0:py1_inc, px0:px1_inc] = previous_preview
         self.dirty = True
+        self.needs_render = True
 
     def clear_all(self) -> None:
         if not np.any(self.mask_full):
@@ -641,6 +675,7 @@ class EditorState:
         self.mask_preview.fill(0)
         self.history.clear()
         self.dirty = True
+        self.needs_render = True
 
     def reset_initial(self) -> None:
         if self.initial_mask is not None:
@@ -651,6 +686,7 @@ class EditorState:
                 self.mask_preview[:, :] = self.initial_mask_preview
             self.history.clear()
             self.dirty = True
+            self.needs_render = True
 
 
 def _draw_action_buttons(canvas: np.ndarray, state: EditorState) -> None:
@@ -738,7 +774,8 @@ def _get_native_background(
             out_shape=(display_h, display_w),
             resampling=Resampling.bilinear,
         ).astype(np.float32, copy=False)
-        rgb[:, :, i] = _stretch_to_uint8(arr)
+        lo, hi = state.stretch_bounds[i]
+        rgb[:, :, i] = _stretch_to_uint8_with_bounds(arr, lo=lo, hi=hi)
 
     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     state.native_bg_cache_key = cache_key
@@ -748,7 +785,8 @@ def _get_native_background(
 
 def _render_canvas(state: EditorState) -> np.ndarray:
     vx0, vy0, vx1, vy1 = _get_viewport_bounds(state)
-    if state.src is not None and state.zoom > 1.0:
+    use_native = state.src is not None and state.zoom > 1.0 and (state.native_render_during_pan or (not state.panning and not state.dragging))
+    if use_native:
         canvas = _get_native_background(state, vx0, vy0, vx1, vy1)
     else:
         bg_crop = state.preview_bgr[vy0:vy1, vx0:vx1]
@@ -797,6 +835,7 @@ def _render_canvas(state: EditorState) -> np.ndarray:
     line4 = "keys: u/Ctrl+Z undo | c clear | r reset | + / - zoom | i invert wheel"
     line5 = f"keys: s save | a save as | x save+exit | q quit | wheel-dir: {wheel_dir_txt}"
     line6 = "buttons: top-right Save / Save As / Save+Exit / Quit"
+    line7 = "perf: pan/drag uses fast preview, release shows native detail"
     cv2.putText(canvas, line1, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(canvas, line1, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 1, cv2.LINE_AA)
     cv2.putText(canvas, line2, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
@@ -809,6 +848,8 @@ def _render_canvas(state: EditorState) -> np.ndarray:
     cv2.putText(canvas, line5, (12, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
     cv2.putText(canvas, line6, (12, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(canvas, line6, (12, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.putText(canvas, line7, (12, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(canvas, line7, (12, 168), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
     _draw_action_buttons(canvas, state)
     return canvas
 
@@ -839,6 +880,7 @@ def _mouse_callback(event: int, x: int, y: int, flags: int, state: EditorState) 
         button_action = _hit_action_button(state, x, y)
         if button_action is not None:
             state.pending_action = button_action
+            state.needs_render = True
             return
         if state.panning:
             return
@@ -847,6 +889,7 @@ def _mouse_callback(event: int, x: int, y: int, flags: int, state: EditorState) 
         state.current_pt = (px, py)
     elif event == cv2.EVENT_MOUSEMOVE and state.dragging:
         state.current_pt = (px, py)
+        state.needs_render = True
     elif event == cv2.EVENT_LBUTTONUP and state.dragging:
         state.current_pt = (px, py)
         if state.start_pt is not None and state.current_pt is not None:
@@ -863,6 +906,7 @@ def _mouse_callback(event: int, x: int, y: int, flags: int, state: EditorState) 
         state.dragging = False
         state.start_pt = None
         state.current_pt = None
+        state.needs_render = True
 
 
 def _save_mask(output_path: Path, profile: dict, mask: np.ndarray) -> None:
@@ -956,6 +1000,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+    cv2.setUseOptimized(True)
+    cpu_count = os.cpu_count() or 4
+    cv2.setNumThreads(max(1, min(cpu_count, 8)))
 
     if bool(args.launcher):
         if tk is None or filedialog is None or messagebox is None:
@@ -1011,7 +1058,7 @@ def main() -> int:
     try:
         src = rasterio.open(input_path)
         bands = _parse_bands(str(args.bands), src.count)
-        preview_bgr, scale_x, scale_y = _build_preview(src, bands, int(args.preview_max_size))
+        preview_bgr, scale_x, scale_y, stretch_bounds = _build_preview(src, bands, int(args.preview_max_size))
         profile = src.profile.copy()
         initial_mask = _load_initial_mask(
             existing_mask=existing_mask,
@@ -1052,6 +1099,8 @@ def main() -> int:
         zoom_max=max(24.0, float(max(scale_x, scale_y)) * 2.0),
         src=src,
         src_bands=bands,
+        stretch_bounds=stretch_bounds,
+        native_render_during_pan=bool(CONFIG.get("native_render_during_pan", False)),
     )
 
     print("=" * 78)
@@ -1081,7 +1130,9 @@ def main() -> int:
     saved_once = False
     quit_without_save = False
     while True:
-        cv2.imshow(WINDOW_NAME, _render_canvas(state))
+        if state.needs_render:
+            cv2.imshow(WINDOW_NAME, _render_canvas(state))
+            state.needs_render = False
         key = cv2.waitKey(20) & 0xFF
         action: Optional[str] = None
 
@@ -1124,6 +1175,7 @@ def main() -> int:
 
         if action is None:
             continue
+        state.needs_render = True
 
         if action == "quit":
             if state.dirty:
