@@ -10,7 +10,9 @@ The output is a single-band GeoTIFF mask:
 
 Controls:
     Left mouse drag : draw a box
-    Ctrl + wheel    : zoom in/out at cursor
+    Right drag      : pan map
+    Mouse wheel     : zoom in/out at cursor
+    Top-right buttons : Save / Save As / Save+Exit / Quit
     d               : draw mode
     e               : erase mode
     k               : toggle square lock
@@ -18,22 +20,31 @@ Controls:
     u               : undo last box
     c               : clear all labels
     r               : reset to initial mask
-    s               : save and exit
-    q / ESC         : quit without save
+    s               : save and continue
+    a               : save as
+    x               : save and exit
+    q / ESC         : quit (asks for unsaved changes)
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+except Exception:  # pragma: no cover - ortama gore tkinter olmayabilir
+    tk = None
+    filedialog = None
+    messagebox = None
 
 
 # ==================== CONFIG ====================
@@ -47,12 +58,104 @@ CONFIG: dict[str, object] = {
     "bands": "1,2,3",  # preview bands (1-based)
     "positive_value": 1,  # labeled pixels
     "square_mode": True,  # True => lock drawing to square
+    "use_launcher": True,  # acilista dosya/secenek penceresi
 }
 # ===============================================
 
 WINDOW_NAME = "Ground Truth Kare Etiketleme"
 OVERLAY_COLOR_BGR = np.array([0, 0, 255], dtype=np.float32)
 OVERLAY_ALPHA = 0.35
+
+ACTION_BUTTON_SPECS: list[tuple[str, str, tuple[int, int, int]]] = [
+    ("save", "Kaydet", (56, 175, 64)),
+    ("save_as", "Farkli Kaydet", (66, 133, 244)),
+    ("save_exit", "Kaydet+Cik", (31, 97, 141)),
+    ("quit", "Cikis", (120, 120, 120)),
+]
+
+
+def _create_tk_root() -> Optional[Any]:
+    if tk is None:
+        return None
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+    return root
+
+
+def _pick_output_path(current_output: Path, input_path: Path) -> Optional[Path]:
+    if tk is None or filedialog is None:
+        return current_output
+
+    root = _create_tk_root()
+    if root is None:
+        return current_output
+    try:
+        selected = filedialog.asksaveasfilename(
+            title="Maske dosyasini kaydet",
+            initialdir=str(input_path.parent if input_path.exists() else current_output.parent),
+            initialfile=str(current_output.name),
+            defaultextension=".tif",
+            filetypes=[("GeoTIFF", "*.tif *.tiff"), ("Tum dosyalar", "*.*")],
+        )
+    finally:
+        root.destroy()
+
+    if not selected:
+        return None
+    return Path(selected).expanduser()
+
+
+def _confirm_unsaved_changes(output_path: Path) -> str:
+    """
+    Returns:
+        "save" | "discard" | "cancel"
+    """
+    if tk is not None and messagebox is not None:
+        root = _create_tk_root()
+        if root is not None:
+            try:
+                answer = messagebox.askyesnocancel(
+                    "Kaydedilmemis Degisiklikler",
+                    f"Kaydedilmemis degisiklikler var.\n\nKaydetmek ister misiniz?\n\nHedef: {output_path}",
+                )
+            finally:
+                root.destroy()
+            if answer is None:
+                return "cancel"
+            return "save" if bool(answer) else "discard"
+
+    print("Kaydedilmemis degisiklik var.")
+    print("[s] Kaydet | [d] Kaydetmeden cik | [c] Iptal")
+    while True:
+        choice = input("Secim (s/d/c): ").strip().lower()
+        if choice in ("s", "save"):
+            return "save"
+        if choice in ("d", "discard"):
+            return "discard"
+        if choice in ("c", "cancel"):
+            return "cancel"
+
+
+def _show_error_dialog(title: str, message: str) -> None:
+    if tk is None or messagebox is None:
+        print(f"HATA: {message}")
+        return
+    root = _create_tk_root()
+    if root is None:
+        print(f"HATA: {message}")
+        return
+    try:
+        messagebox.showerror(title, message)
+    finally:
+        root.destroy()
+
+
+def _build_default_output_path(input_path: Path) -> Path:
+    return input_path.with_name(f"{input_path.stem}_ground_truth.tif")
 
 
 def _stretch_to_uint8(arr: np.ndarray, low: float = 2.0, high: float = 98.0) -> np.ndarray:
@@ -92,6 +195,180 @@ def _parse_bands(raw: str, band_count: int) -> tuple[int, int, int]:
         if band < 1 or band > band_count:
             raise ValueError(f"Gecersiz band indeksi: {band} (1-{band_count})")
     return parts[0], parts[1], parts[2]
+
+
+def _open_launcher_dialog(defaults: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """
+    Dost bir acilis penceresi.
+
+    Returns:
+        Baslatildiysa secilen degerleri dict olarak dondurur.
+        Iptal edilirse None dondurur.
+    """
+    if tk is None or filedialog is None or messagebox is None:
+        return None
+
+    root = tk.Tk()
+    root.title("Ground Truth Kare Etiketleme")
+    root.geometry("860x420")
+    root.resizable(True, False)
+
+    result: dict[str, Any] = {}
+    cancelled = {"value": True}
+
+    input_var = tk.StringVar(value=str(defaults.get("input", "")))
+    output_var = tk.StringVar(value=str(defaults.get("output", "")))
+    existing_var = tk.StringVar(value=str(defaults.get("existing_mask", "")))
+    bands_var = tk.StringVar(value=str(defaults.get("bands", "1,2,3")))
+    preview_var = tk.StringVar(value=str(defaults.get("preview_max_size", 1800)))
+    positive_var = tk.StringVar(value=str(defaults.get("positive_value", 1)))
+    square_var = tk.BooleanVar(value=bool(defaults.get("square_mode", True)))
+
+    root.columnconfigure(1, weight=1)
+
+    def _browse_input() -> None:
+        selected = filedialog.askopenfilename(
+            title="Girdi GeoTIFF sec",
+            filetypes=[("GeoTIFF", "*.tif *.tiff"), ("Tum dosyalar", "*.*")],
+        )
+        if selected:
+            input_var.set(selected)
+            if not output_var.get().strip():
+                output_var.set(str(_build_default_output_path(Path(selected).expanduser())))
+
+    def _browse_existing() -> None:
+        selected = filedialog.askopenfilename(
+            title="Mevcut maske sec (opsiyonel)",
+            filetypes=[("GeoTIFF", "*.tif *.tiff"), ("Tum dosyalar", "*.*")],
+        )
+        if selected:
+            existing_var.set(selected)
+
+    def _browse_output() -> None:
+        input_raw = input_var.get().strip()
+        input_path = Path(input_raw).expanduser() if input_raw else Path("ground_truth_manual.tif")
+        current_output = Path(output_var.get().strip() or _build_default_output_path(input_path))
+        selected = filedialog.asksaveasfilename(
+            title="Cikti maskesini kaydet",
+            initialdir=str(input_path.parent) if input_path.parent.exists() else ".",
+            initialfile=current_output.name,
+            defaultextension=".tif",
+            filetypes=[("GeoTIFF", "*.tif *.tiff"), ("Tum dosyalar", "*.*")],
+        )
+        if selected:
+            output_var.set(selected)
+
+    def _validate_and_start() -> None:
+        input_path = Path(input_var.get().strip()).expanduser()
+        if not input_var.get().strip():
+            messagebox.showerror("Eksik Bilgi", "Lutfen bir girdi GeoTIFF secin.")
+            return
+        if not input_path.exists():
+            messagebox.showerror("Gecersiz Dosya", f"Girdi dosyasi bulunamadi:\n{input_path}")
+            return
+
+        existing_raw = existing_var.get().strip()
+        existing_path = Path(existing_raw).expanduser() if existing_raw else None
+        if existing_path is not None and not existing_path.exists():
+            messagebox.showerror("Gecersiz Dosya", f"Mevcut maske bulunamadi:\n{existing_path}")
+            return
+
+        output_raw = output_var.get().strip()
+        output_path = Path(output_raw).expanduser() if output_raw else _build_default_output_path(input_path)
+
+        try:
+            positive_value = int(positive_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Gecersiz Deger", "Pozitif etiket degeri tam sayi olmali.")
+            return
+        if positive_value < 1 or positive_value > 255:
+            messagebox.showerror("Gecersiz Deger", "Pozitif etiket degeri 1-255 araliginda olmali.")
+            return
+
+        try:
+            preview_max_size = int(preview_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Gecersiz Deger", "Onizleme boyutu tam sayi olmali.")
+            return
+        if preview_max_size <= 0:
+            messagebox.showerror("Gecersiz Deger", "Onizleme boyutu pozitif olmali.")
+            return
+
+        if not bands_var.get().strip():
+            messagebox.showerror("Gecersiz Deger", "Band listesi bos olamaz. Ornek: 1,2,3")
+            return
+
+        result.update(
+            input=str(input_path),
+            output=str(output_path),
+            existing_mask=str(existing_path) if existing_path is not None else "",
+            bands=bands_var.get().strip(),
+            preview_max_size=preview_max_size,
+            positive_value=positive_value,
+            square_mode=bool(square_var.get()),
+        )
+        cancelled["value"] = False
+        root.destroy()
+
+    def _cancel() -> None:
+        cancelled["value"] = True
+        root.destroy()
+
+    row = 0
+    tk.Label(root, text="Girdi GeoTIFF").grid(row=row, column=0, padx=12, pady=(14, 8), sticky="w")
+    tk.Entry(root, textvariable=input_var).grid(row=row, column=1, padx=8, pady=(14, 8), sticky="ew")
+    tk.Button(root, text="Sec...", width=10, command=_browse_input).grid(row=row, column=2, padx=(4, 12), pady=(14, 8))
+
+    row += 1
+    tk.Label(root, text="Mevcut Maske (ops.)").grid(row=row, column=0, padx=12, pady=8, sticky="w")
+    tk.Entry(root, textvariable=existing_var).grid(row=row, column=1, padx=8, pady=8, sticky="ew")
+    tk.Button(root, text="Sec...", width=10, command=_browse_existing).grid(row=row, column=2, padx=(4, 12), pady=8)
+
+    row += 1
+    tk.Label(root, text="Cikti Maske").grid(row=row, column=0, padx=12, pady=8, sticky="w")
+    tk.Entry(root, textvariable=output_var).grid(row=row, column=1, padx=8, pady=8, sticky="ew")
+    tk.Button(root, text="Kaydet...", width=10, command=_browse_output).grid(row=row, column=2, padx=(4, 12), pady=8)
+
+    row += 1
+    tk.Label(root, text="Bandlar (RGB)").grid(row=row, column=0, padx=12, pady=8, sticky="w")
+    tk.Entry(root, textvariable=bands_var).grid(row=row, column=1, padx=8, pady=8, sticky="ew")
+
+    row += 1
+    tk.Label(root, text="Pozitif Deger (1-255)").grid(row=row, column=0, padx=12, pady=8, sticky="w")
+    tk.Entry(root, textvariable=positive_var).grid(row=row, column=1, padx=8, pady=8, sticky="ew")
+
+    row += 1
+    tk.Label(root, text="Onizleme Max Boyut").grid(row=row, column=0, padx=12, pady=8, sticky="w")
+    tk.Entry(root, textvariable=preview_var).grid(row=row, column=1, padx=8, pady=8, sticky="ew")
+
+    row += 1
+    tk.Checkbutton(root, text="Kare Cizim Modu Acik (1:1)", variable=square_var).grid(
+        row=row, column=0, columnspan=3, padx=12, pady=(10, 4), sticky="w"
+    )
+
+    row += 1
+    tk.Label(
+        root,
+        text=(
+            "Editorde: Sol fare ile ciz, sag fare ile gezin (pan), tekerlek ile zoom.\n"
+            "s: kaydet | a: farkli kaydet | x: kaydet+cik | q/ESC: cikis"
+        ),
+        justify="left",
+        fg="#333333",
+    ).grid(row=row, column=0, columnspan=3, padx=12, pady=(4, 10), sticky="w")
+
+    row += 1
+    button_frame = tk.Frame(root)
+    button_frame.grid(row=row, column=0, columnspan=3, pady=(2, 12))
+    tk.Button(button_frame, text="Baslat", width=14, command=_validate_and_start).pack(side="left", padx=8)
+    tk.Button(button_frame, text="Iptal", width=14, command=_cancel).pack(side="left", padx=8)
+
+    root.protocol("WM_DELETE_WINDOW", _cancel)
+    root.mainloop()
+
+    if cancelled["value"]:
+        return None
+    return result
 
 
 def _build_preview(
@@ -227,6 +504,12 @@ class EditorState:
     zoom_max: float = 24.0
     view_x: float = 0.0
     view_y: float = 0.0
+    panning: bool = False
+    pan_start_display: Optional[tuple[int, int]] = None
+    pan_start_view: Optional[tuple[float, float]] = None
+    dirty: bool = False
+    button_regions: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
+    pending_action: Optional[str] = None
 
     @property
     def preview_h(self) -> int:
@@ -281,6 +564,27 @@ class EditorState:
         self.view_x = 0.0
         self.view_y = 0.0
 
+    def start_pan(self, x: int, y: int) -> None:
+        self.panning = True
+        self.pan_start_display = (x, y)
+        self.pan_start_view = (self.view_x, self.view_y)
+
+    def update_pan(self, x: int, y: int) -> None:
+        if not self.panning or self.pan_start_display is None or self.pan_start_view is None:
+            return
+        start_x, start_y = self.pan_start_display
+        origin_x, origin_y = self.pan_start_view
+        dx = float(x - start_x) / self.zoom
+        dy = float(y - start_y) / self.zoom
+        self.view_x = origin_x - dx
+        self.view_y = origin_y - dy
+        self.clamp_view()
+
+    def stop_pan(self) -> None:
+        self.panning = False
+        self.pan_start_display = None
+        self.pan_start_view = None
+
     def apply_box_from_preview(self, pbox: tuple[int, int, int, int]) -> None:
         x0, y0, x1, y1 = _preview_box_to_full(
             pbox=pbox,
@@ -307,6 +611,7 @@ class EditorState:
             self.mask_full[y0:y1, x0:x1] = np.uint8(0)
             self.mask_preview[py0:py1_inc, px0:px1_inc] = np.uint8(0)
         self.history.append((x0, y0, x1, y1, previous, px0, py0, px1_inc, py1_inc, previous_preview))
+        self.dirty = True
 
     def undo(self) -> None:
         if not self.history:
@@ -314,18 +619,61 @@ class EditorState:
         x0, y0, x1, y1, previous, px0, py0, px1_inc, py1_inc, previous_preview = self.history.pop()
         self.mask_full[y0:y1, x0:x1] = previous
         self.mask_preview[py0:py1_inc, px0:px1_inc] = previous_preview
+        self.dirty = True
 
     def clear_all(self) -> None:
+        if not np.any(self.mask_full):
+            return
         self.mask_full.fill(0)
         self.mask_preview.fill(0)
         self.history.clear()
+        self.dirty = True
 
     def reset_initial(self) -> None:
         if self.initial_mask is not None:
+            if np.array_equal(self.mask_full, self.initial_mask):
+                return
             self.mask_full[:, :] = self.initial_mask
             if self.initial_mask_preview is not None:
                 self.mask_preview[:, :] = self.initial_mask_preview
             self.history.clear()
+            self.dirty = True
+
+
+def _draw_action_buttons(canvas: np.ndarray, state: EditorState) -> None:
+    state.button_regions.clear()
+    pad = 12
+    button_w = 170
+    button_h = 30
+    gap = 8
+    x1 = canvas.shape[1] - pad
+    x0 = max(pad, x1 - button_w)
+    y = pad
+
+    for action, label, color in ACTION_BUTTON_SPECS:
+        y0 = y
+        y1 = y0 + button_h
+        if y1 >= canvas.shape[0] - pad:
+            break
+
+        state.button_regions[action] = (x0, y0, x1, y1)
+        cv2.rectangle(canvas, (x0, y0), (x1, y1), color, -1, cv2.LINE_AA)
+        cv2.rectangle(canvas, (x0, y0), (x1, y1), (245, 245, 245), 1, cv2.LINE_AA)
+
+        text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.54, 1)
+        text_x = x0 + max(8, (button_w - text_size[0]) // 2)
+        text_y = y0 + (button_h + text_size[1]) // 2 - 2
+        cv2.putText(canvas, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (25, 25, 25), 1, cv2.LINE_AA)
+        y = y1 + gap
+
+
+def _hit_action_button(state: EditorState, x: int, y: int) -> Optional[str]:
+    for action, rect in state.button_regions.items():
+        x0, y0, x1, y1 = rect
+        if x0 <= x <= x1 and y0 <= y <= y1:
+            return action
+    return None
 
 
 def _render_canvas(state: EditorState) -> np.ndarray:
@@ -362,33 +710,57 @@ def _render_canvas(state: EditorState) -> np.ndarray:
     pos_count = int(np.count_nonzero(state.mask_full))
     total = int(state.mask_full.size)
     ratio = (100.0 * pos_count / total) if total > 0 else 0.0
+    dirty_text = "yes" if state.dirty else "no"
     line1 = (
         f"mode: {state.mode} | square: {'on' if state.square_mode else 'off'} "
-        f"| zoom: {state.zoom:.2f}x | labels: {len(state.history)}"
+        f"| zoom: {state.zoom:.2f}x | labels: {len(state.history)} | unsaved: {dirty_text}"
     )
     line2 = f"positive pixels: {pos_count} / {total} ({ratio:.2f}%)"
-    line3 = "keys: Ctrl+wheel zoom | z fit | d/e mode | k square | u/c/r | s save | q quit"
+    line3 = "mouse: left draw | right drag pan | wheel zoom | d/e mode | k square | z fit"
+    line4 = "keys: u undo | c clear | r reset | s save | a save as | x save+exit | q quit"
+    line5 = "buttons: top-right Save / Save As / Save+Exit / Quit"
     cv2.putText(canvas, line1, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(canvas, line1, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 1, cv2.LINE_AA)
     cv2.putText(canvas, line2, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(canvas, line2, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 0), 1, cv2.LINE_AA)
     cv2.putText(canvas, line3, (12, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(canvas, line3, (12, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.putText(canvas, line4, (12, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(canvas, line4, (12, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.putText(canvas, line5, (12, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(canvas, line5, (12, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.53, (0, 0, 0), 1, cv2.LINE_AA)
+    _draw_action_buttons(canvas, state)
     return canvas
 
 
 def _mouse_callback(event: int, x: int, y: int, flags: int, state: EditorState) -> None:
     x = int(np.clip(x, 0, state.preview_w - 1))
     y = int(np.clip(y, 0, state.preview_h - 1))
-    if event == cv2.EVENT_MOUSEWHEEL and (flags & cv2.EVENT_FLAG_CTRLKEY):
+    if event == cv2.EVENT_MOUSEWHEEL:
         delta = _get_wheel_delta(flags)
         if delta != 0:
             state.zoom_at_display(x=x, y=y, wheel_delta=delta)
         return
 
+    if event == cv2.EVENT_RBUTTONDOWN:
+        state.start_pan(x, y)
+        return
+    if event == cv2.EVENT_MOUSEMOVE and state.panning:
+        state.update_pan(x, y)
+        return
+    if event == cv2.EVENT_RBUTTONUP and state.panning:
+        state.stop_pan()
+        return
+
     px, py = state.display_to_preview(x, y)
 
     if event == cv2.EVENT_LBUTTONDOWN:
+        button_action = _hit_action_button(state, x, y)
+        if button_action is not None:
+            state.pending_action = button_action
+            return
+        if state.panning:
+            return
         state.dragging = True
         state.start_pt = (px, py)
         state.current_pt = (px, py)
@@ -424,6 +796,23 @@ def _save_mask(output_path: Path, profile: dict, mask: np.ndarray) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(output_path, "w", **out_profile) as dst:
         dst.write(mask[np.newaxis, :, :].astype(np.uint8, copy=False))
+
+
+def _save_with_feedback(state: EditorState, output_path: Path, profile: dict) -> bool:
+    try:
+        _save_mask(output_path=output_path, profile=profile, mask=state.mask_full)
+    except Exception as exc:
+        msg = f"Maske kaydedilemedi:\n{output_path}\n\nDetay: {exc}"
+        print(f"HATA: {msg}")
+        _show_error_dialog("Kaydetme Hatasi", msg)
+        return False
+
+    pos_count = int(np.count_nonzero(state.mask_full))
+    ratio = 100.0 * pos_count / float(state.mask_full.size)
+    print(f"Kaydedildi: {output_path}")
+    print(f"Pozitif piksel: {pos_count} ({ratio:.2f}%)")
+    state.dirty = False
+    return True
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -467,6 +856,19 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Kare kilidini kapatip serbest dikdortgen ciz.",
     )
+    parser.add_argument(
+        "--launcher",
+        dest="launcher",
+        action="store_true",
+        help="Acilista dosya secme ve etiketleme ayarlari penceresini ac.",
+    )
+    parser.add_argument(
+        "--no-launcher",
+        dest="launcher",
+        action="store_false",
+        help="Acilis penceresini atla, sadece CLI argumanlarini kullan.",
+    )
+    parser.set_defaults(launcher=bool(CONFIG.get("use_launcher", True)))
     return parser
 
 
@@ -474,8 +876,45 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    input_path = Path(args.input).expanduser()
-    output_path = Path(args.output).expanduser()
+    if bool(args.launcher):
+        if tk is None or filedialog is None or messagebox is None:
+            print("UYARI: tkinter GUI bulunamadi, launcher acilamadi. CLI argumanlari kullaniliyor.")
+        else:
+            current_square_mode = bool(CONFIG.get("square_mode", True))
+            if bool(args.square_mode):
+                current_square_mode = True
+            if bool(args.free_rectangle):
+                current_square_mode = False
+            launcher_defaults = {
+                "input": args.input,
+                "output": args.output,
+                "existing_mask": args.existing_mask,
+                "bands": args.bands,
+                "preview_max_size": args.preview_max_size,
+                "positive_value": args.positive_value,
+                "square_mode": current_square_mode,
+            }
+            launcher_values = _open_launcher_dialog(launcher_defaults)
+            if launcher_values is None:
+                print("Islem kullanici tarafindan iptal edildi.")
+                return 0
+            args.input = launcher_values["input"]
+            args.output = launcher_values["output"]
+            args.existing_mask = launcher_values["existing_mask"]
+            args.bands = launcher_values["bands"]
+            args.preview_max_size = launcher_values["preview_max_size"]
+            args.positive_value = launcher_values["positive_value"]
+            args.square_mode = bool(launcher_values["square_mode"])
+            args.free_rectangle = not bool(launcher_values["square_mode"])
+
+    input_path = Path(str(args.input).strip()).expanduser()
+    if not str(args.output).strip():
+        output_path = _build_default_output_path(input_path)
+    else:
+        output_path = Path(str(args.output).strip()).expanduser()
+    if output_path.suffix == "":
+        output_path = output_path.with_suffix(".tif")
+
     if not input_path.exists():
         parser.error(f"Girdi dosyasi bulunamadi: {input_path}")
     if int(args.preview_max_size) <= 0:
@@ -489,7 +928,7 @@ def main() -> int:
 
     try:
         with rasterio.open(input_path) as src:
-            bands = _parse_bands(args.bands, src.count)
+            bands = _parse_bands(str(args.bands), src.count)
             preview_bgr, scale_x, scale_y = _build_preview(src, bands, int(args.preview_max_size))
             profile = src.profile.copy()
             initial_mask = _load_initial_mask(
@@ -504,9 +943,9 @@ def main() -> int:
 
     config_square = bool(CONFIG.get("square_mode", True))
     square_mode = config_square
-    if args.square_mode:
+    if bool(args.square_mode):
         square_mode = True
-    if args.free_rectangle:
+    if bool(args.free_rectangle):
         square_mode = False
 
     initial_mask_preview = cv2.resize(
@@ -528,15 +967,17 @@ def main() -> int:
         initial_mask_preview=initial_mask_preview.copy(),
     )
 
-    print("=" * 72)
+    print("=" * 78)
     print("Ground-truth editor aciliyor...")
     print(f"Girdi raster : {input_path}")
     print(f"Cikti maske  : {output_path}")
     print(f"Raster boyutu: {state.full_w}x{state.full_h}")
     print("Kontroller   :")
-    print("  Sol fare: ciz | Ctrl+Tekerlek: zoom | z: zoom reset")
-    print("  d/e: mode | k: square | u: undo | c: clear | r: reset | s: save | q/ESC: quit")
-    print("=" * 72)
+    print("  Sol fare: ciz | Sag fare: pan | Tekerlek: zoom | z: zoom reset")
+    print("  d/e: mode | k: square | u: undo | c: clear | r: reset")
+    print("  s: kaydet | a: farkli kaydet | x: kaydet+cik | q/ESC: cik")
+    print("  Sag ust butonlar: Kaydet | Farkli Kaydet | Kaydet+Cik | Cikis")
+    print("=" * 78)
 
     try:
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
@@ -547,41 +988,94 @@ def main() -> int:
         print(f"Detay: {exc}")
         return 1
 
-    saved = False
+    saved_once = False
+    quit_without_save = False
     while True:
         cv2.imshow(WINDOW_NAME, _render_canvas(state))
         key = cv2.waitKey(20) & 0xFF
+        action: Optional[str] = None
 
-        if key == 255:
+        if state.pending_action is not None:
+            action = state.pending_action
+            state.pending_action = None
+
+        if action is None and key != 255:
+            key_char = chr(key).lower() if 32 <= key <= 126 else ""
+            if key == 27 or key_char == "q":
+                action = "quit"
+            elif key_char == "d":
+                action = "draw"
+            elif key_char == "e":
+                action = "erase"
+            elif key_char == "k":
+                action = "toggle_square"
+            elif key_char == "u":
+                action = "undo"
+            elif key_char == "c":
+                action = "clear"
+            elif key_char == "r":
+                action = "reset_initial"
+            elif key_char == "z":
+                action = "zoom_reset"
+            elif key_char == "s":
+                action = "save"
+            elif key_char == "a":
+                action = "save_as"
+            elif key_char == "x":
+                action = "save_exit"
+
+        if action is None:
             continue
-        if key in (27, ord("q")):
+
+        if action == "quit":
+            if state.dirty:
+                decision = _confirm_unsaved_changes(output_path)
+                if decision == "cancel":
+                    continue
+                if decision == "save":
+                    if _save_with_feedback(state=state, output_path=output_path, profile=profile):
+                        saved_once = True
+                        break
+                    continue
+                if decision == "discard":
+                    quit_without_save = True
+                    break
+                continue
             break
-        if key == ord("d"):
+
+        if action == "draw":
             state.mode = "draw"
-        elif key == ord("e"):
+        elif action == "erase":
             state.mode = "erase"
-        elif key == ord("k"):
+        elif action == "toggle_square":
             state.square_mode = not state.square_mode
-        elif key == ord("u"):
+        elif action == "undo":
             state.undo()
-        elif key == ord("c"):
+        elif action == "clear":
             state.clear_all()
-        elif key == ord("r"):
+        elif action == "reset_initial":
             state.reset_initial()
-        elif key == ord("z"):
+        elif action == "zoom_reset":
             state.reset_zoom()
-        elif key == ord("s"):
-            _save_mask(output_path=output_path, profile=profile, mask=state.mask_full)
-            pos_count = int(np.count_nonzero(state.mask_full))
-            ratio = 100.0 * pos_count / float(state.mask_full.size)
-            print(f"Kaydedildi: {output_path}")
-            print(f"Pozitif piksel: {pos_count} ({ratio:.2f}%)")
-            saved = True
-            break
+        elif action == "save":
+            if _save_with_feedback(state=state, output_path=output_path, profile=profile):
+                saved_once = True
+        elif action == "save_as":
+            maybe_path = _pick_output_path(current_output=output_path, input_path=input_path)
+            if maybe_path is not None:
+                output_path = maybe_path
+                if _save_with_feedback(state=state, output_path=output_path, profile=profile):
+                    saved_once = True
+        elif action == "save_exit":
+            if _save_with_feedback(state=state, output_path=output_path, profile=profile):
+                saved_once = True
+                break
 
     cv2.destroyAllWindows()
-    if not saved:
+    if quit_without_save:
         print("Kaydedilmeden cikildi.")
+    elif not saved_once and not state.dirty:
+        print("Degisiklik yok, cikildi.")
     return 0
 
 
