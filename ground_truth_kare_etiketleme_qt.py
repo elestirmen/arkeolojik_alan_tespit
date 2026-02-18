@@ -385,19 +385,27 @@ class AnnotView(QGraphicsView):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, session: Session):
+    def __init__(
+        self,
+        preview_max_size: int,
+        bands_raw: str,
+        positive_value: int,
+        square_mode: bool,
+        session: Optional[Session] = None,
+    ):
         super().__init__()
-        self.s = session
+        self.s: Optional[Session] = None
         self.mode = "draw"
-        self.square_mode = session.cfg.square_mode
+        self.square_mode = bool(square_mode)
+        self.preview_max_size = int(preview_max_size)
+        self.bands_raw = bands_raw
+        self.positive_value = int(positive_value)
 
-        self.setWindowTitle(f"{APP_TITLE} - {session.cfg.input_path.name} [{QT_BACKEND}]")
         self.resize(1500, 950)
 
         self.scene = QGraphicsScene(self)
         self.view = AnnotView(self)
         self.view.setScene(self.scene)
-        self.view.set_image_size(self.s.preview_w, self.s.preview_h)
         self.view.square_mode = self.square_mode
         self.view.mode = self.mode
         self.view.box_committed.connect(self.on_box)
@@ -410,24 +418,61 @@ class MainWindow(QMainWindow):
         self.scene.addItem(self.mask_item)
 
         self.make_toolbar()
-        self.refresh_base()
-        self.refresh_overlay()
-        self.view.fit_all()
+        self._set_actions_enabled(False)
+        self._set_window_title()
+        self.show_empty_state()
         self.update_status()
+
+        if session is not None:
+            self.set_session(session)
+
+    def _set_window_title(self) -> None:
+        if self.s is None:
+            self.setWindowTitle(f"{APP_TITLE} [{QT_BACKEND}]")
+            return
+        self.setWindowTitle(f"{APP_TITLE} - {self.s.cfg.input_path.name} [{QT_BACKEND}]")
+
+    def _set_actions_enabled(self, enabled: bool) -> None:
+        for act in (
+            self.act_save,
+            self.act_save_as,
+            self.act_draw,
+            self.act_erase,
+            self.act_square,
+            self.act_undo,
+            self.act_clear,
+            self.act_reset,
+            self.act_fit,
+            self.act_invert,
+        ):
+            act.setEnabled(enabled)
+
+    def show_empty_state(self) -> None:
+        self.base_item.setPixmap(QPixmap())
+        self.mask_item.setPixmap(QPixmap())
+        self.scene.setSceneRect(QRectF(0, 0, 1, 1))
+        self.view.set_image_size(1, 1)
+        self.view.resetTransform()
 
     def make_toolbar(self) -> None:
         tb = QToolBar("Tools", self)
         self.addToolBar(tb)
 
-        act_save = QAction("Kaydet", self)
-        act_save.setShortcut(QKeySequence.StandardKey.Save)
-        act_save.triggered.connect(self.save)
-        tb.addAction(act_save)
+        self.act_open = QAction("Dosya Ac", self)
+        self.act_open.setShortcut(QKeySequence.StandardKey.Open)
+        self.act_open.triggered.connect(self.open_input)
+        tb.addAction(self.act_open)
+        tb.addSeparator()
 
-        act_save_as = QAction("Farkli Kaydet", self)
-        act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        act_save_as.triggered.connect(self.save_as)
-        tb.addAction(act_save_as)
+        self.act_save = QAction("Kaydet", self)
+        self.act_save.setShortcut(QKeySequence.StandardKey.Save)
+        self.act_save.triggered.connect(self.save)
+        tb.addAction(self.act_save)
+
+        self.act_save_as = QAction("Farkli Kaydet", self)
+        self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.act_save_as.triggered.connect(self.save_as)
+        tb.addAction(self.act_save_as)
         tb.addSeparator()
 
         self.act_draw = QAction("Ciz", self)
@@ -448,35 +493,132 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_square)
         tb.addSeparator()
 
-        act_undo = QAction("Undo", self)
-        act_undo.setShortcut(QKeySequence.StandardKey.Undo)
-        act_undo.triggered.connect(self.undo)
-        tb.addAction(act_undo)
+        self.act_undo = QAction("Undo", self)
+        self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.act_undo.triggered.connect(self.undo)
+        tb.addAction(self.act_undo)
 
-        act_clear = QAction("Temizle", self)
-        act_clear.triggered.connect(self.clear)
-        tb.addAction(act_clear)
+        self.act_clear = QAction("Temizle", self)
+        self.act_clear.triggered.connect(self.clear)
+        tb.addAction(self.act_clear)
 
-        act_reset = QAction("Basa Don", self)
-        act_reset.triggered.connect(self.reset)
-        tb.addAction(act_reset)
+        self.act_reset = QAction("Basa Don", self)
+        self.act_reset.triggered.connect(self.reset)
+        tb.addAction(self.act_reset)
         tb.addSeparator()
 
-        act_fit = QAction("Sigdir", self)
-        act_fit.setShortcut("F")
-        act_fit.triggered.connect(self.view.fit_all)
-        tb.addAction(act_fit)
+        self.act_fit = QAction("Sigdir", self)
+        self.act_fit.setShortcut("F")
+        self.act_fit.triggered.connect(self.view.fit_all)
+        tb.addAction(self.act_fit)
 
-        act_invert = QAction("Wheel Tersle", self)
-        act_invert.setShortcut("I")
-        act_invert.triggered.connect(self.invert_wheel)
-        tb.addAction(act_invert)
+        self.act_invert = QAction("Wheel Tersle", self)
+        self.act_invert.setShortcut("I")
+        self.act_invert.triggered.connect(self.invert_wheel)
+        tb.addAction(self.act_invert)
+
+    def _confirm_save_if_dirty(self) -> bool:
+        if self.s is None or not self.s.dirty:
+            return True
+        ans = QMessageBox.question(
+            self,
+            APP_TITLE,
+            "Kaydedilmemis degisiklikler var. Devam etmeden once kaydetmek ister misiniz?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ans == QMessageBox.StandardButton.Cancel:
+            return False
+        if ans == QMessageBox.StandardButton.Yes:
+            try:
+                self.s.save(self.s.cfg.output_path)
+            except Exception as exc:
+                QMessageBox.critical(self, APP_TITLE, f"Kaydetme hatasi:\n{exc}")
+                return False
+        return True
+
+    def open_input(self) -> None:
+        if not self._confirm_save_if_dirty():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Girdi GeoTIFF sec", "", "GeoTIFF (*.tif *.tiff);;All (*.*)")
+        if not path:
+            return
+        self.load_input(Path(path).expanduser())
+
+    def load_input(
+        self,
+        input_path: Path,
+        output_path: Optional[Path] = None,
+        existing_mask: Optional[Path] = None,
+    ) -> bool:
+        input_path = input_path.expanduser()
+        if not input_path.exists():
+            QMessageBox.critical(self, APP_TITLE, f"Girdi dosyasi bulunamadi:\n{input_path}")
+            return False
+
+        out_path = output_path.expanduser() if output_path is not None else input_path.with_name(f"{input_path.stem}_ground_truth.tif")
+        if out_path.suffix == "":
+            out_path = out_path.with_suffix(".tif")
+
+        mask_path = existing_mask.expanduser() if existing_mask is not None else None
+        if mask_path is not None and not mask_path.exists():
+            QMessageBox.critical(self, APP_TITLE, f"Mevcut maske dosyasi bulunamadi:\n{mask_path}")
+            return False
+
+        try:
+            with rasterio.open(input_path) as tmp:
+                bands = parse_bands(self.bands_raw, tmp.count)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Band/raste hatasi:\n{exc}")
+            return False
+
+        cfg = AppConfig(
+            input_path=input_path,
+            output_path=out_path,
+            existing_mask=mask_path,
+            preview_max_size=self.preview_max_size,
+            bands=bands,
+            positive_value=self.positive_value,
+            square_mode=self.square_mode,
+        )
+
+        try:
+            new_session = Session(cfg)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Oturum baslatilamadi:\n{exc}")
+            return False
+
+        self.set_session(new_session)
+        return True
+
+    def set_session(self, session: Session) -> None:
+        prev_session = self.s
+        self.s = session
+        if prev_session is not None:
+            prev_session.close()
+
+        self.square_mode = bool(session.cfg.square_mode)
+        self.act_square.setChecked(self.square_mode)
+        self.view.square_mode = self.square_mode
+        self.view.mode = self.mode
+        self.view.set_image_size(self.s.preview_w, self.s.preview_h)
+
+        self._set_actions_enabled(True)
+        self._set_window_title()
+        self.refresh_base()
+        self.refresh_overlay()
+        self.view.fit_all()
+        self.update_status()
 
     def refresh_base(self) -> None:
+        if self.s is None:
+            return
         self.base_item.setPixmap(QPixmap.fromImage(qimage_from_rgb(self.s.preview_rgb)))
         self.scene.setSceneRect(QRectF(0, 0, self.s.preview_w, self.s.preview_h))
 
     def refresh_overlay(self) -> None:
+        if self.s is None:
+            return
         rgba = np.zeros((self.s.preview_h, self.s.preview_w, 4), dtype=np.uint8)
         idx = self.s.mask_preview > 0
         rgba[idx, 0] = 255
@@ -493,28 +635,42 @@ class MainWindow(QMainWindow):
     def toggle_square(self) -> None:
         self.square_mode = self.act_square.isChecked()
         self.view.square_mode = self.square_mode
+        if self.s is not None:
+            self.s.cfg.square_mode = self.square_mode
+        self.update_status()
 
     def invert_wheel(self) -> None:
         self.view.wheel_inverted = not self.view.wheel_inverted
         self.update_status()
 
     def on_box(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        if self.s is None:
+            return
         self.s.apply_box((x0, y0, x1, y1), self.mode)
         self.refresh_overlay()
 
     def undo(self) -> None:
+        if self.s is None:
+            return
         self.s.undo()
         self.refresh_overlay()
 
     def clear(self) -> None:
+        if self.s is None:
+            return
         self.s.clear()
         self.refresh_overlay()
 
     def reset(self) -> None:
+        if self.s is None:
+            return
         self.s.reset()
         self.refresh_overlay()
 
     def save(self) -> None:
+        if self.s is None:
+            QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
+            return
         try:
             self.s.save(self.s.cfg.output_path)
             QMessageBox.information(self, APP_TITLE, f"Kaydedildi:\n{self.s.cfg.output_path}")
@@ -523,6 +679,9 @@ class MainWindow(QMainWindow):
         self.update_status()
 
     def save_as(self) -> None:
+        if self.s is None:
+            QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
+            return
         path, _ = QFileDialog.getSaveFileName(self, "Farkli Kaydet", str(self.s.cfg.output_path), "GeoTIFF (*.tif *.tiff)")
         if not path:
             return
@@ -537,34 +696,26 @@ class MainWindow(QMainWindow):
         self.update_status()
 
     def update_status(self, *_args) -> None:
-        pos, total, ratio = self.s.stats()
         z = self.view.transform().m11()
         wdir = "ters" if self.view.wheel_inverted else "normal"
+        if self.s is None:
+            self.statusBar().showMessage(
+                f"dosya=bekleniyor | mod={self.mode} | kare={'on' if self.square_mode else 'off'} | "
+                f"zoom={z:.2f}x | wheel={wdir}"
+            )
+            return
+        pos, total, ratio = self.s.stats()
         self.statusBar().showMessage(
             f"mod={self.mode} | kare={'on' if self.square_mode else 'off'} | zoom={z:.2f}x | wheel={wdir} | "
             f"pozitif={pos}/{total} ({ratio:.2f}%) | undo={len(self.s.history)}"
         )
 
     def closeEvent(self, event) -> None:
-        if self.s.dirty:
-            ans = QMessageBox.question(
-                self,
-                APP_TITLE,
-                "Kaydedilmemis degisiklikler var. Cikmadan once kaydetmek ister misiniz?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Yes,
-            )
-            if ans == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
-            if ans == QMessageBox.StandardButton.Yes:
-                try:
-                    self.s.save(self.s.cfg.output_path)
-                except Exception as exc:
-                    QMessageBox.critical(self, APP_TITLE, f"Kaydetme hatasi:\n{exc}")
-                    event.ignore()
-                    return
-        self.s.close()
+        if not self._confirm_save_if_dirty():
+            event.ignore()
+            return
+        if self.s is not None:
+            self.s.close()
         event.accept()
 
 
@@ -583,35 +734,12 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def pick_input_if_needed(current: Optional[Path]) -> Optional[Path]:
-    if current is not None:
-        return current
-    path, _ = QFileDialog.getOpenFileName(None, "Girdi GeoTIFF sec", "", "GeoTIFF (*.tif *.tiff);;All (*.*)")
-    if not path:
-        return None
-    return Path(path).expanduser()
-
-
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
-
-    input_path = Path(args.input).expanduser() if args.input else None
-    input_path = pick_input_if_needed(input_path)
-    if input_path is None:
-        return 0
-    if not input_path.exists():
-        QMessageBox.critical(None, APP_TITLE, f"Girdi dosyasi bulunamadi:\n{input_path}")
-        return 1
-
-    output_path = Path(args.output).expanduser() if args.output else input_path.with_name(f"{input_path.stem}_ground_truth.tif")
-    if output_path.suffix == "":
-        output_path = output_path.with_suffix(".tif")
-
-    existing_mask = Path(args.existing_mask).expanduser() if args.existing_mask else None
     preview_max = int(args.preview_max_size)
     positive = int(args.positive_value)
     if preview_max <= 0:
@@ -621,30 +749,22 @@ def main() -> int:
         QMessageBox.critical(None, APP_TITLE, "--positive-value 1-255 araliginda olmali")
         return 1
 
-    try:
-        with rasterio.open(input_path) as tmp:
-            bands = parse_bands(args.bands, tmp.count)
-    except Exception as exc:
-        QMessageBox.critical(None, APP_TITLE, f"Band/raste hatasi:\n{exc}")
-        return 1
-
-    cfg = AppConfig(
-        input_path=input_path,
-        output_path=output_path,
-        existing_mask=existing_mask,
+    win = MainWindow(
         preview_max_size=preview_max,
-        bands=bands,
+        bands_raw=args.bands,
         positive_value=positive,
         square_mode=bool(args.square_mode),
     )
 
-    try:
-        session = Session(cfg)
-    except Exception as exc:
-        QMessageBox.critical(None, APP_TITLE, f"Oturum baslatilamadi:\n{exc}")
-        return 1
+    if args.input:
+        input_path = Path(args.input).expanduser()
+        output_path = Path(args.output).expanduser() if args.output else input_path.with_name(f"{input_path.stem}_ground_truth.tif")
+        if output_path.suffix == "":
+            output_path = output_path.with_suffix(".tif")
+        existing_mask = Path(args.existing_mask).expanduser() if args.existing_mask else None
+        if not win.load_input(input_path, output_path=output_path, existing_mask=existing_mask):
+            return 1
 
-    win = MainWindow(session)
     win.show()
     return int(app.exec())
 
