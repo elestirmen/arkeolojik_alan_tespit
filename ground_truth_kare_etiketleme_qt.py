@@ -47,7 +47,7 @@ if sys.platform == "win32":
 try:
     from PySide6.QtCore import QPointF, QRectF, Qt, Signal
     from PySide6.QtGui import (
-        QAction, QActionGroup, QColor, QCursor, QDragEnterEvent, QDropEvent,
+        QAction, QActionGroup, QBrush, QColor, QCursor, QDragEnterEvent, QDropEvent,
         QImage, QKeySequence, QPainter, QPen, QPixmap,
     )
     from PySide6.QtWidgets import (
@@ -82,7 +82,7 @@ except ImportError as exc:
     try:
         from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal as Signal
         from PyQt6.QtGui import (
-            QAction, QActionGroup, QColor, QCursor, QDragEnterEvent, QDropEvent,
+            QAction, QActionGroup, QBrush, QColor, QCursor, QDragEnterEvent, QDropEvent,
             QImage, QKeySequence, QPainter, QPen, QPixmap,
         )
         from PyQt6.QtWidgets import (
@@ -284,21 +284,34 @@ def qimage_from_rgba(rgba: np.ndarray) -> QImage:
     return img.copy()
 
 
+def _read_rgb_preview(ds, bands: tuple[int, int, int], out_w: int, out_h: int) -> np.ndarray:
+    """Seçilen bantlardan hedef boyutta RGB preview üret."""
+    unique_bands: list[int] = []
+    band_to_idx: dict[int, int] = {}
+    for b in bands[:3]:
+        if b not in band_to_idx:
+            band_to_idx[b] = len(unique_bands)
+            unique_bands.append(b)
+
+    data = ds.read(
+        unique_bands,
+        out_shape=(len(unique_bands), out_h, out_w),
+        resampling=Resampling.bilinear,
+    )
+
+    rgb = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    for ch, b in enumerate(bands[:3]):
+        src_idx = band_to_idx[b]
+        rgb[:, :, ch] = stretch_to_uint8(data[src_idx].astype(np.float32, copy=False))
+    return rgb
+
+
 def read_preview_rgb(path: Path, bands: tuple[int, int, int], out_w: int, out_h: int) -> np.ndarray:
     """Raster dosyasını hedef preview boyutunda RGB uint8'e dönüştür."""
     if out_w <= 0 or out_h <= 0:
         raise ValueError("Hedef preview boyutu gecerli degil")
     with rasterio.open(path) as ds:
-        band_list = list(bands)
-        data = ds.read(
-            band_list,
-            out_shape=(len(band_list), out_h, out_w),
-            resampling=Resampling.bilinear,
-        )
-    rgb = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-    for i in range(min(3, data.shape[0])):
-        rgb[:, :, i] = stretch_to_uint8(data[i].astype(np.float32, copy=False))
-    return rgb
+        return _read_rgb_preview(ds, bands, out_w, out_h)
 
 
 def preview_to_full_box(
@@ -338,6 +351,14 @@ class LayerState:
     visible: bool = True
 
 
+@dataclass
+class UndoEntry:
+    full_box: tuple[int, int, int, int]
+    preview_box: tuple[int, int, int, int]
+    full_prev: np.ndarray
+    preview_prev: np.ndarray
+
+
 class Session:
     """GeoTIFF etiketleme oturumu – performans optimizasyonlu."""
 
@@ -362,8 +383,8 @@ class Session:
         self.initial_mask_full = self.mask_full.copy()
         self.initial_mask_preview = self.mask_preview.copy()
 
-        # --- Delta-based undo: (full_box, preview_box, mode) ---
-        self.history: list[tuple[tuple[int,int,int,int], tuple[int,int,int,int], str]] = []
+        # --- Undo stack: bölgesel önceki değerler ---
+        self.history: list[UndoEntry] = []
         self.dirty = False
 
         # --- O(1) stats counter ---
@@ -388,12 +409,7 @@ class Session:
             scale = min(1.0, float(max_size) / float(max(h, w)))
         ph = max(1, int(round(h * scale)))
         pw = max(1, int(round(w * scale)))
-        # Batch band read – tek rasterio çağrısı
-        band_list = list(bands)
-        data = self.src.read(band_list, out_shape=(len(band_list), ph, pw), resampling=Resampling.bilinear)
-        rgb = np.zeros((ph, pw, 3), dtype=np.uint8)
-        for i in range(min(3, data.shape[0])):
-            rgb[:, :, i] = stretch_to_uint8(data[i].astype(np.float32, copy=False))
+        rgb = _read_rgb_preview(self.src, bands, pw, ph)
         return rgb, float(w) / float(pw), float(h) / float(ph)
 
     def _load_initial_mask(self, mask_path: Optional[Path]) -> np.ndarray:
@@ -431,42 +447,60 @@ class Session:
         pyi1 = min(self.preview_h, py1 + 1)
 
         val = np.uint8(self.cfg.positive_value) if mode == "draw" else np.uint8(0)
+        full_view = self.mask_full[y0:y1, x0:x1]
+        preview_view = self.mask_preview[py0:pyi1, px0:pxi1]
 
-        # Delta-based counter update
-        full_region = self.mask_full[y0:y1, x0:x1]
+        prev_pos = int(np.count_nonzero(full_view))
+        preview_changed = bool(np.any(preview_view != val))
         if mode == "draw":
-            new_pos = int(np.count_nonzero(full_region == 0))  # sadece eklenen
-            self._pos_count += new_pos
+            full_changed = prev_pos < full_view.size
         else:
-            removed = int(np.count_nonzero(full_region > 0))
-            self._pos_count -= removed
+            full_changed = prev_pos > 0
+        if not (full_changed or preview_changed):
+            return
+
+        # Önceki değerler: hızlı undo için kaydedilir.
+        full_prev = full_view.copy()
+        preview_prev = preview_view.copy()
 
         # Maskeleri güncelle
-        self.mask_full[y0:y1, x0:x1] = val
-        self.mask_preview[py0:pyi1, px0:pxi1] = val
+        full_view[:, :] = val
+        preview_view[:, :] = val
+
+        if mode == "draw":
+            self._pos_count += (full_view.size - prev_pos)
+        else:
+            self._pos_count -= prev_pos
 
         # Overlay'ı sadece değişen bölgede güncelle
         self._update_overlay_region(py0, pyi1, px0, pxi1)
 
-        # Delta-based history: sadece koordinatlar + mod
-        self.history.append(((x0, y0, x1, y1), (px0, py0, pxi1, pyi1), mode))
+        self.history.append(
+            UndoEntry(
+                full_box=(x0, y0, x1, y1),
+                preview_box=(px0, py0, pxi1, pyi1),
+                full_prev=full_prev,
+                preview_prev=preview_prev,
+            )
+        )
         self.dirty = True
 
     def undo(self) -> None:
         if not self.history:
             return
-        self.history.pop()
-        # Maskeleri baştan yeniden oluştur (initial + kalan history replay)
-        self.mask_full[:, :] = self.initial_mask_full
-        self.mask_preview[:, :] = self.initial_mask_preview
-        self._pos_count = int(np.count_nonzero(self.initial_mask_full))
-        for (x0, y0, x1, y1), (px0, py0, pxi1, pyi1), mode in self.history:
-            val = np.uint8(self.cfg.positive_value) if mode == "draw" else np.uint8(0)
-            self.mask_full[y0:y1, x0:x1] = val
-            self.mask_preview[py0:pyi1, px0:pxi1] = val
-        self._pos_count = int(np.count_nonzero(self.mask_full))
-        self._rebuild_overlay_full()
-        self.dirty = True
+        entry = self.history.pop()
+        x0, y0, x1, y1 = entry.full_box
+        px0, py0, pxi1, pyi1 = entry.preview_box
+
+        full_view = self.mask_full[y0:y1, x0:x1]
+        cur_pos = int(np.count_nonzero(full_view))
+        prev_pos = int(np.count_nonzero(entry.full_prev))
+        full_view[:, :] = entry.full_prev
+        self._pos_count += (prev_pos - cur_pos)
+
+        self.mask_preview[py0:pyi1, px0:pxi1] = entry.preview_prev
+        self._update_overlay_region(py0, pyi1, px0, pxi1)
+        self.dirty = bool(self.history)
 
     def clear(self) -> None:
         self.mask_full.fill(0)
@@ -588,8 +622,14 @@ class AnnotView(QGraphicsView):
             self._start = self._clamp_point(self.mapToScene(event.pos()))
             color = Qt.GlobalColor.green if self.mode == "draw" else Qt.GlobalColor.yellow
             pen = QPen(color, 2)
+            pen.setCosmetic(True)
+            fill = QColor(color)
+            fill.setAlpha(64)
             self._rect_item = QGraphicsRectItem()
             self._rect_item.setPen(pen)
+            self._rect_item.setBrush(QBrush(fill))
+            self._rect_item.setZValue(1_000_000.0)
+            self._rect_item.setRect(QRectF(self._start.x(), self._start.y(), 1.0, 1.0))
             if self.scene() is not None:
                 self.scene().addItem(self._rect_item)
             event.accept()
@@ -607,7 +647,14 @@ class AnnotView(QGraphicsView):
         if self._drawing and self._start is not None and self._rect_item is not None:
             p1 = self._clamp_point(self.mapToScene(event.pos()))
             xmin, ymin, xmax, ymax = self._norm_box(self._start, p1)
-            self._rect_item.setRect(QRectF(float(xmin), float(ymin), float(max(1, xmax - xmin)), float(max(1, ymax - ymin))))
+            self._rect_item.setRect(
+                QRectF(
+                    float(xmin),
+                    float(ymin),
+                    float(max(1, xmax - xmin + 1)),
+                    float(max(1, ymax - ymin + 1)),
+                )
+            )
             event.accept()
             return
         super().mouseMoveEvent(event)

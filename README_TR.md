@@ -15,6 +15,7 @@ Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (t
 - [🎯 Ne Yapar](#-ne-yapar)
 - [🚀 Hızlı Başlangıç](#-hızlı-başlangıç)
 - [📦 Kurulum](#-kurulum)
+- [🏷️ Ground Truth Etiketleme Aracı (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-etiketleme-aracı-ground_truth_kare_etiketleme_qtpy)
 - [🎮 Kullanım](#-kullanım)
 - [⚙️ Yapılandırma](#️-yapılandırma)
 - [📂 Çıktı Dosyaları](#-çıktı-dosyaları)
@@ -57,6 +58,7 @@ Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (t
 - ⚡ **Önbellek Sistemi**: RVT hesaplamalarını önbelleğe alarak 10-100x hızlanma
 - 🎯 **Akıllı Maskeleme**: Yüksek yapıların (ağaçlar, binalar) otomatik filtrelenmesi
 - 📐 **Vektörleştirme**: Sonuçları CBS uyumlu çokgenlere dönüştürür
+- 🏷️ **Ground Truth Etiketleme**: Katman yönetimli interaktif Qt tabanlı GeoTIFF etiketleme aracı
 
 ### 🌐 CBS Entegrasyonu
 - 📁 GeoPackage (.gpkg) formatında vektör çıktısı
@@ -218,6 +220,114 @@ GPU kontrolü:
 ```python
 import torch
 print(torch.cuda.is_available())  # True olmalı
+```
+
+---
+
+## 🏷️ Ground Truth Etiketleme Aracı (`ground_truth_kare_etiketleme_qt.py`)
+
+GeoTIFF görüntüleri üzerinde ikili (binary) ground truth maskeleri oluşturmak için interaktif Qt tabanlı etiketleme aracı. Raster verinizin önizlemesi üzerinde dikdörtgenler çizerek model eğitimi için piksel düzeyinde doğru GeoTIFF maskeleri oluşturabilirsiniz.
+
+### ✨ Temel Özellikler
+
+| Özellik | Açıklama |
+|---------|----------|
+| **🖱️ Dikdörtgen Çizim** | Sol tıklama + sürükle ile etiketleme/silme dikdörtgeni çiz |
+| **🔍 Yakınlaştırma & Kaydırma** | Fare tekerleği ile yakınlaştırma, sağ tıklama ile kaydırma |
+| **📐 Kare Kilidi** | Çizimi mükemmel kareye sınırla |
+| **↩️ Geri Al** | Tam geri alma geçmişi (Ctrl+Z) |
+| **🎨 Bant Seçimi** | Otomatik bant algılama; çok bantlı dosyalarda seçim dialog’u (RGB, BGR, NIR ön ayarları) |
+| **🗂️ Katman Paneli** | Görünürlük, saydamlık ayarı, sürükle-bırak ile sıralama |
+| **➕ Ek Katmanlar** | Ek GeoTIFF raster dosyalarını üst katman olarak yükleyin |
+| **💾 GeoTIFF Çıktı** | Kaynak CRS, dönüşüm ve DEFLATE sıkıştırma ile maske kaydet |
+| **🖼️ Sürükle & Bırak** | `.tif` dosyalarını doğrudan pencereye bırakın |
+| **🎨 Açık Tema** | Gradient araç çubuğu ve stilize kontroller ile modern açık arayüz |
+| **🔌 Çift Backend** | PySide6 veya PyQt6 ile çalışır |
+
+### 🚀 Hızlı Başlangıç
+
+```bash
+# Argümansız — dosya dialog’u açılır
+python ground_truth_kare_etiketleme_qt.py
+
+# Argümanlarla
+python ground_truth_kare_etiketleme_qt.py \
+  --input kesif_alani.tif \
+  --output kesif_alani_ground_truth.tif
+
+# Mevcut maskeyi düzenlemeye devam
+python ground_truth_kare_etiketleme_qt.py \
+  --input kesif_alani.tif \
+  --existing-mask kesif_alani_ground_truth.tif
+
+# Tek bantlı DEM, önizleme küçültme ile
+python ground_truth_kare_etiketleme_qt.py \
+  --input karlik_dag_dsm.tif \
+  --preview-max-size 4096
+```
+
+### ⌨️ Klavye Kısayolları
+
+| Kısayol | Eylem |
+|---------|-------|
+| `Ctrl+O` | GeoTIFF Aç |
+| `Ctrl+S` | Maskeyi Kaydet |
+| `Ctrl+Shift+S` | Farklı Kaydet |
+| `Ctrl+Z` | Geri Al |
+| `D` | Çizim modu |
+| `E` | Silme modu |
+| `S` | Kare kilidi aç/kapat |
+| `F` | Pencereye sığdır |
+| `W` | Fare tekerleği yönünü ters çevir |
+
+### 📋 Komut Satırı Parametreleri
+
+| Parametre | Açıklama | Varsayılan |
+|-----------|----------|----------:|
+| `--input`, `-i` | Girdi GeoTIFF yolu | _(dosya dialog’u)_ |
+| `--output`, `-o` | Çıktı maske yolu | `<girdi>_ground_truth.tif` |
+| `--existing-mask` | Düzenlemeye devam edilecek mevcut maske | _(yok)_ |
+| `--preview-max-size` | Maks önizleme boyutu piksel (0 = tam çözünürlük) | `0` |
+| `--bands` | RGB görüntüleme için virgülle ayrılmış bant indeksleri | `1,2,3` |
+| `--positive-value` | Pozitif sınıf piksel değeri (1–255) | `1` |
+| `--square-mode` | Kare kilidi açık başlat | `false` |
+
+### 🎵 Bant Seçimi
+
+Dosya açıldığında araç bant sayısını otomatik algılar:
+
+| Bant Sayısı | Davranış |
+|:----------:|----------|
+| **1** | Otomatik gri tonlama — dialog yok |
+| **2** | Bant 1,2 kullanılır — dialog yok |
+| **3+** | Ön ayarlarla **Bant Seçim Dialog’u** gösterilir |
+
+**Mevcut Ön Ayarlar (3+ bant):**
+- **RGB (1, 2, 3)** — standart gerçek renk
+- **BGR (3, 2, 1)** — ters bant sırası
+- **NIR (4, 3, 2)** — yakın kızılötesi sahte renk (5+ bant)
+- **Gri Tonlama (Bant 1)** — tek bant
+- **Özel** — R/G/B için SpinBox ile herhangi bir bant seç
+
+### 🗂️ Katman Paneli
+
+Sol taraftaki panel görüntü katmanlarını yönetir:
+
+- **☑️ Görünürlük** — her katman için işaret kutusu
+- **🔀 Sıralama** — sürükle veya ⬆/⬇ butonları (en üstteki ön planda)
+- **🎚️ Saydamlık** — seçili katman için sürügü (%0–100)
+- **➕ Katman Ekle** — ek GeoTIFF dosyalarını görsel katman olarak yükle
+- **➖ Katman Sil** — ekstra katmanları kaldır (ana görüntü ve maske silinemez)
+
+Varsayılan katmanlar:
+1. 🔴 **Maske** — etiketleme katmanı (kırmızı, yarı saydam)
+2. 🖼️ **Ana Görüntü** — temel raster
+
+### 🔧 Bağımlılıklar
+
+```bash
+pip install rasterio opencv-python numpy
+pip install PySide6   # veya: pip install PyQt6
 ```
 
 ---

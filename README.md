@@ -16,6 +16,7 @@ This project combines **deep learning** and **classical image processing** metho
 - [🚀 Quick Start](#-quick-start)
 - [📦 Installation](#-installation)
 - [DSM to DTM Preprocessing (`veri_on_isleme.py`)](#dsm-to-dtm-preprocessing-veri_on_islemepy)
+- [🏷️ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-labeling-tool-ground_truth_kare_etiketleme_qtpy)
 - [🎮 Usage](#-usage)
 - [⚙️ Configuration](#️-configuration)
 - [📂 Output Files](#-output-files)
@@ -58,6 +59,7 @@ This project combines **deep learning** and **classical image processing** metho
 - ⚡ **Cache System**: 10-100x speedup by caching RVT calculations
 - 🎯 **Smart Masking**: Automatic filtering of tall structures (trees, buildings)
 - 📐 **Vectorization**: Converts results to GIS-compatible polygons
+- 🏷️ **Ground Truth Labeling**: Interactive Qt-based GeoTIFF annotation tool with layer management
 
 ### 🌐 GIS Integration
 - 📁 Vector output in GeoPackage (.gpkg) format
@@ -309,6 +311,114 @@ python veri_on_isleme.py \
 
 - On Windows, keep geospatial stack consistent in one environment (avoid mixing `pip` `gdal/rasterio` with conda GDAL libraries), otherwise GDAL plugin DLL errors may occur.
 - Runtime defaults are defined in `veri_on_isleme.py` (`CONFIG` dict) and can be overridden via CLI.
+
+---
+
+## 🏷️ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)
+
+Interactive Qt-based tool for creating binary ground truth masks on GeoTIFF imagery. Draw rectangles on a preview of your raster data and export pixel-accurate GeoTIFF masks for model training.
+
+### ✨ Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **🖱️ Rectangle Drawing** | Left-click + drag to draw/erase annotation rectangles |
+| **🔍 Zoom & Pan** | Mouse wheel to zoom, right-click to pan |
+| **📐 Square Lock** | Constrain drawing to perfect squares |
+| **↩️ Undo** | Full undo history (Ctrl+Z) |
+| **🎨 Band Selection** | Auto-detects bands; dialog for multi-band files (RGB, BGR, NIR presets) |
+| **🗂️ Layer Panel** | Side panel with visibility toggles, opacity slider, drag-reorder |
+| **➕ Extra Layers** | Load additional GeoTIFF rasters as overlay layers |
+| **💾 GeoTIFF Export** | Saves mask with source CRS, transform, and DEFLATE compression |
+| **🖼️ Drag & Drop** | Drop `.tif` files directly onto the window |
+| **🎨 Light Theme** | Modern light UI with gradient toolbar and styled controls |
+| **🔌 Dual Backend** | Works with PySide6 or PyQt6 |
+
+### 🚀 Quick Start
+
+```bash
+# No arguments — opens file dialog
+python ground_truth_kare_etiketleme_qt.py
+
+# With arguments
+python ground_truth_kare_etiketleme_qt.py \
+  --input kesif_alani.tif \
+  --output kesif_alani_ground_truth.tif
+
+# Resume editing an existing mask
+python ground_truth_kare_etiketleme_qt.py \
+  --input kesif_alani.tif \
+  --existing-mask kesif_alani_ground_truth.tif
+
+# Single-band DEM with preview downsample
+python ground_truth_kare_etiketleme_qt.py \
+  --input karlik_dag_dsm.tif \
+  --preview-max-size 4096
+```
+
+### ⌨️ Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+O` | Open GeoTIFF |
+| `Ctrl+S` | Save mask |
+| `Ctrl+Shift+S` | Save As |
+| `Ctrl+Z` | Undo |
+| `D` | Draw mode |
+| `E` | Erase mode |
+| `S` | Toggle square lock |
+| `F` | Fit to window |
+| `W` | Invert mouse wheel direction |
+
+### 📋 CLI Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|--------:|
+| `--input`, `-i` | Input GeoTIFF path | _(file dialog)_ |
+| `--output`, `-o` | Output mask path | `<input>_ground_truth.tif` |
+| `--existing-mask` | Pre-existing mask to continue editing | _(none)_ |
+| `--preview-max-size` | Max preview dimension in pixels (0 = full res) | `0` |
+| `--bands` | Comma-separated band indices for RGB display | `1,2,3` |
+| `--positive-value` | Pixel value for positive class (1–255) | `1` |
+| `--square-mode` | Start with square lock enabled | `false` |
+
+### 🎵 Band Selection
+
+When opening a file, the tool automatically detects the number of bands:
+
+| Band Count | Behavior |
+|:----------:|----------|
+| **1** | Automatic grayscale — no dialog |
+| **2** | Uses bands 1,2 — no dialog |
+| **3+** | Shows **Band Selection Dialog** with presets |
+
+**Available Presets (3+ bands):**
+- **RGB (1, 2, 3)** — standard true-color
+- **BGR (3, 2, 1)** — reversed band order
+- **NIR (4, 3, 2)** — near-infrared false color (5+ bands)
+- **Grayscale (Band 1)** — single band
+- **Custom** — pick any band for R/G/B via spin boxes
+
+### 🗂️ Layer Panel
+
+The left-side panel manages display layers:
+
+- **☑️ Visibility** — checkbox per layer to show/hide
+- **🔀 Reorder** — drag items or use ⬆/⬇ buttons (top = foreground)
+- **🎚️ Opacity** — slider (0–100%) per selected layer
+- **➕ Add Layer** — load extra GeoTIFFs as visual overlays
+- **➖ Remove Layer** — delete extra layers (base image and mask cannot be removed)
+
+Default layers:
+1. 🔴 **Maske** — the annotation overlay (red, semi-transparent)
+2. 🖼️ **Ana Görüntü** — the base raster
+
+### 🔧 Dependencies
+
+```bash
+pip install rasterio opencv-python numpy
+pip install PySide6   # or: pip install PyQt6
+```
 
 ---
 
