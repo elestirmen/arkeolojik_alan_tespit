@@ -51,17 +51,24 @@ try:
     )
     from PySide6.QtWidgets import (
         QApplication,
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
         QFileDialog,
+        QFormLayout,
         QGraphicsPixmapItem,
         QGraphicsRectItem,
         QGraphicsScene,
         QGraphicsView,
+        QGroupBox,
         QHBoxLayout,
         QLabel,
         QMainWindow,
         QMessageBox,
+        QSpinBox,
         QStatusBar,
         QToolBar,
+        QVBoxLayout,
         QWidget,
     )
     QT_BACKEND = "PySide6"
@@ -75,17 +82,24 @@ except ImportError as exc:
         )
         from PyQt6.QtWidgets import (
             QApplication,
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
             QFileDialog,
+            QFormLayout,
             QGraphicsPixmapItem,
             QGraphicsRectItem,
             QGraphicsScene,
             QGraphicsView,
+            QGroupBox,
             QHBoxLayout,
             QLabel,
             QMainWindow,
             QMessageBox,
+            QSpinBox,
             QStatusBar,
             QToolBar,
+            QVBoxLayout,
             QWidget,
         )
         QT_BACKEND = "PyQt6"
@@ -212,9 +226,11 @@ QFileDialog {
 
 
 def parse_bands(raw: str, count: int) -> tuple[int, int, int]:
+    """Band string'ini parse et. Tek bantlı dosyalar için otomatik gri tonlama."""
     parts = [int(x.strip()) for x in raw.split(",") if x.strip()]
     if not parts:
-        raise ValueError("Band listesi bos olamaz")
+        # Tek bantlı dosya için otomatik
+        parts = [1]
     if len(parts) == 1:
         parts = [parts[0], parts[0], parts[0]]
     elif len(parts) == 2:
@@ -579,6 +595,99 @@ class AnnotView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
 
+# ---------------------------------------------------------------------------
+# Band Selection Dialog
+# ---------------------------------------------------------------------------
+class BandSelectionDialog(QDialog):
+    """Çok bantlı dosyalarda R/G/B band seçim dialog'u."""
+
+    def __init__(self, band_count: int, default_raw: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Band Seçimi")
+        self.setMinimumWidth(360)
+        self.setStyleSheet(APP_STYLE)
+
+        layout = QVBoxLayout(self)
+
+        # Info label
+        info = QLabel(f"Dosyada <b>{band_count}</b> bant mevcut. Görüntüleme için band atayın.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        # Preset combo
+        preset_group = QGroupBox("Hazır Ayar")
+        preset_layout = QFormLayout(preset_group)
+        self._preset_combo = QComboBox()
+        presets = []
+        if band_count >= 3:
+            presets.append(("RGB (1, 2, 3)", "1,2,3"))
+        if band_count >= 5:
+            presets.append(("RGB (3, 2, 1) – BGR", "3,2,1"))
+            presets.append(("Band 4, 3, 2 – Yakın Kızılötesi", "4,3,2"))
+        presets.append(("Gri Tonlama (Band 1)", "1"))
+        presets.append(("Özel…", ""))
+        self._presets = presets
+        for label, _ in presets:
+            self._preset_combo.addItem(label)
+        self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        preset_layout.addRow("Seçim:", self._preset_combo)
+        layout.addWidget(preset_group)
+
+        # Custom band spinboxes
+        self._custom_group = QGroupBox("Özel Band Seçimi")
+        custom_layout = QFormLayout(self._custom_group)
+
+        self._spin_r = QSpinBox()
+        self._spin_r.setRange(1, band_count)
+        self._spin_r.setValue(1)
+        custom_layout.addRow("Kırmızı (R):", self._spin_r)
+
+        self._spin_g = QSpinBox()
+        self._spin_g.setRange(1, band_count)
+        self._spin_g.setValue(min(2, band_count))
+        custom_layout.addRow("Yeşil (G):", self._spin_g)
+
+        self._spin_b = QSpinBox()
+        self._spin_b.setRange(1, band_count)
+        self._spin_b.setValue(min(3, band_count))
+        custom_layout.addRow("Mavi (B):", self._spin_b)
+
+        self._custom_group.setVisible(False)
+        layout.addWidget(self._custom_group)
+
+        # Buttons
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+        # Try to match the default
+        self._select_default(default_raw)
+
+    def _select_default(self, raw: str) -> None:
+        raw_clean = raw.replace(" ", "")
+        for i, (_, val) in enumerate(self._presets):
+            if val == raw_clean:
+                self._preset_combo.setCurrentIndex(i)
+                return
+        # Default to first preset
+        self._preset_combo.setCurrentIndex(0)
+
+    def _on_preset_changed(self, index: int) -> None:
+        _, val = self._presets[index]
+        is_custom = val == ""
+        self._custom_group.setVisible(is_custom)
+
+    def get_bands_raw(self) -> str:
+        idx = self._preset_combo.currentIndex()
+        _, val = self._presets[idx]
+        if val:
+            return val
+        return f"{self._spin_r.value()},{self._spin_g.value()},{self._spin_b.value()}"
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -822,10 +931,34 @@ class MainWindow(QMainWindow):
     def open_input(self) -> None:
         if not self._confirm_save_if_dirty():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Girdi GeoTIFF sec", "", "GeoTIFF (*.tif *.tiff);;All (*.*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Girdi GeoTIFF seç", "", "GeoTIFF (*.tif *.tiff);;All (*.*)")
         if not path:
             return
-        self.load_input(Path(path).expanduser())
+        input_path = Path(path).expanduser()
+
+        # --- Band auto-detection & selection dialog ---
+        try:
+            with rasterio.open(input_path) as tmp:
+                band_count = tmp.count
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Dosya açılamadı:\n{exc}")
+            return
+
+        if band_count == 1:
+            # Tek bantlı → otomatik gri tonlama
+            bands_raw = "1"
+        elif band_count >= 3:
+            # Çok bantlı → seçim dialog'u göster
+            dlg = BandSelectionDialog(band_count, self.bands_raw, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            bands_raw = dlg.get_bands_raw()
+        else:
+            # 2 bantlı
+            bands_raw = "1,2"
+
+        self.bands_raw = bands_raw
+        self.load_input(input_path)
 
     def load_input(
         self,
@@ -851,7 +984,7 @@ class MainWindow(QMainWindow):
             with rasterio.open(input_path) as tmp:
                 bands = parse_bands(self.bands_raw, tmp.count)
         except Exception as exc:
-            QMessageBox.critical(self, APP_TITLE, f"Band/raste hatasi:\n{exc}")
+            QMessageBox.critical(self, APP_TITLE, f"Band/raster hatası:\n{exc}")
             return False
 
         cfg = AppConfig(
@@ -867,7 +1000,7 @@ class MainWindow(QMainWindow):
         try:
             new_session = Session(cfg)
         except Exception as exc:
-            QMessageBox.critical(self, APP_TITLE, f"Oturum baslatilamadi:\n{exc}")
+            QMessageBox.critical(self, APP_TITLE, f"Oturum başlatılamadı:\n{exc}")
             return False
 
         self.set_session(new_session)
@@ -1054,7 +1187,23 @@ class MainWindow(QMainWindow):
             if path.lower().endswith((".tif", ".tiff")):
                 if not self._confirm_save_if_dirty():
                     return
-                self.load_input(Path(path))
+                input_path = Path(path)
+                try:
+                    with rasterio.open(input_path) as tmp:
+                        band_count = tmp.count
+                except Exception:
+                    self.load_input(input_path)
+                    return
+                if band_count == 1:
+                    self.bands_raw = "1"
+                elif band_count >= 3:
+                    dlg = BandSelectionDialog(band_count, self.bands_raw, self)
+                    if dlg.exec() != QDialog.DialogCode.Accepted:
+                        return
+                    self.bands_raw = dlg.get_bands_raw()
+                else:
+                    self.bands_raw = "1,2"
+                self.load_input(input_path)
                 return
 
     def closeEvent(self, event) -> None:
