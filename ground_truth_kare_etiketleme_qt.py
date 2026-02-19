@@ -518,6 +518,26 @@ class Session:
         self._rebuild_overlay_full()
         self.dirty = True
 
+    def set_positive_value(self, new_value: int) -> bool:
+        """Pozitif sınıf değerini güncelle ve mevcut seçili alanları yeni değere eşitle."""
+        clamped = max(1, min(int(new_value), 255))
+        if clamped == int(self.cfg.positive_value):
+            return False
+
+        new_val = np.uint8(clamped)
+        has_selected = bool(np.any(self.mask_full > 0))
+        if has_selected:
+            self.mask_full[self.mask_full > 0] = new_val
+            self.mask_preview[self.mask_preview > 0] = new_val
+            self.initial_mask_full[self.initial_mask_full > 0] = new_val
+            self.initial_mask_preview[self.initial_mask_preview > 0] = new_val
+            self.dirty = True
+
+        self.cfg.positive_value = clamped
+        # Eski değer ile kaydedilmiş undo kayıtlarını tutarsızlığa düşürmemek için temizle.
+        self.history.clear()
+        return has_selected
+
     def save(self, path: Path) -> None:
         profile = self.profile.copy()
         profile.update(driver="GTiff", count=1, dtype="uint8", nodata=0, compress="deflate")
@@ -1223,6 +1243,21 @@ class MainWindow(QMainWindow):
         else:
             self._rebuild_layer_list()
 
+    def _set_positive_spin_value(self, value: int) -> None:
+        if not hasattr(self, "spin_positive"):
+            return
+        clamped = max(1, min(int(value), 255))
+        self.spin_positive.blockSignals(True)
+        self.spin_positive.setValue(clamped)
+        self.spin_positive.blockSignals(False)
+
+    def on_positive_value_changed(self, value: int) -> None:
+        clamped = max(1, min(int(value), 255))
+        self.positive_value = clamped
+        if self.s is not None:
+            self.s.set_positive_value(clamped)
+        self.update_status()
+
     def _set_actions_enabled(self, enabled: bool) -> None:
         for act in (
             self.act_save,
@@ -1299,6 +1334,19 @@ class MainWindow(QMainWindow):
         self.act_remove_layer.setToolTip("Secili ekstra katmani sil")
         self.act_remove_layer.triggered.connect(self.remove_selected_layer)
         tb.addAction(self.act_remove_layer)
+
+        tb.addSeparator()
+        self._toolbar_positive_label = QLabel("Maske Degeri")
+        self._toolbar_positive_label.setStyleSheet("padding-left: 6px; padding-right: 2px;")
+        tb.addWidget(self._toolbar_positive_label)
+
+        self.spin_positive = QSpinBox(self)
+        self.spin_positive.setRange(1, 255)
+        self.spin_positive.setValue(self.positive_value)
+        self.spin_positive.setFixedWidth(72)
+        self.spin_positive.setToolTip("Secili piksellerin kayit degeri (1-255)")
+        self.spin_positive.valueChanged.connect(self.on_positive_value_changed)
+        tb.addWidget(self.spin_positive)
         tb.addSeparator()
 
         # --- Mode actions (exclusive group) ---
@@ -1380,6 +1428,10 @@ class MainWindow(QMainWindow):
         # Square badge
         self._status_square = QLabel()
         sb.addWidget(self._status_square)
+
+        # Positive value label
+        self._status_positive = QLabel()
+        sb.addWidget(self._status_positive)
 
         # Zoom label
         self._status_zoom = QLabel()
@@ -1511,6 +1563,8 @@ class MainWindow(QMainWindow):
         self.square_mode = bool(session.cfg.square_mode)
         self.act_square.setChecked(self.square_mode)
         self.view.square_mode = self.square_mode
+        self.positive_value = int(session.cfg.positive_value)
+        self._set_positive_spin_value(self.positive_value)
         self.view.set_mode(self.mode)
         self.view.set_image_size(self.s.preview_w, self.s.preview_h)
         self._reset_layer_stack()
@@ -1647,6 +1701,8 @@ class MainWindow(QMainWindow):
         sq_icon = "⬜" if self.square_mode else "▭"
         sq_text = "Kare" if self.square_mode else "Serbest"
         self._status_square.setText(f"  {sq_icon} {sq_text}  ")
+
+        self._status_positive.setText(f"  Değer {self.positive_value}  ")
 
         # Zoom
         self._status_zoom.setText(f"  🔍 {z:.0%}  ")
