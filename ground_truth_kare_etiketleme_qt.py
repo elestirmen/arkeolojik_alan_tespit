@@ -8,6 +8,7 @@ Ozellikler:
 - Sag fare: pan
 - Tekerlek: zoom
 - Draw / Erase modlari
+- Secilen / secilmeyen maske degerleri ayarlanabilir
 - Undo (Ctrl+Z), clear, reset, fit
 - Save / Save As (GeoTIFF mask)
 - Sol panel katman yonetimi (gorunurluk, sira, saydamlik)
@@ -337,6 +338,7 @@ class AppConfig:
     preview_max_size: int
     bands: tuple[int, int, int]
     positive_value: int
+    negative_value: int
     square_mode: bool
 
 
@@ -372,13 +374,16 @@ class Session:
         self.preview_rgb, self.scale_x, self.scale_y = self._build_preview(cfg.preview_max_size, cfg.bands)
         self.preview_h, self.preview_w = self.preview_rgb.shape[:2]
 
+        pos_val = np.uint8(cfg.positive_value)
+        neg_val = np.uint8(cfg.negative_value)
         self.mask_full = self._load_initial_mask(cfg.existing_mask)
-        self.mask_preview = cv2.resize(
-            (self.mask_full > 0).astype(np.uint8),
+        selected_preview = cv2.resize(
+            (self.mask_full != neg_val).astype(np.uint8),
             (self.preview_w, self.preview_h),
             interpolation=cv2.INTER_NEAREST,
         )
-        self.mask_preview[self.mask_preview > 0] = np.uint8(cfg.positive_value)
+        self.mask_preview = np.full((self.preview_h, self.preview_w), neg_val, dtype=np.uint8)
+        self.mask_preview[selected_preview > 0] = pos_val
 
         self.initial_mask_full = self.mask_full.copy()
         self.initial_mask_preview = self.mask_preview.copy()
@@ -388,7 +393,7 @@ class Session:
         self.dirty = False
 
         # --- O(1) stats counter ---
-        self._pos_count = int(np.count_nonzero(self.mask_full))
+        self._pos_count = int(np.count_nonzero(self.mask_full != neg_val))
         self._total = int(self.mask_full.size)
 
         # --- Persistent overlay RGBA buffer ---
@@ -413,21 +418,28 @@ class Session:
         return rgb, float(w) / float(pw), float(h) / float(ph)
 
     def _load_initial_mask(self, mask_path: Optional[Path]) -> np.ndarray:
+        neg_val = np.uint8(self.cfg.negative_value)
+        pos_val = np.uint8(self.cfg.positive_value)
         if mask_path is None:
-            return np.zeros((self.full_h, self.full_w), dtype=np.uint8)
+            return np.full((self.full_h, self.full_w), neg_val, dtype=np.uint8)
         with rasterio.open(mask_path) as ds:
             if ds.width != self.full_w or ds.height != self.full_h:
                 raise ValueError("Mevcut maske boyutu raster ile ayni olmali")
             mask = ds.read(1)
-        out = np.zeros((self.full_h, self.full_w), dtype=np.uint8)
-        out[mask > 0] = np.uint8(self.cfg.positive_value)
+        # Öncelik: eğer maskede mevcut negative değer varsa onu arkaplan kabul et.
+        if np.any(mask == neg_val):
+            selected = mask != neg_val
+        else:
+            selected = mask > 0
+        out = np.full((self.full_h, self.full_w), neg_val, dtype=np.uint8)
+        out[selected] = pos_val
         return out
 
     # --- Overlay helpers ---
     def _rebuild_overlay_full(self) -> None:
         """Tüm overlay RGBA buffer'ını mask_preview'dan yeniden oluştur."""
         self.overlay_rgba.fill(0)
-        idx = self.mask_preview > 0
+        idx = self.mask_preview != np.uint8(self.cfg.negative_value)
         self.overlay_rgba[idx, 0] = 255
         self.overlay_rgba[idx, 3] = OVERLAY_ALPHA
 
@@ -436,7 +448,7 @@ class Session:
         region_mask = self.mask_preview[py0:py1, px0:px1]
         region = self.overlay_rgba[py0:py1, px0:px1]
         region[:] = 0
-        idx = region_mask > 0
+        idx = region_mask != np.uint8(self.cfg.negative_value)
         region[idx, 0] = 255
         region[idx, 3] = OVERLAY_ALPHA
 
@@ -446,11 +458,13 @@ class Session:
         pxi1 = min(self.preview_w, px1 + 1)
         pyi1 = min(self.preview_h, py1 + 1)
 
-        val = np.uint8(self.cfg.positive_value) if mode == "draw" else np.uint8(0)
+        pos_val = np.uint8(self.cfg.positive_value)
+        neg_val = np.uint8(self.cfg.negative_value)
+        val = pos_val if mode == "draw" else neg_val
         full_view = self.mask_full[y0:y1, x0:x1]
         preview_view = self.mask_preview[py0:pyi1, px0:pxi1]
 
-        prev_pos = int(np.count_nonzero(full_view))
+        prev_pos = int(np.count_nonzero(full_view != neg_val))
         preview_changed = bool(np.any(preview_view != val))
         if mode == "draw":
             full_changed = prev_pos < full_view.size
@@ -492,9 +506,10 @@ class Session:
         x0, y0, x1, y1 = entry.full_box
         px0, py0, pxi1, pyi1 = entry.preview_box
 
+        neg_val = np.uint8(self.cfg.negative_value)
         full_view = self.mask_full[y0:y1, x0:x1]
-        cur_pos = int(np.count_nonzero(full_view))
-        prev_pos = int(np.count_nonzero(entry.full_prev))
+        cur_pos = int(np.count_nonzero(full_view != neg_val))
+        prev_pos = int(np.count_nonzero(entry.full_prev != neg_val))
         full_view[:, :] = entry.full_prev
         self._pos_count += (prev_pos - cur_pos)
 
@@ -503,44 +518,88 @@ class Session:
         self.dirty = bool(self.history)
 
     def clear(self) -> None:
-        self.mask_full.fill(0)
-        self.mask_preview.fill(0)
+        neg_val = np.uint8(self.cfg.negative_value)
+        self.mask_full.fill(neg_val)
+        self.mask_preview.fill(neg_val)
         self.overlay_rgba.fill(0)
         self.history.clear()
         self._pos_count = 0
         self.dirty = True
 
     def reset(self) -> None:
+        neg_val = np.uint8(self.cfg.negative_value)
         self.mask_full[:, :] = self.initial_mask_full
         self.mask_preview[:, :] = self.initial_mask_preview
         self.history.clear()
-        self._pos_count = int(np.count_nonzero(self.initial_mask_full))
+        self._pos_count = int(np.count_nonzero(self.initial_mask_full != neg_val))
         self._rebuild_overlay_full()
         self.dirty = True
 
     def set_positive_value(self, new_value: int) -> bool:
         """Pozitif sınıf değerini güncelle ve mevcut seçili alanları yeni değere eşitle."""
         clamped = max(1, min(int(new_value), 255))
-        if clamped == int(self.cfg.positive_value):
+        return self.set_class_values(clamped, int(self.cfg.negative_value))
+
+    def set_negative_value(self, new_value: int) -> bool:
+        clamped = max(0, min(int(new_value), 255))
+        return self.set_class_values(int(self.cfg.positive_value), clamped)
+
+    def set_class_values(self, positive_value: int, negative_value: int) -> bool:
+        new_pos = max(1, min(int(positive_value), 255))
+        new_neg = max(0, min(int(negative_value), 255))
+        if new_pos == new_neg:
+            raise ValueError("Secili ve secilmeyen deger ayni olamaz")
+
+        old_pos = int(self.cfg.positive_value)
+        old_neg = int(self.cfg.negative_value)
+        if new_pos == old_pos and new_neg == old_neg:
             return False
 
-        new_val = np.uint8(clamped)
-        has_selected = bool(np.any(self.mask_full > 0))
-        if has_selected:
-            self.mask_full[self.mask_full > 0] = new_val
-            self.mask_preview[self.mask_preview > 0] = new_val
-            self.initial_mask_full[self.initial_mask_full > 0] = new_val
-            self.initial_mask_preview[self.initial_mask_preview > 0] = new_val
+        old_neg_u8 = np.uint8(old_neg)
+        selected_full = self.mask_full != old_neg_u8
+        selected_preview = self.mask_preview != old_neg_u8
+        selected_init_full = self.initial_mask_full != old_neg_u8
+        selected_init_preview = self.initial_mask_preview != old_neg_u8
+
+        has_selected = bool(np.any(selected_full) or np.any(selected_init_full))
+        pixels_changed = (new_neg != old_neg) or ((new_pos != old_pos) and has_selected)
+
+        if pixels_changed:
+            new_pos_u8 = np.uint8(new_pos)
+            new_neg_u8 = np.uint8(new_neg)
+
+            self.mask_full.fill(new_neg_u8)
+            self.mask_full[selected_full] = new_pos_u8
+
+            self.mask_preview.fill(new_neg_u8)
+            self.mask_preview[selected_preview] = new_pos_u8
+
+            self.initial_mask_full.fill(new_neg_u8)
+            self.initial_mask_full[selected_init_full] = new_pos_u8
+
+            self.initial_mask_preview.fill(new_neg_u8)
+            self.initial_mask_preview[selected_init_preview] = new_pos_u8
+
+            self._rebuild_overlay_full()
             self.dirty = True
 
-        self.cfg.positive_value = clamped
-        # Eski değer ile kaydedilmiş undo kayıtlarını tutarsızlığa düşürmemek için temizle.
+        self.cfg.positive_value = new_pos
+        self.cfg.negative_value = new_neg
+        self._pos_count = int(np.count_nonzero(selected_full))
+
+        # Sınıf değerleri değiştiğinde undo kayıtları eski değerleri taşıyacağı için temizlenir.
         self.history.clear()
-        return has_selected
+        return pixels_changed
 
     def save(self, path: Path) -> None:
         profile = self.profile.copy()
-        profile.update(driver="GTiff", count=1, dtype="uint8", nodata=0, compress="deflate")
+        profile.update(
+            driver="GTiff",
+            count=1,
+            dtype="uint8",
+            nodata=int(self.cfg.negative_value),
+            compress="deflate",
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         with rasterio.open(path, "w", **profile) as dst:
             dst.write(self.mask_full[np.newaxis, :, :].astype(np.uint8, copy=False))
@@ -794,12 +853,73 @@ class BandSelectionDialog(QDialog):
         return f"{self._spin_r.value()},{self._spin_g.value()},{self._spin_b.value()}"
 
 
+class MaskValuesDialog(QDialog):
+    """Maske sınıf değerleri için ince ayar dialog'u."""
+
+    def __init__(self, positive_value: int, negative_value: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Maske Ayarlari")
+        self.setMinimumWidth(360)
+        self.setStyleSheet(APP_STYLE)
+
+        layout = QVBoxLayout(self)
+
+        info = QLabel("Secilen ve secilmeyen piksel degerlerini ayarlayin.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QFormLayout()
+
+        self.spin_positive = QSpinBox(self)
+        self.spin_positive.setRange(1, 255)
+        self.spin_positive.setValue(max(1, min(int(positive_value), 255)))
+        self.spin_positive.setToolTip("Cizim (Draw) ile isaretlenen pikseller")
+        form.addRow("Secilen:", self.spin_positive)
+
+        self.spin_negative = QSpinBox(self)
+        self.spin_negative.setRange(0, 255)
+        self.spin_negative.setValue(max(0, min(int(negative_value), 255)))
+        self.spin_negative.setToolTip("Silme (Erase) ve arkaplan pikselleri")
+        form.addRow("Secilmeyen:", self.spin_negative)
+
+        layout.addLayout(form)
+
+        self._validation = QLabel()
+        self._validation.setStyleSheet("color: #b91c1c;")
+        layout.addWidget(self._validation)
+
+        self._btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._btn_box.accepted.connect(self.accept)
+        self._btn_box.rejected.connect(self.reject)
+        layout.addWidget(self._btn_box)
+
+        self.spin_positive.valueChanged.connect(self._sync_validation)
+        self.spin_negative.valueChanged.connect(self._sync_validation)
+        self._sync_validation()
+
+    def _sync_validation(self) -> None:
+        same = self.spin_positive.value() == self.spin_negative.value()
+        ok_btn = self._btn_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setEnabled(not same)
+        if same:
+            self._validation.setText("Secilen ve secilmeyen deger ayni olamaz.")
+        else:
+            self._validation.setText("")
+
+    def values(self) -> tuple[int, int]:
+        return int(self.spin_positive.value()), int(self.spin_negative.value())
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
         preview_max_size: int,
         bands_raw: str,
         positive_value: int,
+        negative_value: int,
         square_mode: bool,
         session: Optional[Session] = None,
     ):
@@ -810,6 +930,7 @@ class MainWindow(QMainWindow):
         self.preview_max_size = int(preview_max_size)
         self.bands_raw = bands_raw
         self.positive_value = int(positive_value)
+        self.negative_value = int(negative_value)
 
         # --- Apply light theme ---
         self.setStyleSheet(APP_STYLE)
@@ -1243,20 +1364,34 @@ class MainWindow(QMainWindow):
         else:
             self._rebuild_layer_list()
 
-    def _set_positive_spin_value(self, value: int) -> None:
-        if not hasattr(self, "spin_positive"):
+    def _apply_mask_values(self, positive: int, negative: int) -> None:
+        pos = max(1, min(int(positive), 255))
+        neg = max(0, min(int(negative), 255))
+        if pos == neg:
+            QMessageBox.warning(self, APP_TITLE, "Secilen ve secilmeyen deger ayni olamaz.")
             return
-        clamped = max(1, min(int(value), 255))
-        self.spin_positive.blockSignals(True)
-        self.spin_positive.setValue(clamped)
-        self.spin_positive.blockSignals(False)
 
-    def on_positive_value_changed(self, value: int) -> None:
-        clamped = max(1, min(int(value), 255))
-        self.positive_value = clamped
+        self.positive_value = pos
+        self.negative_value = neg
+
         if self.s is not None:
-            self.s.set_positive_value(clamped)
+            try:
+                changed = self.s.set_class_values(pos, neg)
+            except Exception as exc:
+                QMessageBox.critical(self, APP_TITLE, f"Maske degeri guncellenemedi:\n{exc}")
+                return
+            if changed:
+                self.refresh_overlay()
+                return
+
         self.update_status()
+
+    def open_mask_settings_dialog(self) -> None:
+        dlg = MaskValuesDialog(self.positive_value, self.negative_value, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        pos, neg = dlg.values()
+        self._apply_mask_values(pos, neg)
 
     def _set_actions_enabled(self, enabled: bool) -> None:
         for act in (
@@ -1335,18 +1470,10 @@ class MainWindow(QMainWindow):
         self.act_remove_layer.triggered.connect(self.remove_selected_layer)
         tb.addAction(self.act_remove_layer)
 
-        tb.addSeparator()
-        self._toolbar_positive_label = QLabel("Maske Degeri")
-        self._toolbar_positive_label.setStyleSheet("padding-left: 6px; padding-right: 2px;")
-        tb.addWidget(self._toolbar_positive_label)
-
-        self.spin_positive = QSpinBox(self)
-        self.spin_positive.setRange(1, 255)
-        self.spin_positive.setValue(self.positive_value)
-        self.spin_positive.setFixedWidth(72)
-        self.spin_positive.setToolTip("Secili piksellerin kayit degeri (1-255)")
-        self.spin_positive.valueChanged.connect(self.on_positive_value_changed)
-        tb.addWidget(self.spin_positive)
+        self.act_mask_settings = QAction("⚙️ Maske Ayarlari", self)
+        self.act_mask_settings.setToolTip("Secilen/secilmeyen piksel degerlerini acilan panelde ayarla")
+        self.act_mask_settings.triggered.connect(self.open_mask_settings_dialog)
+        tb.addAction(self.act_mask_settings)
         tb.addSeparator()
 
         # --- Mode actions (exclusive group) ---
@@ -1538,6 +1665,7 @@ class MainWindow(QMainWindow):
             preview_max_size=self.preview_max_size,
             bands=bands,
             positive_value=self.positive_value,
+            negative_value=self.negative_value,
             square_mode=self.square_mode,
         )
 
@@ -1564,7 +1692,7 @@ class MainWindow(QMainWindow):
         self.act_square.setChecked(self.square_mode)
         self.view.square_mode = self.square_mode
         self.positive_value = int(session.cfg.positive_value)
-        self._set_positive_spin_value(self.positive_value)
+        self.negative_value = int(session.cfg.negative_value)
         self.view.set_mode(self.mode)
         self.view.set_image_size(self.s.preview_w, self.s.preview_h)
         self._reset_layer_stack()
@@ -1702,7 +1830,7 @@ class MainWindow(QMainWindow):
         sq_text = "Kare" if self.square_mode else "Serbest"
         self._status_square.setText(f"  {sq_icon} {sq_text}  ")
 
-        self._status_positive.setText(f"  Değer {self.positive_value}  ")
+        self._status_positive.setText(f"  Maske S:{self.positive_value}  B:{self.negative_value}  ")
 
         # Zoom
         self._status_zoom.setText(f"  🔍 {z:.0%}  ")
@@ -1769,6 +1897,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--preview-max-size", type=int, default=0)
     p.add_argument("--bands", type=str, default="1,2,3")
     p.add_argument("--positive-value", type=int, default=1)
+    p.add_argument("--negative-value", type=int, default=0)
     p.add_argument("--square-mode", action="store_true")
     return p
 
@@ -1781,17 +1910,25 @@ def main() -> int:
     app.setApplicationName(APP_TITLE)
     preview_max = int(args.preview_max_size)
     positive = int(args.positive_value)
+    negative = int(args.negative_value)
     if preview_max < 0:
         QMessageBox.critical(None, APP_TITLE, "--preview-max-size 0 veya pozitif olmali (0=tam cozumurluk)")
         return 1
     if not (1 <= positive <= 255):
         QMessageBox.critical(None, APP_TITLE, "--positive-value 1-255 araliginda olmali")
         return 1
+    if not (0 <= negative <= 255):
+        QMessageBox.critical(None, APP_TITLE, "--negative-value 0-255 araliginda olmali")
+        return 1
+    if positive == negative:
+        QMessageBox.critical(None, APP_TITLE, "--positive-value ve --negative-value ayni olamaz")
+        return 1
 
     win = MainWindow(
         preview_max_size=preview_max,
         bands_raw=args.bands,
         positive_value=positive,
+        negative_value=negative,
         square_mode=bool(args.square_mode),
     )
 
