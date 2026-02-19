@@ -10,6 +10,7 @@ Ozellikler:
 - Draw / Erase modlari
 - Undo (Ctrl+Z), clear, reset, fit
 - Save / Save As (GeoTIFF mask)
+- Sol panel katman yonetimi (gorunurluk, sira, saydamlik)
 """
 
 from __future__ import annotations
@@ -63,8 +64,12 @@ try:
         QGroupBox,
         QHBoxLayout,
         QLabel,
+        QListWidget,
+        QListWidgetItem,
         QMainWindow,
         QMessageBox,
+        QPushButton,
+        QSlider,
         QSpinBox,
         QStatusBar,
         QToolBar,
@@ -94,8 +99,12 @@ except ImportError as exc:
             QGroupBox,
             QHBoxLayout,
             QLabel,
+            QListWidget,
+            QListWidgetItem,
             QMainWindow,
             QMessageBox,
+            QPushButton,
+            QSlider,
             QSpinBox,
             QStatusBar,
             QToolBar,
@@ -113,6 +122,8 @@ except ImportError as exc:
 
 APP_TITLE = "Ground Truth Kare Etiketleme (Qt)"
 OVERLAY_ALPHA = 96
+LAYER_KEY_BASE = "__base__"
+LAYER_KEY_MASK = "__mask__"
 
 # ---------------------------------------------------------------------------
 # Light Fresh Theme Stylesheet
@@ -273,6 +284,23 @@ def qimage_from_rgba(rgba: np.ndarray) -> QImage:
     return img.copy()
 
 
+def read_preview_rgb(path: Path, bands: tuple[int, int, int], out_w: int, out_h: int) -> np.ndarray:
+    """Raster dosyasını hedef preview boyutunda RGB uint8'e dönüştür."""
+    if out_w <= 0 or out_h <= 0:
+        raise ValueError("Hedef preview boyutu gecerli degil")
+    with rasterio.open(path) as ds:
+        band_list = list(bands)
+        data = ds.read(
+            band_list,
+            out_shape=(len(band_list), out_h, out_w),
+            resampling=Resampling.bilinear,
+        )
+    rgb = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    for i in range(min(3, data.shape[0])):
+        rgb[:, :, i] = stretch_to_uint8(data[i].astype(np.float32, copy=False))
+    return rgb
+
+
 def preview_to_full_box(
     box: tuple[int, int, int, int],
     scale_x: float,
@@ -297,6 +325,17 @@ class AppConfig:
     bands: tuple[int, int, int]
     positive_value: int
     square_mode: bool
+
+
+@dataclass
+class LayerState:
+    key: str
+    name: str
+    item: QGraphicsPixmapItem
+    kind: str  # base | mask | raster
+    source_path: Optional[Path] = None
+    opacity: float = 1.0
+    visible: bool = True
 
 
 class Session:
@@ -718,7 +757,10 @@ class MainWindow(QMainWindow):
         self.view.mode = self.mode
         self.view.box_committed.connect(self.on_box)
         self.view.zoom_changed.connect(self.update_status)
-        self.setCentralWidget(self.view)
+
+        self._layers_updating_ui = False
+        self._extra_layer_counter = 0
+        self.layers: list[LayerState] = []
 
         self.base_item = QGraphicsPixmapItem()
         self.base_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
@@ -726,6 +768,17 @@ class MainWindow(QMainWindow):
         self.mask_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
         self.scene.addItem(self.base_item)
         self.scene.addItem(self.mask_item)
+
+        self.layer_panel = self._build_layer_panel()
+        center = QWidget(self)
+        center_layout = QHBoxLayout(center)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+        center_layout.addWidget(self.layer_panel, 0)
+        center_layout.addWidget(self.view, 1)
+        self.setCentralWidget(center)
+
+        self._reset_layer_stack()
 
         self._build_toolbar()
         self._build_status_bar()
@@ -743,10 +796,392 @@ class MainWindow(QMainWindow):
             return
         self.setWindowTitle(f"{APP_TITLE} - {self.s.cfg.input_path.name} [{QT_BACKEND}]")
 
+    # ------------------------------------------------------------------
+    # Layer panel
+    # ------------------------------------------------------------------
+    _PANEL_STYLE = """
+        QWidget#LayerPanel {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #ffffff, stop:1 #f8fafc);
+            border-right: 1px solid #e2e8f0;
+        }
+        QLabel#LayerTitle {
+            font-weight: 700;
+            font-size: 14px;
+            color: #0f172a;
+            padding: 2px 0;
+        }
+        QPushButton {
+            background: #e0f2fe;
+            color: #0c4a6e;
+            border: 1px solid #bae6fd;
+            border-radius: 5px;
+            padding: 4px 10px;
+            font-size: 12px;
+        }
+        QPushButton:hover { background: #bae6fd; border-color: #7dd3fc; }
+        QPushButton:pressed { background: #7dd3fc; }
+        QPushButton:disabled { background: #f1f5f9; color: #94a3b8; border-color: #e2e8f0; }
+        QListWidget {
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            padding: 4px;
+            font-size: 13px;
+            outline: none;
+        }
+        QListWidget::item {
+            padding: 5px 6px;
+            border-radius: 4px;
+        }
+        QListWidget::item:selected {
+            background: #dbeafe;
+            color: #1e3a5f;
+        }
+        QListWidget::item:hover {
+            background: #f0f9ff;
+        }
+        QSlider::groove:horizontal {
+            height: 6px;
+            background: #e2e8f0;
+            border-radius: 3px;
+        }
+        QSlider::handle:horizontal {
+            width: 16px;
+            height: 16px;
+            margin: -5px 0;
+            background: #0284c7;
+            border-radius: 8px;
+        }
+        QSlider::handle:horizontal:hover {
+            background: #0369a1;
+        }
+        QSlider::sub-page:horizontal {
+            background: #7dd3fc;
+            border-radius: 3px;
+        }
+    """
+
+    def _build_layer_panel(self) -> QWidget:
+        panel = QWidget(self)
+        panel.setObjectName("LayerPanel")
+        panel.setMinimumWidth(260)
+        panel.setMaximumWidth(380)
+        panel.setStyleSheet(self._PANEL_STYLE)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        title = QLabel("Katmanlar")
+        title.setObjectName("LayerTitle")
+        layout.addWidget(title)
+
+        # --- Add / Remove buttons ---
+        top_row = QHBoxLayout()
+        self.btn_add_layer = QPushButton("\U0001f9f1 Ekle")
+        self.btn_add_layer.setToolTip("Goruntuye ekstra raster katmani ekle")
+        self.btn_add_layer.clicked.connect(self.add_visual_layer)
+        top_row.addWidget(self.btn_add_layer)
+
+        self.btn_remove_layer = QPushButton("\u2796 Sil")
+        self.btn_remove_layer.setToolTip("Secili ekstra katmani kaldir")
+        self.btn_remove_layer.clicked.connect(self.remove_selected_layer)
+        top_row.addWidget(self.btn_remove_layer)
+        layout.addLayout(top_row)
+
+        # --- Move buttons ---
+        move_row = QHBoxLayout()
+        self.btn_layer_up = QPushButton("\u2b06 Yukari")
+        self.btn_layer_up.setToolTip("Secili katmani yukariya tasi (veya surukle)")
+        self.btn_layer_up.clicked.connect(self.move_selected_layer_up)
+        move_row.addWidget(self.btn_layer_up)
+
+        self.btn_layer_down = QPushButton("\u2b07 Asagi")
+        self.btn_layer_down.setToolTip("Secili katmani asagiya tasi (veya surukle)")
+        self.btn_layer_down.clicked.connect(self.move_selected_layer_down)
+        move_row.addWidget(self.btn_layer_down)
+        layout.addLayout(move_row)
+
+        # --- Layer list with drag-reorder ---
+        self.layer_list = QListWidget(self)
+        self.layer_list.setAlternatingRowColors(True)
+        self.layer_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.layer_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.layer_list.setDragEnabled(True)
+        self.layer_list.model().rowsMoved.connect(self._on_layer_rows_moved)
+        self.layer_list.itemChanged.connect(self._on_layer_item_changed)
+        self.layer_list.currentRowChanged.connect(self._on_layer_selection_changed)
+        layout.addWidget(self.layer_list, 1)
+
+        # --- Opacity slider ---
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("Saydamlik"))
+
+        self.layer_opacity = QSlider(Qt.Orientation.Horizontal, self)
+        self.layer_opacity.setRange(0, 100)
+        self.layer_opacity.setValue(100)
+        self.layer_opacity.valueChanged.connect(self._on_layer_opacity_changed)
+        opacity_row.addWidget(self.layer_opacity, 1)
+
+        self.layer_opacity_value = QLabel("%100")
+        self.layer_opacity_value.setMinimumWidth(46)
+        opacity_row.addWidget(self.layer_opacity_value)
+        layout.addLayout(opacity_row)
+
+        hint = QLabel("\u2b06\u2b07 surukleyerek veya butonlarla siralama degistirin.\n"
+                      "\u2611 kutusu ile gorunurlugu acin/kapatin.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        layout.addWidget(hint)
+
+        return panel
+
+    def _reset_layer_stack(self) -> None:
+        for layer in self.layers:
+            if layer.kind == "raster":
+                self.scene.removeItem(layer.item)
+
+        self._extra_layer_counter = 0
+        self.base_item.setVisible(True)
+        self.base_item.setOpacity(1.0)
+        self.mask_item.setVisible(True)
+        self.mask_item.setOpacity(1.0)
+
+        self.layers = [
+            LayerState(
+                key=LAYER_KEY_MASK,
+                name="\U0001f534 Maske",
+                item=self.mask_item,
+                kind="mask",
+                opacity=1.0,
+                visible=True,
+            ),
+            LayerState(
+                key=LAYER_KEY_BASE,
+                name="\U0001f5bc  Ana Goruntu",
+                item=self.base_item,
+                kind="base",
+                opacity=1.0,
+                visible=True,
+            ),
+        ]
+        self._apply_layer_order()
+        self._rebuild_layer_list(select_key=LAYER_KEY_MASK)
+
+    def _find_layer(self, key: str) -> Optional[LayerState]:
+        for layer in self.layers:
+            if layer.key == key:
+                return layer
+        return None
+
+    def _selected_layer(self) -> Optional[LayerState]:
+        row = self.layer_list.currentRow()
+        if 0 <= row < len(self.layers):
+            return self.layers[row]
+        return None
+
+    def _apply_layer_order(self) -> None:
+        total = len(self.layers)
+        for idx, layer in enumerate(self.layers):
+            layer.item.setZValue(float(total - idx))
+            layer.item.setVisible(layer.visible)
+            layer.item.setOpacity(layer.opacity)
+
+    def _rebuild_layer_list(self, select_key: Optional[str] = None) -> None:
+        if select_key is None:
+            selected = self._selected_layer()
+            select_key = selected.key if selected is not None else None
+
+        self._layers_updating_ui = True
+        self.layer_list.clear()
+
+        for layer in self.layers:
+            item = QListWidgetItem(layer.name)
+            item.setData(Qt.ItemDataRole.UserRole, layer.key)
+            flags = item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+            # Enable drag for all layers
+            flags |= Qt.ItemFlag.ItemIsDragEnabled
+            item.setFlags(flags)
+            item.setCheckState(Qt.CheckState.Checked if layer.visible else Qt.CheckState.Unchecked)
+            self.layer_list.addItem(item)
+
+        if self.layer_list.count() > 0:
+            target_row = 0
+            if select_key is not None:
+                for row in range(self.layer_list.count()):
+                    key = self.layer_list.item(row).data(Qt.ItemDataRole.UserRole)
+                    if key == select_key:
+                        target_row = row
+                        break
+            self.layer_list.setCurrentRow(target_row)
+
+        self._layers_updating_ui = False
+        self._sync_layer_controls()
+
+    def _on_layer_rows_moved(self, *_args) -> None:
+        """QListWidget drag-reorder sonrasi layer sirasini senkronize et."""
+        if self._layers_updating_ui:
+            return
+        # Reconstruct self.layers from the current QListWidget order
+        key_to_layer = {layer.key: layer for layer in self.layers}
+        new_order: list[LayerState] = []
+        for row in range(self.layer_list.count()):
+            key = self.layer_list.item(row).data(Qt.ItemDataRole.UserRole)
+            layer = key_to_layer.get(str(key))
+            if layer is not None:
+                new_order.append(layer)
+        if len(new_order) == len(self.layers):
+            self.layers = new_order
+        self._apply_layer_order()
+        self._sync_layer_controls()
+
+    def _sync_layer_controls(self) -> None:
+        selected = self._selected_layer()
+        has_session = self.s is not None
+
+        self.btn_add_layer.setEnabled(has_session)
+
+        row = self.layer_list.currentRow()
+        can_move_up = has_session and selected is not None and row > 0
+        can_move_down = has_session and selected is not None and 0 <= row < (len(self.layers) - 1)
+        self.btn_layer_up.setEnabled(can_move_up)
+        self.btn_layer_down.setEnabled(can_move_down)
+
+        is_raster = has_session and selected is not None and selected.kind == "raster"
+        self.btn_remove_layer.setEnabled(is_raster)
+        if hasattr(self, "act_remove_layer"):
+            self.act_remove_layer.setEnabled(is_raster)
+        if hasattr(self, "act_add_layer"):
+            self.act_add_layer.setEnabled(has_session)
+
+        self.layer_opacity.setEnabled(has_session and selected is not None)
+        if selected is None:
+            self.layer_opacity.blockSignals(True)
+            self.layer_opacity.setValue(100)
+            self.layer_opacity.blockSignals(False)
+            self.layer_opacity_value.setText("%100")
+            return
+
+        opacity_pct = int(round(selected.opacity * 100.0))
+        self.layer_opacity.blockSignals(True)
+        self.layer_opacity.setValue(opacity_pct)
+        self.layer_opacity.blockSignals(False)
+        self.layer_opacity_value.setText(f"%{opacity_pct}")
+
+    def _on_layer_item_changed(self, item: QListWidgetItem) -> None:
+        if self._layers_updating_ui:
+            return
+        key = item.data(Qt.ItemDataRole.UserRole)
+        layer = self._find_layer(str(key))
+        if layer is None:
+            return
+        layer.visible = item.checkState() == Qt.CheckState.Checked
+        layer.item.setVisible(layer.visible)
+
+    def _on_layer_selection_changed(self, _row: int) -> None:
+        if self._layers_updating_ui:
+            return
+        self._sync_layer_controls()
+
+    def _on_layer_opacity_changed(self, value: int) -> None:
+        selected = self._selected_layer()
+        if selected is None:
+            self.layer_opacity_value.setText("%100")
+            return
+        opacity = max(0.0, min(1.0, float(value) / 100.0))
+        selected.opacity = opacity
+        selected.item.setOpacity(opacity)
+        self.layer_opacity_value.setText(f"%{value}")
+
+    def move_selected_layer_up(self) -> None:
+        row = self.layer_list.currentRow()
+        if row <= 0:
+            return
+        layer = self.layers.pop(row)
+        self.layers.insert(row - 1, layer)
+        self._apply_layer_order()
+        self._rebuild_layer_list(select_key=layer.key)
+
+    def move_selected_layer_down(self) -> None:
+        row = self.layer_list.currentRow()
+        if row < 0 or row >= len(self.layers) - 1:
+            return
+        layer = self.layers.pop(row)
+        self.layers.insert(row + 1, layer)
+        self._apply_layer_order()
+        self._rebuild_layer_list(select_key=layer.key)
+
+    def add_visual_layer(self) -> None:
+        if self.s is None:
+            QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Katman olarak GeoTIFF sec",
+            "",
+            "GeoTIFF (*.tif *.tiff);;All (*.*)",
+        )
+        if not path:
+            return
+        layer_path = Path(path).expanduser()
+        bands_raw = self._choose_bands_raw(layer_path, self.bands_raw)
+        if bands_raw is None:
+            return
+
+        try:
+            with rasterio.open(layer_path) as ds:
+                bands = parse_bands(bands_raw, ds.count)
+            rgb = read_preview_rgb(layer_path, bands, self.s.preview_w, self.s.preview_h)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Katman okunamadi:\n{exc}")
+            return
+
+        item = QGraphicsPixmapItem()
+        item.setTransformationMode(Qt.TransformationMode.FastTransformation)
+        item.setPixmap(QPixmap.fromImage(qimage_from_rgb(rgb)))
+        self.scene.addItem(item)
+
+        self._extra_layer_counter += 1
+        key = f"extra_{self._extra_layer_counter}"
+        layer = LayerState(
+            key=key,
+            name=f"{layer_path.name} ({bands_raw})",
+            item=item,
+            kind="raster",
+            source_path=layer_path,
+            opacity=1.0,
+            visible=True,
+        )
+
+        insert_idx = 1 if self.layers and self.layers[0].key == LAYER_KEY_MASK else 0
+        self.layers.insert(insert_idx, layer)
+        self._apply_layer_order()
+        self._rebuild_layer_list(select_key=key)
+
+    def remove_selected_layer(self) -> None:
+        row = self.layer_list.currentRow()
+        if row < 0 or row >= len(self.layers):
+            return
+        layer = self.layers[row]
+        if layer.kind != "raster":
+            QMessageBox.information(self, APP_TITLE, "Ana goruntu ve maske katmani silinemez.")
+            return
+        self.scene.removeItem(layer.item)
+        self.layers.pop(row)
+        self._apply_layer_order()
+        if self.layers:
+            next_row = min(row, len(self.layers) - 1)
+            self._rebuild_layer_list(select_key=self.layers[next_row].key)
+        else:
+            self._rebuild_layer_list()
+
     def _set_actions_enabled(self, enabled: bool) -> None:
         for act in (
             self.act_save,
             self.act_save_as,
+            self.act_add_layer,
+            self.act_remove_layer,
             self.act_draw,
             self.act_erase,
             self.act_square,
@@ -757,8 +1192,10 @@ class MainWindow(QMainWindow):
             self.act_invert,
         ):
             act.setEnabled(enabled)
+        self._sync_layer_controls()
 
     def show_empty_state(self) -> None:
+        self._reset_layer_stack()
         self.base_item.setPixmap(QPixmap())
         self.mask_item.setPixmap(QPixmap())
         self.scene.setSceneRect(QRectF(0, 0, 800, 600))
@@ -805,6 +1242,16 @@ class MainWindow(QMainWindow):
         self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.act_save_as.triggered.connect(self.save_as)
         tb.addAction(self.act_save_as)
+
+        self.act_add_layer = QAction("🧱 Katman Ekle", self)
+        self.act_add_layer.setToolTip("Ek bir raster katman ekle")
+        self.act_add_layer.triggered.connect(self.add_visual_layer)
+        tb.addAction(self.act_add_layer)
+
+        self.act_remove_layer = QAction("➖ Katman Sil", self)
+        self.act_remove_layer.setToolTip("Secili ekstra katmani sil")
+        self.act_remove_layer.triggered.connect(self.remove_selected_layer)
+        tb.addAction(self.act_remove_layer)
         tb.addSeparator()
 
         # --- Mode actions (exclusive group) ---
@@ -928,6 +1375,23 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
+    def _choose_bands_raw(self, input_path: Path, default_raw: str) -> Optional[str]:
+        try:
+            with rasterio.open(input_path) as tmp:
+                band_count = tmp.count
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Dosya acilamadi:\n{exc}")
+            return None
+
+        if band_count == 1:
+            return "1"
+        if band_count >= 3:
+            dlg = BandSelectionDialog(band_count, default_raw, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return dlg.get_bands_raw()
+        return "1,2"
+
     def open_input(self) -> None:
         if not self._confirm_save_if_dirty():
             return
@@ -935,29 +1399,10 @@ class MainWindow(QMainWindow):
         if not path:
             return
         input_path = Path(path).expanduser()
-
-        # --- Band auto-detection & selection dialog ---
-        try:
-            with rasterio.open(input_path) as tmp:
-                band_count = tmp.count
-        except Exception as exc:
-            QMessageBox.critical(self, APP_TITLE, f"Dosya açılamadı:\n{exc}")
+        selected_bands = self._choose_bands_raw(input_path, self.bands_raw)
+        if selected_bands is None:
             return
-
-        if band_count == 1:
-            # Tek bantlı → otomatik gri tonlama
-            bands_raw = "1"
-        elif band_count >= 3:
-            # Çok bantlı → seçim dialog'u göster
-            dlg = BandSelectionDialog(band_count, self.bands_raw, self)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return
-            bands_raw = dlg.get_bands_raw()
-        else:
-            # 2 bantlı
-            bands_raw = "1,2"
-
-        self.bands_raw = bands_raw
+        self.bands_raw = selected_bands
         self.load_input(input_path)
 
     def load_input(
@@ -1021,6 +1466,12 @@ class MainWindow(QMainWindow):
         self.view.square_mode = self.square_mode
         self.view.set_mode(self.mode)
         self.view.set_image_size(self.s.preview_w, self.s.preview_h)
+        self._reset_layer_stack()
+
+        base_layer = self._find_layer(LAYER_KEY_BASE)
+        if base_layer is not None:
+            base_layer.name = f"\U0001f5bc  {self.s.cfg.input_path.name}"
+        self._rebuild_layer_list(select_key=LAYER_KEY_MASK)
 
         self._set_actions_enabled(True)
         self._set_window_title()
@@ -1188,21 +1639,10 @@ class MainWindow(QMainWindow):
                 if not self._confirm_save_if_dirty():
                     return
                 input_path = Path(path)
-                try:
-                    with rasterio.open(input_path) as tmp:
-                        band_count = tmp.count
-                except Exception:
-                    self.load_input(input_path)
+                selected_bands = self._choose_bands_raw(input_path, self.bands_raw)
+                if selected_bands is None:
                     return
-                if band_count == 1:
-                    self.bands_raw = "1"
-                elif band_count >= 3:
-                    dlg = BandSelectionDialog(band_count, self.bands_raw, self)
-                    if dlg.exec() != QDialog.DialogCode.Accepted:
-                        return
-                    self.bands_raw = dlg.get_bands_raw()
-                else:
-                    self.bands_raw = "1,2"
+                self.bands_raw = selected_bands
                 self.load_input(input_path)
                 return
 
