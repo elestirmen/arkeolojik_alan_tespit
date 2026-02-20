@@ -68,6 +68,7 @@ try:
         QListWidget,
         QListWidgetItem,
         QMainWindow,
+        QMenu,
         QMessageBox,
         QPushButton,
         QSlider,
@@ -103,6 +104,7 @@ except ImportError as exc:
             QListWidget,
             QListWidgetItem,
             QMainWindow,
+            QMenu,
             QMessageBox,
             QPushButton,
             QSlider,
@@ -1100,6 +1102,9 @@ class MainWindow(QMainWindow):
         self.layer_list.model().rowsMoved.connect(self._on_layer_rows_moved)
         self.layer_list.itemChanged.connect(self._on_layer_item_changed)
         self.layer_list.currentRowChanged.connect(self._on_layer_selection_changed)
+        layer_viewport = self.layer_list.viewport()
+        layer_viewport.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        layer_viewport.customContextMenuRequested.connect(self._open_layer_context_menu)
         layout.addWidget(self.layer_list, 1)
 
         # --- Opacity slider ---
@@ -1223,6 +1228,62 @@ class MainWindow(QMainWindow):
             self.layers = new_order
         self._apply_layer_order()
         self._sync_layer_controls()
+
+    def _open_layer_context_menu(self, pos) -> None:
+        item = self.layer_list.itemAt(pos)
+        if item is not None:
+            self.layer_list.setCurrentItem(item)
+
+        selected = self._selected_layer()
+        has_session = self.s is not None
+        row = self.layer_list.currentRow()
+
+        can_move_up = has_session and selected is not None and row > 0
+        can_move_down = has_session and selected is not None and 0 <= row < (len(self.layers) - 1)
+        can_remove = has_session and selected is not None and selected.kind == "raster"
+        can_toggle_visibility = has_session and selected is not None
+
+        menu = QMenu(self.layer_list)
+        act_add = menu.addAction("Katman Ekle")
+        act_add.setEnabled(has_session)
+        act_add.triggered.connect(self.add_visual_layer)
+
+        menu.addSeparator()
+
+        act_up = menu.addAction("Yukari tasi")
+        act_up.setEnabled(can_move_up)
+        act_up.triggered.connect(self.move_selected_layer_up)
+
+        act_down = menu.addAction("Asagi tasi")
+        act_down.setEnabled(can_move_down)
+        act_down.triggered.connect(self.move_selected_layer_down)
+
+        act_remove = menu.addAction("Katman Sil")
+        act_remove.setEnabled(can_remove)
+        act_remove.triggered.connect(self.remove_selected_layer)
+
+        menu.addSeparator()
+
+        act_visible = menu.addAction("Gorunur")
+        act_visible.setCheckable(True)
+        act_visible.setChecked(bool(selected.visible) if selected is not None else False)
+        act_visible.setEnabled(can_toggle_visibility)
+        act_visible.toggled.connect(self._set_selected_layer_visible)
+
+        global_pos = self.layer_list.viewport().mapToGlobal(pos)
+        menu.exec(global_pos)
+
+    def _set_selected_layer_visible(self, visible: bool) -> None:
+        row = self.layer_list.currentRow()
+        if row < 0:
+            return
+        item = self.layer_list.item(row)
+        if item is None:
+            return
+        target_state = Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked
+        if item.checkState() == target_state:
+            return
+        item.setCheckState(target_state)
 
     def _sync_layer_controls(self) -> None:
         selected = self._selected_layer()
