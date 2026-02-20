@@ -15,7 +15,7 @@ This project combines **deep learning** and **classical image processing** metho
 - [🎯 What It Does](#-what-it-does)
 - [🚀 Quick Start](#-quick-start)
 - [📦 Installation](#-installation)
-- [DSM to DTM Preprocessing (`veri_on_isleme.py`)](#dsm-to-dtm-preprocessing-veri_on_islemepy)
+- [DSM to DTM Preprocessing (`dtm_uret.py`)](#dsm-to-dtm-preprocessing-dtm_uretpy)
 - [🏷️ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-labeling-tool-ground_truth_kare_etiketleme_qtpy)
 - [🎮 Usage](#-usage)
 - [⚙️ Configuration](#️-configuration)
@@ -225,9 +225,9 @@ print(torch.cuda.is_available())  # Should be True
 
 ---
 
-## DSM to DTM Preprocessing (`veri_on_isleme.py`)
+## DSM to DTM Preprocessing (`dtm_uret.py`)
 
-`veri_on_isleme.py` converts DSM GeoTIFF or LAS/LAZ point cloud input into a DTM GeoTIFF.
+`dtm_uret.py` converts DSM GeoTIFF or LAS/LAZ point cloud input into a DTM GeoTIFF.
 
 Current processing flow in code:
 - `[1/4]` Read input raster metadata.
@@ -238,7 +238,7 @@ Current processing flow in code:
 ### Quick Run
 
 ```bash
-python veri_on_isleme.py \
+python dtm_uret.py \
   --input veri/karlik_dag_dsm.tif \
   --output veri/karlik_dag_dtm_smrf.tif \
   --progress
@@ -247,7 +247,7 @@ python veri_on_isleme.py \
 LAS/LAZ input example:
 
 ```bash
-python veri_on_isleme.py \
+python dtm_uret.py \
   --input veri/karlik_dag_dsm.las \
   --output veri/karlik_dag_dtm_smrf.tif \
   --method smrf \
@@ -258,7 +258,7 @@ python veri_on_isleme.py \
 LAS/LAZ tiled example (large files):
 
 ```bash
-python veri_on_isleme.py \
+python dtm_uret.py \
   --input veri/karlik_dag_dsm.las \
   --output veri/karlik_dag_dtm_smrf.tif \
   --method smrf \
@@ -300,7 +300,7 @@ conda install -n <env_name> -c conda-forge pdal python-pdal
 - For large files and quality-critical runs, prefer:
 
 ```bash
-python veri_on_isleme.py \
+python dtm_uret.py \
   --method smrf \
   --smrf-tiled \
   --smrf-max-pixels 0 \
@@ -310,7 +310,7 @@ python veri_on_isleme.py \
 ```
 
 - On Windows, keep geospatial stack consistent in one environment (avoid mixing `pip` `gdal/rasterio` with conda GDAL libraries), otherwise GDAL plugin DLL errors may occur.
-- Runtime defaults are defined in `veri_on_isleme.py` (`CONFIG` dict) and can be overridden via CLI.
+- Runtime defaults are defined in `dtm_uret.py` (`CONFIG` dict) and can be overridden via CLI.
 
 ---
 

@@ -91,6 +91,7 @@ CONFIG: dict[str, object] = {
     "normalize": True,
     "format": "npz",  # npy | npz
     "balance_ratio": None,  # Ornek: 0.4
+    "tile_prefix": "",  # Bos ise otomatik: t{tile}_ov{overlap}_b{bands}_{timestamp}
 }
 # ===============================================
 
@@ -223,6 +224,7 @@ def create_training_tiles(
     save_format: str = "npz",
     balance_ratio: Optional[float] = 0.3,
     split_mode: str = "spatial",
+    tile_prefix: str = "",
 ) -> dict:
     """
     GeoTIFF'ten 12 kanallı eğitim tile'ları oluşturur.
@@ -248,7 +250,9 @@ def create_training_tiles(
                    "spatial" (önerilen): mekansal sızıntıyı azaltmak için
                    sınırı kesen tile'ları atar.
                    "random": klasik rastgele bölme (daha yüksek leakage riski).
-        
+        tile_prefix: Kayit edilen tile dosya adlarina eklenecek on ek.
+                     Bos birakilirsa tile_size, overlap, bands ve zamanla otomatik olusturulur.
+
     Returns:
         İstatistik sözlüğü
     """
@@ -264,6 +268,14 @@ def create_training_tiles(
     )
 
     output_dir = Path(output_dir)
+    tile_prefix = str(tile_prefix).strip()
+    if not tile_prefix:
+        band_tokens = [token.strip() for token in str(bands).split(",") if token.strip()]
+        band_sig = "-".join(band_tokens) if band_tokens else "na"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tile_prefix = f"t{int(tile_size)}_ov{int(overlap)}_b{band_sig}_{ts}"
+    if any(ch in tile_prefix for ch in ("/", "\\")):
+        raise ValueError("tile_prefix '/' veya '\\' iceremez.")
     
     # Dizin yapısı oluştur
     train_images_dir = output_dir / "train" / "images"
@@ -307,6 +319,7 @@ def create_training_tiles(
     LOGGER.info(f"Bölme modu: {split_mode}")
     LOGGER.info(f"Bant sırası: {bands}")
     LOGGER.info(f"TPI yarıçapları: {tpi_radii}")
+    LOGGER.info(f"Tile prefix: {tile_prefix}")
     if balance_ratio is not None:
         LOGGER.info(f"Dengeli seçim: Aktif (hedef: %{balance_ratio*100:.0f} pozitif, %{(1-balance_ratio)*100:.0f} negatif)")
     else:
@@ -536,7 +549,8 @@ def create_training_tiles(
                 stats["val_tiles"] += 1
             
             # Kaydet
-            tile_name = f"tile_{row_off:05d}_{col_off:05d}"
+            base_tile_name = f"tile_{row_off:05d}_{col_off:05d}"
+            tile_name = f"{tile_prefix}_{base_tile_name}" if tile_prefix else base_tile_name
             
             if save_format == "npy":
                 np.save(images_dir / f"{tile_name}.npy", stacked.astype(np.float32))
@@ -563,6 +577,7 @@ def create_training_tiles(
         "bands": bands,
         "tpi_radii": list(tpi_radii),
         "normalize": normalize,
+        "tile_prefix": tile_prefix,
         "num_channels": 12,
         "channel_names": [
             "R", "G", "B", "SVF", "Pos_Openness", "Neg_Openness",
@@ -671,6 +686,7 @@ def main():
     config_balance_ratio = CONFIG.get("balance_ratio", None)
     if config_balance_ratio is not None:
         config_balance_ratio = float(config_balance_ratio)
+    config_tile_prefix = str(CONFIG.get("tile_prefix", "")).strip()
 
     parser = argparse.ArgumentParser(
         description="12 kanalli arkeolojik tespit egitim verisi olusturma",
@@ -765,6 +781,15 @@ def main():
         default=str(CONFIG.get("split_mode", "spatial")),
         help="Train/val bolme modu. spatial onerilir (mekansal sizintiyi azaltir).",
     )
+    parser.add_argument(
+        "--tile-prefix",
+        type=str,
+        default=config_tile_prefix,
+        help=(
+            "Tile dosya adlarina eklenecek on ek (ornek: s2). "
+            "Bos ise otomatik: t{tile}_ov{overlap}_b{bands}_{timestamp}"
+        ),
+    )
     parser.set_defaults(no_normalize=not bool(CONFIG.get("normalize", True)))
 
     args = parser.parse_args()
@@ -811,6 +836,7 @@ def main():
             save_format=args.format,
             balance_ratio=args.balance_ratio,
             split_mode=args.split_mode,
+            tile_prefix=args.tile_prefix,
         )
     except Exception as e:
         LOGGER.error(f"Hata: {e}")
