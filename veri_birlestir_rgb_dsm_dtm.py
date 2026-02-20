@@ -37,13 +37,13 @@ _TQDM_WARNED = False
 # Komut satiri argumanlari her zaman bu degerleri ezer.
 CONFIG: dict[str, Any] = {
     # RGB raster yolu (en az 3 band).
-    "rgb_input": "/on_veri/karlik_dag_rgb.tif",
+    "rgb_input": "/on_veri/karlik_vadi_rgb.tif",
     # DTM raster yolu (1 band).
-    "dtm_input": "/on_veri/karlik_dag_dtm.tif",
+    "dtm_input": "/on_veri/karlik_vadi_dtm.tif",
     # DSM raster yolu (1 band).
-    "dsm_input": "/on_veri/karlik_dag_dsm.tif",
+    "dsm_input": "/on_veri/karlik_vadi_dsm.tif",
     # Uretilecek 5-band GeoTIFF yolu.
-    "output": "/on_veri/karlik_dag_rgb_dtm_dsm_5band.tif",
+    "output": "/on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif",
     # Cikti nodata degeri.
     "nodata": DEFAULT_NODATA,
     # GeoTIFF sikistirma tipi: LZW | DEFLATE | NONE.

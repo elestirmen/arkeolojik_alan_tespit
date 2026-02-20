@@ -4,6 +4,7 @@ import pytest
 
 from egitim_verisi_olusturma import (
     _is_positive_for_balance,
+    _probability_to_rgb_grid,
     _split_windows_for_train_val,
     _validate_tile_generation_params,
 )
@@ -77,3 +78,64 @@ def test_is_positive_for_balance_handles_zero_threshold_correctly() -> None:
     assert _is_positive_for_balance(positive_ratio=0.0, min_positive_ratio=0.0) is False
     assert _is_positive_for_balance(positive_ratio=0.01, min_positive_ratio=0.0) is True
     assert _is_positive_for_balance(positive_ratio=0.01, min_positive_ratio=0.02) is False
+
+
+def test_validate_tile_generation_params_rejects_invalid_train_negative_keep_ratio() -> None:
+    with pytest.raises(ValueError, match="train_negative_keep_ratio"):
+        _validate_tile_generation_params(
+            tile_size=256,
+            overlap=64,
+            min_positive_ratio=0.0,
+            max_nodata_ratio=0.3,
+            train_ratio=0.8,
+            save_format="npz",
+            balance_ratio=None,
+            split_mode="spatial",
+            train_negative_keep_ratio=1.2,
+        )
+
+
+def test_validate_tile_generation_params_rejects_negative_train_negative_max() -> None:
+    with pytest.raises(ValueError, match="train_negative_max"):
+        _validate_tile_generation_params(
+            tile_size=256,
+            overlap=64,
+            min_positive_ratio=0.0,
+            max_nodata_ratio=0.3,
+            train_ratio=0.8,
+            save_format="npz",
+            balance_ratio=None,
+            split_mode="spatial",
+            train_negative_keep_ratio=1.0,
+            train_negative_max=-1,
+        )
+
+
+def test_probability_to_rgb_grid_maps_values_and_nodata() -> None:
+    probs = pytest.importorskip("numpy").array(
+        [[0.0, 0.5, 1.0, -1.0]],
+        dtype="float32",
+    )
+    rgb = _probability_to_rgb_grid(probs, nodata_value=-1.0)
+
+    assert rgb.shape == (3, 1, 4)
+
+    # 0.0 -> blue
+    assert int(rgb[0, 0, 0]) == 0
+    assert int(rgb[1, 0, 0]) == 0
+    assert int(rgb[2, 0, 0]) == 255
+
+    # 0.5 -> yellow
+    assert int(rgb[0, 0, 1]) == 255
+    assert int(rgb[1, 0, 1]) == 255
+    assert int(rgb[2, 0, 1]) == 0
+
+    # 1.0 -> red
+    assert int(rgb[0, 0, 2]) == 255
+    assert int(rgb[1, 0, 2]) == 0
+    assert int(rgb[2, 0, 2]) == 0
+
+    # nodata -> black
+    assert int(rgb[0, 0, 3]) == 0
+    assert int(rgb[1, 0, 3]) == 0
+    assert int(rgb[2, 0, 3]) == 0
