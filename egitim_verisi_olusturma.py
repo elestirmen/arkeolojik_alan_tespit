@@ -70,7 +70,7 @@ LOGGER = logging.getLogger("egitim_verisi")
 # Komut satirindan verilen argumanlar her zaman bu degerleri ezer.
 CONFIG: dict[str, object] = {
     # Girdi cok bantli raster (RGB + DSM + DTM)
-    "input": "veri/karlik_dag_rgb_dtm_dsm_5band.tif",
+    "input": "on_veri/karlik_dag_rgb_dtm_dsm_5band.tif",
     # Ground-truth maske (arkeolojik alan=1, arka plan=0)
     "mask": "ground_truth.tif",
     # Cikti dizini

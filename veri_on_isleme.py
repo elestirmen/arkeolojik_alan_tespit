@@ -47,9 +47,9 @@ _LAS_DEFAULT_CELL = 0.5
 # Komut satiri argumanlari her zaman bu degerleri ezer.
 CONFIG: dict[str, Any] = {
     # Girdi DSM GeoTIFF veya LAS/LAZ yolu.
-    "input": "/veri/karlik_dag_dsm.las",
+    "input": "/on_veri/karlik_dag_dsm.las",
     # Uretilecek DTM GeoTIFF yolu.
-    "output": "/veri/karlik_dag_dtm_las.tif",
+    "output": "/on_veri/karlik_dag_dtm_las.tif",
     # Isleme yontemi:
     # - "auto": Once SMRF dener, hata olursa (allow_fallback=True ise) fallback'e gecer.
     # - "smrf": Yalnizca SMRF (hata olursa durur).
@@ -173,7 +173,7 @@ class _SimpleProgress:
 
 
 def _normalize_path(raw_path: str) -> Path:
-    """'/veri/...' gibi path'leri proje-kokune gore normalize eder."""
+    """'/on_veri/...' gibi path'leri proje-kokune gore normalize eder."""
     value = raw_path.strip()
     if not value:
         raise ValueError("Bos path verilemez.")
