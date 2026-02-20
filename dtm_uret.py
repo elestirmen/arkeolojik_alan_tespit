@@ -1852,10 +1852,22 @@ def _hillshade_from_elevation(
     altitude_deg: float,
     z_factor: float,
 ) -> np.ndarray:
-    # Raster satir indeksi asagi dogru arttigi icin y spacing negatif alinır.
-    dy = -max(abs(float(y_res)), 1e-9)
+    # ArcGIS hillshade'e yakin sonuc icin 3x3 Horn turev operatoru kullanilir.
     dx = max(abs(float(x_res)), 1e-9)
-    dz_dy, dz_dx = np.gradient(elevation, dy, dx)
+    dy = max(abs(float(y_res)), 1e-9)
+    z = np.pad(np.asarray(elevation, dtype=np.float64), ((1, 1), (1, 1)), mode="edge")
+
+    z1 = z[:-2, :-2]
+    z2 = z[:-2, 1:-1]
+    z3 = z[:-2, 2:]
+    z4 = z[1:-1, :-2]
+    z6 = z[1:-1, 2:]
+    z7 = z[2:, :-2]
+    z8 = z[2:, 1:-1]
+    z9 = z[2:, 2:]
+
+    dz_dx = ((z3 + (2.0 * z6) + z9) - (z1 + (2.0 * z4) + z7)) / (8.0 * dx)
+    dz_dy = ((z7 + (2.0 * z8) + z9) - (z1 + (2.0 * z2) + z3)) / (8.0 * dy)
 
     slope = np.arctan(float(z_factor) * np.hypot(dz_dx, dz_dy))
     aspect = np.arctan2(dz_dy, -dz_dx)
@@ -1900,7 +1912,7 @@ def _compute_hillshade_from_dsm(
             profile.update(
                 count=1,
                 dtype="uint8",
-                nodata=0,
+                nodata=None,
                 compress=compression_norm,
                 predictor=2,
                 tiled=False,

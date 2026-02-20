@@ -1102,9 +1102,8 @@ class MainWindow(QMainWindow):
         self.layer_list.model().rowsMoved.connect(self._on_layer_rows_moved)
         self.layer_list.itemChanged.connect(self._on_layer_item_changed)
         self.layer_list.currentRowChanged.connect(self._on_layer_selection_changed)
-        layer_viewport = self.layer_list.viewport()
-        layer_viewport.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        layer_viewport.customContextMenuRequested.connect(self._open_layer_context_menu)
+        self.layer_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.layer_list.customContextMenuRequested.connect(self._open_layer_context_menu)
         layout.addWidget(self.layer_list, 1)
 
         # --- Opacity slider ---
@@ -1229,8 +1228,10 @@ class MainWindow(QMainWindow):
         self._apply_layer_order()
         self._sync_layer_controls()
 
-    def _open_layer_context_menu(self, pos) -> None:
-        item = self.layer_list.itemAt(pos)
+    def _open_layer_context_menu(self, _pos) -> None:
+        global_pos = QCursor.pos()
+        local_pos = self.layer_list.viewport().mapFromGlobal(global_pos)
+        item = self.layer_list.itemAt(local_pos)
         if item is not None:
             self.layer_list.setCurrentItem(item)
 
@@ -1270,7 +1271,6 @@ class MainWindow(QMainWindow):
         act_visible.setEnabled(can_toggle_visibility)
         act_visible.toggled.connect(self._set_selected_layer_visible)
 
-        global_pos = self.layer_list.viewport().mapToGlobal(pos)
         menu.exec(global_pos)
 
     def _set_selected_layer_visible(self, visible: bool) -> None:
