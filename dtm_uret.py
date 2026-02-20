@@ -5,6 +5,7 @@ Not:
 - Bu betik PDAL Python bagimliligina ihtiyac duyar (`pip install pdal`).
 - Raster girdide cikti son adimda kaynak DSM'in gridine zorla hizalanir;
   boyut, transform ve cozumunurluk birebir ayni olur.
+- Raster DSM girdide istege bagli ikinci cikti olarak DSM tabanli hillshade uretilebilir.
 """
 
 from __future__ import annotations
@@ -47,9 +48,9 @@ _LAS_DEFAULT_CELL = 0.5
 # Komut satiri argumanlari her zaman bu degerleri ezer.
 CONFIG: dict[str, Any] = {
     # Girdi DSM GeoTIFF veya LAS/LAZ yolu.
-    "input": "/on_veri/karlik_dag_dsm.las",
+    "input": "/on_veri/karlik_vadi_dsm.tif",
     # Uretilecek DTM GeoTIFF yolu.
-    "output": "/on_veri/karlik_dag_dtm_las.tif",
+    "output": "/on_veri/karlik_vadi_dtm.tif",
     # Isleme yontemi:
     # - "auto": Once SMRF dener, hata olursa (allow_fallback=True ise) fallback'e gecer.
     # - "smrf": Yalnizca SMRF (hata olursa durur).
@@ -102,6 +103,14 @@ CONFIG: dict[str, Any] = {
     "log_level": "INFO",
     # Ilerleme cubuklari acik/kapali.
     "progress": True,
+    # DSM raster girdilerde hillshade cikti uretimi.
+    "generate_hillshade": True,
+    # Bos ise otomatik: <output_stem>_hillshade_dsm.tif
+    "hillshade_output": "",
+    # Hillshade aydinlatma parametreleri.
+    "hillshade_azimuth": 315.0,
+    "hillshade_altitude": 45.0,
+    "hillshade_z_factor": 1.0,
 }
 # ===============================================
 
@@ -1828,6 +1837,192 @@ def _snap_to_reference_grid(
                     pass
 
 
+def _resolve_hillshade_output_path(output_dtm_path: Path, configured_output: str) -> Path:
+    raw = str(configured_output).strip()
+    if raw:
+        return _normalize_path(raw)
+    return output_dtm_path.with_name(f"{output_dtm_path.stem}_hillshade_dsm.tif")
+
+
+def _hillshade_from_elevation(
+    elevation: np.ndarray,
+    x_res: float,
+    y_res: float,
+    azimuth_deg: float,
+    altitude_deg: float,
+    z_factor: float,
+) -> np.ndarray:
+    # Raster satir indeksi asagi dogru arttigi icin y spacing negatif alinır.
+    dy = -max(abs(float(y_res)), 1e-9)
+    dx = max(abs(float(x_res)), 1e-9)
+    dz_dy, dz_dx = np.gradient(elevation, dy, dx)
+
+    slope = np.arctan(float(z_factor) * np.hypot(dz_dx, dz_dy))
+    aspect = np.arctan2(dz_dy, -dz_dx)
+    aspect = np.where(aspect < 0.0, aspect + 2.0 * np.pi, aspect)
+
+    zenith_rad = np.deg2rad(90.0 - float(altitude_deg))
+    azimuth_math = (360.0 - float(azimuth_deg) + 90.0) % 360.0
+    azimuth_rad = np.deg2rad(azimuth_math)
+
+    shaded = (
+        np.cos(zenith_rad) * np.cos(slope)
+        + np.sin(zenith_rad) * np.sin(slope) * np.cos(azimuth_rad - aspect)
+    )
+    shaded = np.clip(shaded, 0.0, 1.0)
+    return np.rint(shaded * 255.0).astype(np.uint8)
+
+
+def _compute_hillshade_from_dsm(
+    input_dsm_path: Path,
+    output_hillshade_path: Path,
+    compression: str,
+    show_progress: bool,
+    azimuth_deg: float,
+    altitude_deg: float,
+    z_factor: float,
+) -> None:
+    compression_norm = str(compression).strip().upper()
+    if compression_norm not in {"LZW", "DEFLATE", "NONE"}:
+        raise ValueError(f"Desteklenmeyen sikistirma tipi: {compression}")
+
+    output_hillshade_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_output_path = _prepare_temp_output_path(output_hillshade_path)
+    pbar = None
+    try:
+        with rasterio.open(input_dsm_path) as src:
+            if src.count < 1:
+                raise ValueError(f"Hillshade icin girdi raster en az bir bant icermeli: {input_dsm_path}")
+
+            profile = src.profile.copy()
+            profile.pop("blockxsize", None)
+            profile.pop("blockysize", None)
+            profile.update(
+                count=1,
+                dtype="uint8",
+                nodata=0,
+                compress=compression_norm,
+                predictor=2,
+                tiled=False,
+                BIGTIFF="IF_SAFER",
+            )
+
+            x_res = abs(float(src.transform.a))
+            y_res = abs(float(src.transform.e)) if src.transform.e != 0 else abs(float(src.res[1]))
+
+            block_rows, block_cols = src.block_shapes[0]
+            total_blocks = math.ceil(src.height / block_rows) * math.ceil(src.width / block_cols)
+            pbar = _open_progress(
+                total=total_blocks,
+                desc="DSM Hillshade",
+                unit="block",
+                enabled=show_progress,
+            )
+
+            with rasterio.open(temp_output_path, "w", **profile) as dst:
+                for idx, (_, window) in enumerate(src.block_windows(1), start=1):
+                    row0 = int(window.row_off)
+                    col0 = int(window.col_off)
+                    row1 = row0 + int(window.height)
+                    col1 = col0 + int(window.width)
+
+                    pad_row0 = max(0, row0 - 1)
+                    pad_col0 = max(0, col0 - 1)
+                    pad_row1 = min(src.height, row1 + 1)
+                    pad_col1 = min(src.width, col1 + 1)
+
+                    pad_window = Window(
+                        pad_col0,
+                        pad_row0,
+                        pad_col1 - pad_col0,
+                        pad_row1 - pad_row0,
+                    )
+                    arr_ma = src.read(1, window=pad_window, masked=True).astype(np.float64)
+                    arr = np.ma.filled(arr_ma, np.nan)
+                    valid_pad = np.isfinite(arr)
+
+                    if np.any(valid_pad):
+                        fill_value = float(np.nanmean(arr[valid_pad]))
+                    else:
+                        fill_value = 0.0
+                    arr_filled = np.where(valid_pad, arr, fill_value)
+                    hs_pad = _hillshade_from_elevation(
+                        elevation=arr_filled,
+                        x_res=x_res,
+                        y_res=y_res,
+                        azimuth_deg=azimuth_deg,
+                        altitude_deg=altitude_deg,
+                        z_factor=z_factor,
+                    )
+
+                    rs = row0 - pad_row0
+                    cs = col0 - pad_col0
+                    re = rs + (row1 - row0)
+                    ce = cs + (col1 - col0)
+                    hs_core = hs_pad[rs:re, cs:ce]
+                    valid_core = valid_pad[rs:re, cs:ce]
+                    hs_core = np.where(valid_core, hs_core, 0).astype(np.uint8, copy=False)
+
+                    dst.write(hs_core, 1, window=window)
+                    dst.write_mask((valid_core.astype(np.uint8) * 255), window=window)
+
+                    if pbar is not None:
+                        pbar.update(1)
+                    elif idx % 500 == 0 or idx == total_blocks:
+                        LOGGER.info("DSM Hillshade ilerleme: %d/%d blok", idx, total_blocks)
+
+        os.replace(temp_output_path, output_hillshade_path)
+    finally:
+        if pbar is not None:
+            pbar.close()
+        if temp_output_path.exists():
+            try:
+                temp_output_path.unlink()
+            except OSError:
+                pass
+
+
+def _maybe_generate_dsm_hillshade(
+    *,
+    input_path: Path,
+    output_dtm_path: Path,
+    is_las_input: bool,
+    generate_hillshade: bool,
+    hillshade_output: str,
+    compression: str,
+    show_progress: bool,
+    azimuth_deg: float,
+    altitude_deg: float,
+    z_factor: float,
+) -> None:
+    if not generate_hillshade:
+        LOGGER.info("DSM hillshade üretimi kapali (--no-hillshade).")
+        return
+    if is_las_input:
+        LOGGER.warning(
+            "DSM hillshade atlandi: LAS/LAZ girdide DSM raster yok. "
+            "Hillshade sadece raster DSM girdide uretilir."
+        )
+        return
+
+    out_path = _resolve_hillshade_output_path(output_dtm_path, hillshade_output)
+    if out_path.resolve() == output_dtm_path.resolve():
+        raise ValueError(
+            f"Hillshade cikti yolu DTM cikti yoluyla ayni olamaz: {out_path}"
+        )
+    LOGGER.info("DSM hillshade baslatiliyor: %s", out_path)
+    _compute_hillshade_from_dsm(
+        input_dsm_path=input_path,
+        output_hillshade_path=out_path,
+        compression=compression,
+        show_progress=show_progress,
+        azimuth_deg=azimuth_deg,
+        altitude_deg=altitude_deg,
+        z_factor=z_factor,
+    )
+    LOGGER.info("DSM hillshade basariyla yazildi: %s", out_path)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -1839,6 +2034,7 @@ def _parse_args() -> argparse.Namespace:
         allow_fallback=bool(CONFIG["allow_fallback"]),
         progress=bool(CONFIG["progress"]),
         smrf_tiled=bool(CONFIG["smrf_tiled"]),
+        generate_hillshade=bool(CONFIG["generate_hillshade"]),
     )
     parser.add_argument(
         "--input",
@@ -2016,6 +2212,42 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Ilerleme cubuklarini kapat.",
     )
+    parser.add_argument(
+        "--hillshade",
+        dest="generate_hillshade",
+        action="store_true",
+        help="Raster DSM girdiden ek hillshade ciktisi uret.",
+    )
+    parser.add_argument(
+        "--no-hillshade",
+        dest="generate_hillshade",
+        action="store_false",
+        help="Hillshade ciktisi uretme.",
+    )
+    parser.add_argument(
+        "--hillshade-output",
+        type=str,
+        default=str(CONFIG.get("hillshade_output", "")),
+        help="Hillshade cikti yolu. Bos ise <output_stem>_hillshade_dsm.tif kullanilir.",
+    )
+    parser.add_argument(
+        "--hillshade-azimuth",
+        type=float,
+        default=float(CONFIG["hillshade_azimuth"]),
+        help="Hillshade azimuth acisi (derece, kuzeyden saat yonu; varsayilan 315).",
+    )
+    parser.add_argument(
+        "--hillshade-altitude",
+        type=float,
+        default=float(CONFIG["hillshade_altitude"]),
+        help="Hillshade gunes yukseklik acisi (derece; varsayilan 45).",
+    )
+    parser.add_argument(
+        "--hillshade-z-factor",
+        type=float,
+        default=float(CONFIG["hillshade_z_factor"]),
+        help="Hillshade z-factor (yukseklik carpani, varsayilan 1.0).",
+    )
     return parser.parse_args()
 
 
@@ -2037,6 +2269,16 @@ def main() -> int:
     smrf_tile_size = max(128, int(args.smrf_tile_size))
     smrf_overlap_px_arg = max(0, int(args.smrf_overlap_px))
     smrf_tile_workers = max(1, int(args.smrf_tile_workers))
+    generate_hillshade = bool(args.generate_hillshade)
+    hillshade_azimuth = float(args.hillshade_azimuth) % 360.0
+    hillshade_altitude = float(args.hillshade_altitude)
+    hillshade_z_factor = float(args.hillshade_z_factor)
+    hillshade_output = str(args.hillshade_output)
+
+    if not 0.0 <= hillshade_altitude <= 90.0:
+        raise ValueError(f"hillshade_altitude 0-90 araliginda olmali, verilen: {hillshade_altitude}")
+    if hillshade_z_factor <= 0.0:
+        raise ValueError(f"hillshade_z_factor pozitif olmali, verilen: {hillshade_z_factor}")
 
     if is_las_input:
         if method == "fallback":
@@ -2161,6 +2403,18 @@ def main() -> int:
                 show_progress=bool(args.progress),
             )
             LOGGER.info("DTM basariyla yazildi (LAS SMRF): %s", output_path)
+        _maybe_generate_dsm_hillshade(
+            input_path=input_path,
+            output_dtm_path=output_path,
+            is_las_input=is_las_input,
+            generate_hillshade=generate_hillshade,
+            hillshade_output=hillshade_output,
+            compression=str(args.compression),
+            show_progress=bool(args.progress),
+            azimuth_deg=hillshade_azimuth,
+            altitude_deg=hillshade_altitude,
+            z_factor=hillshade_z_factor,
+        )
         return 0
 
     LOGGER.info("[1/4] Girdi raster bilgisi okunuyor...")
@@ -2300,6 +2554,18 @@ def main() -> int:
                             show_progress=bool(args.progress),
                         )
                         LOGGER.info("DTM basariyla yazildi (SMRF): %s", output_path)
+                    _maybe_generate_dsm_hillshade(
+                        input_path=input_path,
+                        output_dtm_path=output_path,
+                        is_las_input=is_las_input,
+                        generate_hillshade=generate_hillshade,
+                        hillshade_output=hillshade_output,
+                        compression=str(args.compression),
+                        show_progress=bool(args.progress),
+                        azimuth_deg=hillshade_azimuth,
+                        altitude_deg=hillshade_altitude,
+                        z_factor=hillshade_z_factor,
+                    )
                     return 0
             except RuntimeError as exc:
                 if method == "smrf":
@@ -2332,6 +2598,18 @@ def main() -> int:
         show_progress=bool(args.progress),
     )
     LOGGER.info("DTM basariyla yazildi (fallback): %s", output_path)
+    _maybe_generate_dsm_hillshade(
+        input_path=input_path,
+        output_dtm_path=output_path,
+        is_las_input=is_las_input,
+        generate_hillshade=generate_hillshade,
+        hillshade_output=hillshade_output,
+        compression=str(args.compression),
+        show_progress=bool(args.progress),
+        azimuth_deg=hillshade_azimuth,
+        altitude_deg=hillshade_altitude,
+        z_factor=hillshade_z_factor,
+    )
     return 0
 
 
