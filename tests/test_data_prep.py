@@ -10,20 +10,6 @@ from egitim_verisi_olusturma import (
 )
 
 
-def test_validate_tile_generation_params_rejects_zero_balance_ratio() -> None:
-    with pytest.raises(ValueError, match="balance_ratio"):
-        _validate_tile_generation_params(
-            tile_size=256,
-            overlap=64,
-            min_positive_ratio=0.0,
-            max_nodata_ratio=0.3,
-            train_ratio=0.8,
-            save_format="npz",
-            balance_ratio=0.0,
-            split_mode="spatial",
-        )
-
-
 def test_validate_tile_generation_params_rejects_overlap_ge_tile() -> None:
     with pytest.raises(ValueError, match="overlap"):
         _validate_tile_generation_params(
@@ -33,7 +19,6 @@ def test_validate_tile_generation_params_rejects_overlap_ge_tile() -> None:
             max_nodata_ratio=0.3,
             train_ratio=0.8,
             save_format="npz",
-            balance_ratio=None,
             split_mode="spatial",
         )
 
@@ -89,7 +74,6 @@ def test_validate_tile_generation_params_rejects_invalid_train_negative_keep_rat
             max_nodata_ratio=0.3,
             train_ratio=0.8,
             save_format="npz",
-            balance_ratio=None,
             split_mode="spatial",
             train_negative_keep_ratio=1.2,
         )
@@ -104,10 +88,23 @@ def test_validate_tile_generation_params_rejects_negative_train_negative_max() -
             max_nodata_ratio=0.3,
             train_ratio=0.8,
             save_format="npz",
-            balance_ratio=None,
             split_mode="spatial",
             train_negative_keep_ratio=1.0,
             train_negative_max=-1,
+        )
+
+
+def test_validate_tile_generation_params_rejects_non_positive_num_workers() -> None:
+    with pytest.raises(ValueError, match="num_workers"):
+        _validate_tile_generation_params(
+            tile_size=256,
+            overlap=64,
+            min_positive_ratio=0.0,
+            max_nodata_ratio=0.3,
+            train_ratio=0.8,
+            save_format="npz",
+            split_mode="spatial",
+            num_workers=0,
         )
 
 

@@ -32,7 +32,9 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Tuple, List
 import json
@@ -72,9 +74,9 @@ LOGGER = logging.getLogger("egitim_verisi")
 # Komut satirindan verilen argumanlar her zaman bu degerleri ezer.
 CONFIG: dict[str, object] = {
     # Girdi cok bantli raster (RGB + DSM + DTM)
-    "input": "on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif",
+    "input": "on_veri/karlik_dag_rgb_dtm_dsm_5band.tif",
     # Ground-truth maske (arkeolojik alan=1, arka plan=0)
-    "mask": "on_veri/karlik_vadi_rgb_ground_truth.tif",
+    "mask": "on_veri/karlik_dag_rgb_ground_truth.tif",
     # Cikti dizini
     "output": "training_data",
     # Tile ayarlari
@@ -92,7 +94,8 @@ CONFIG: dict[str, object] = {
     # On-isleme/kayit
     "normalize": True,
     "format": "npz",  # npy | npz
-    "balance_ratio": None,  # Ornek: 0.4
+    # Paralel worker sayisi (1 = sekansiyel)
+    "num_workers": max(1, (os.cpu_count() or 1) - 1),
     # Train setindeki tamamen negatif (maskede hic 1 olmayan) tile'lari ne kadar tutalim?
     # 1.0 = hepsini tut, 0.0 = hepsini at
     "train_negative_keep_ratio": 1.0,
@@ -110,10 +113,10 @@ def _validate_tile_generation_params(
     max_nodata_ratio: float,
     train_ratio: float,
     save_format: str,
-    balance_ratio: Optional[float],
     split_mode: str,
     train_negative_keep_ratio: float = 1.0,
     train_negative_max: Optional[int] = None,
+    num_workers: int = 1,
 ) -> None:
     errors: List[str] = []
 
@@ -138,11 +141,6 @@ def _validate_tile_generation_params(
     if save_format not in {"npy", "npz"}:
         errors.append(f"save_format gecersiz: {save_format} (npy/npz)")
 
-    if balance_ratio is not None and not 0.0 < balance_ratio < 1.0:
-        errors.append(
-            f"balance_ratio None veya (0,1) araliginda olmali, verilen: {balance_ratio}"
-        )
-
     if split_mode not in {"spatial", "random"}:
         errors.append(f"split_mode gecersiz: {split_mode} (spatial/random)")
 
@@ -156,6 +154,9 @@ def _validate_tile_generation_params(
         errors.append(
             f"train_negative_max None veya >=0 olmali, verilen: {train_negative_max}"
         )
+
+    if int(num_workers) < 1:
+        errors.append(f"num_workers >= 1 olmali, verilen: {num_workers}")
 
     if errors:
         raise ValueError("Parametre dogrulama hatalari:\n- " + "\n- ".join(errors))
@@ -350,6 +351,184 @@ def _probability_to_rgb_grid(
     return rgb
 
 
+_TILE_WORKER_CONTEXT: dict[str, object] = {}
+
+
+def _close_tile_worker_context() -> None:
+    global _TILE_WORKER_CONTEXT
+    src = _TILE_WORKER_CONTEXT.get("src")
+    mask_src = _TILE_WORKER_CONTEXT.get("mask_src")
+    if src is not None:
+        src.close()
+    if mask_src is not None:
+        mask_src.close()
+    _TILE_WORKER_CONTEXT = {}
+
+
+def _init_tile_worker(
+    input_tif: str,
+    mask_tif: str,
+    band_idx: Tuple[int, ...],
+    tile_size: int,
+    pixel_size: float,
+    tpi_radii: Tuple[int, ...],
+    min_positive_ratio: float,
+    max_nodata_ratio: float,
+    normalize: bool,
+    save_format: str,
+    tile_prefix: str,
+    train_images_dir: str,
+    train_masks_dir: str,
+    val_images_dir: str,
+    val_masks_dir: str,
+) -> None:
+    global _TILE_WORKER_CONTEXT
+    _close_tile_worker_context()
+    _TILE_WORKER_CONTEXT = {
+        "src": rasterio.open(input_tif),
+        "mask_src": rasterio.open(mask_tif),
+        "band_idx": tuple(int(b) for b in band_idx),
+        "tile_size": int(tile_size),
+        "pixel_size": float(pixel_size),
+        "tpi_radii": tuple(int(r) for r in tpi_radii),
+        "min_positive_ratio": float(min_positive_ratio),
+        "max_nodata_ratio": float(max_nodata_ratio),
+        "normalize": bool(normalize),
+        "save_format": str(save_format),
+        "tile_prefix": str(tile_prefix),
+        "train_images_dir": str(train_images_dir),
+        "train_masks_dir": str(train_masks_dir),
+        "val_images_dir": str(val_images_dir),
+        "val_masks_dir": str(val_masks_dir),
+    }
+
+
+def _process_single_tile(task: Tuple[int, int, str]) -> dict:
+    row_off, col_off, split_name = task
+    ctx = _TILE_WORKER_CONTEXT
+    src = ctx["src"]
+    mask_src = ctx["mask_src"]
+    tile_size = int(ctx["tile_size"])
+    window = Window(col_off, row_off, tile_size, tile_size)
+
+    mask = mask_src.read(1, window=window).astype(np.float32)
+
+    def read_band(band_i: int) -> Optional[np.ndarray]:
+        if band_i <= 0:
+            return None
+        data = src.read(band_i, window=window)
+        return data.astype(np.float32)
+
+    band_idx = ctx["band_idx"]
+    rgb = np.stack([read_band(int(band_idx[i])) for i in range(3)], axis=0)
+    dsm = read_band(int(band_idx[3]))
+    dtm = read_band(int(band_idx[4]))
+
+    if dtm is None:
+        return {
+            "status": "skipped_nodata",
+            "row_off": int(row_off),
+            "col_off": int(col_off),
+        }
+
+    nodata_ratio = np.sum(~np.isfinite(dtm)) / dtm.size
+    if nodata_ratio > float(ctx["max_nodata_ratio"]):
+        return {
+            "status": "skipped_nodata",
+            "row_off": int(row_off),
+            "col_off": int(col_off),
+        }
+
+    positive_pixels = int(np.count_nonzero(mask > 0))
+    total_pixels = int(mask.size)
+    positive_ratio = (positive_pixels / total_pixels) if total_pixels > 0 else 0.0
+
+    if (
+        float(ctx["min_positive_ratio"]) > 0.0
+        and positive_ratio < float(ctx["min_positive_ratio"])
+    ):
+        return {
+            "status": "skipped_empty",
+            "row_off": int(row_off),
+            "col_off": int(col_off),
+        }
+
+    try:
+        ndsm = compute_ndsm(dsm, dtm)
+        svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+            dtm,
+            pixel_size=float(ctx["pixel_size"]),
+            show_progress=False,
+            log_steps=False,
+        )
+        plan_curv, profile_curv = compute_curvatures(
+            dtm, pixel_size=float(ctx["pixel_size"])
+        )
+        tpi = compute_tpi_multiscale(dtm, radii=ctx["tpi_radii"])
+    except Exception as exc:
+        return {
+            "status": "skipped_nodata",
+            "row_off": int(row_off),
+            "col_off": int(col_off),
+            "error": str(exc),
+        }
+
+    stacked = stack_channels(
+        rgb=rgb,
+        svf=svf,
+        pos_open=pos_open,
+        neg_open=neg_open,
+        lrm=lrm,
+        slope=slope,
+        ndsm=ndsm,
+        plan_curv=plan_curv,
+        profile_curv=profile_curv,
+        tpi=tpi,
+    )
+
+    if bool(ctx["normalize"]):
+        stacked = robust_norm(stacked)
+
+    stacked = np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    mask = np.nan_to_num(mask, nan=0.0).astype(np.uint8)
+
+    base_tile_name = f"tile_{row_off:05d}_{col_off:05d}"
+    tile_prefix = str(ctx["tile_prefix"])
+    tile_name = f"{tile_prefix}_{base_tile_name}" if tile_prefix else base_tile_name
+
+    if split_name == "train":
+        images_dir = str(ctx["train_images_dir"])
+        masks_dir = str(ctx["train_masks_dir"])
+    else:
+        images_dir = str(ctx["val_images_dir"])
+        masks_dir = str(ctx["val_masks_dir"])
+
+    save_format = str(ctx["save_format"])
+    if save_format == "npy":
+        np.save(os.path.join(images_dir, f"{tile_name}.npy"), stacked)
+        np.save(os.path.join(masks_dir, f"{tile_name}.npy"), mask)
+    else:
+        np.savez_compressed(
+            os.path.join(images_dir, f"{tile_name}.npz"),
+            image=stacked,
+        )
+        np.savez_compressed(
+            os.path.join(masks_dir, f"{tile_name}.npz"),
+            mask=mask,
+        )
+
+    return {
+        "status": "ok",
+        "split": str(split_name),
+        "tile_name": tile_name,
+        "row_off": int(row_off),
+        "col_off": int(col_off),
+        "positive_ratio": float(positive_ratio),
+        "positive_pixels": int(positive_pixels),
+        "total_pixels": int(total_pixels),
+    }
+
+
 def create_training_tiles(
     input_tif: Path,
     mask_tif: Path,
@@ -363,7 +542,7 @@ def create_training_tiles(
     train_ratio: float = 0.8,
     normalize: bool = True,
     save_format: str = "npz",
-    balance_ratio: Optional[float] = 0.3,
+    num_workers: int = 1,
     split_mode: str = "spatial",
     train_negative_keep_ratio: float = 1.0,
     train_negative_max: Optional[int] = None,
@@ -385,10 +564,7 @@ def create_training_tiles(
         train_ratio: Eğitim/doğrulama bölme oranı
         normalize: Tile'ları normalize et
         save_format: Kayıt formatı ("npy" veya "npz")
-        balance_ratio: Pozitif/negatif dengeleme oranı (0-1). 
-                       None = dengeleme yok, tüm tile'lar kullanılır.
-                       Örn: 0.4 = %40 pozitif, %60 negatif.
-                       Önerilen: 0.4 (hafif dengeli)
+        num_workers: Paralel worker sayisi (1=sekansiyel)
         split_mode: Train/val bölme modu.
                    "spatial" (önerilen): mekansal sızıntıyı azaltmak için
                    sınırı kesen tile'ları atar.
@@ -410,10 +586,10 @@ def create_training_tiles(
         max_nodata_ratio=max_nodata_ratio,
         train_ratio=train_ratio,
         save_format=save_format,
-        balance_ratio=balance_ratio,
         split_mode=split_mode,
         train_negative_keep_ratio=train_negative_keep_ratio,
         train_negative_max=train_negative_max,
+        num_workers=num_workers,
     )
 
     output_dir = Path(output_dir)
@@ -425,6 +601,8 @@ def create_training_tiles(
         tile_prefix = f"t{int(tile_size)}_ov{int(overlap)}_b{band_sig}_{ts}"
     if any(ch in tile_prefix for ch in ("/", "\\")):
         raise ValueError("tile_prefix '/' veya '\\' iceremez.")
+
+    num_workers = int(num_workers)
     
     # Dizin yapısı oluştur
     train_images_dir = output_dir / "train" / "images"
@@ -443,18 +621,13 @@ def create_training_tiles(
         "val_tiles": 0,
         "skipped_nodata": 0,
         "skipped_empty": 0,
+        "worker_error_count": 0,
         "positive_tiles": 0,
         "negative_tiles": 0,
-        "balanced_selection": balance_ratio is not None,
-        "original_positive_count": 0,
-        "original_negative_count": 0,
-        "selected_positive_count": 0,
-        "selected_negative_count": 0,
-        "discarded_negative_count": 0,
-        "ignored_low_positive_count": 0,
         "split_mode_requested": split_mode,
         "split_mode_effective": split_mode,
         "split_boundary_discarded": 0,
+        "num_workers": int(num_workers),
         "train_negative_keep_ratio": float(train_negative_keep_ratio),
         "train_negative_max": None if train_negative_max is None else int(train_negative_max),
         "train_negative_before_filter": 0,
@@ -479,16 +652,13 @@ def create_training_tiles(
     LOGGER.info(f"Bölme modu: {split_mode}")
     LOGGER.info(f"Bant sırası: {bands}")
     LOGGER.info(f"TPI yarıçapları: {tpi_radii}")
+    LOGGER.info(f"Paralel worker: {num_workers}")
     LOGGER.info(f"Tile prefix: {tile_prefix}")
     LOGGER.info(
         "Train negatif filtre: keep_ratio=%.3f, max=%s",
         float(train_negative_keep_ratio),
         "None" if train_negative_max is None else int(train_negative_max),
     )
-    if balance_ratio is not None:
-        LOGGER.info(f"Dengeli seçim: Aktif (hedef: %{balance_ratio*100:.0f} pozitif, %{(1-balance_ratio)*100:.0f} negatif)")
-    else:
-        LOGGER.info("Dengeli seçim: Kapalı (tüm tile'lar kullanılacak)")
     LOGGER.info("=" * 60)
     
     with rasterio.open(input_tif) as src, rasterio.open(mask_tif) as mask_src:
@@ -525,87 +695,11 @@ def create_training_tiles(
         total_windows = len(windows)
         LOGGER.info(f"Toplam potansiyel tile sayısı: {total_windows}")
         
-        # Dengeli seçim için önce pozitif/negatif tile'ları ayır
-        if balance_ratio is not None:
-            LOGGER.info("\nTile'lar pozitif/negatif olarak analiz ediliyor...")
-            positive_windows = []
-            negative_windows = []
-            ignored_low_positive = 0
-            
-            for row_off, col_off in tqdm(windows, desc="Analiz"):
-                window = Window(col_off, row_off, tile_size, tile_size)
-                
-                # Sadece maske kontrolü (hızlı)
-                try:
-                    mask = mask_src.read(1, window=window).astype(np.float32)
-                    positive_ratio = np.sum(mask > 0) / mask.size
-                    
-                    if _is_positive_for_balance(
-                        positive_ratio=positive_ratio,
-                        min_positive_ratio=min_positive_ratio,
-                    ):
-                        positive_windows.append((row_off, col_off))
-                    elif positive_ratio > 0:
-                        # Contains labels but does not meet positivity threshold for training tiles.
-                        ignored_low_positive += 1
-                    else:
-                        negative_windows.append((row_off, col_off))
-                except Exception:
-                    continue
-            
-            stats["original_positive_count"] = len(positive_windows)
-            stats["original_negative_count"] = len(negative_windows)
-            stats["ignored_low_positive_count"] = int(ignored_low_positive)
-            
-            LOGGER.info(f"Pozitif tile (içerik var): {len(positive_windows)}")
-            LOGGER.info(f"Negatif tile (sadece arka plan): {len(negative_windows)}")
-            if ignored_low_positive > 0:
-                LOGGER.info(
-                    "Pozitif içerikli ama min_positive_ratio altında kalan tile: %d",
-                    ignored_low_positive,
-                )
-            
-            # Negatif tile'ları örnekle
-            if len(positive_windows) > 0:
-                target_negative_count = int(len(positive_windows) * (1 - balance_ratio) / balance_ratio)
-                target_negative_count = min(target_negative_count, len(negative_windows))
-                
-                np.random.seed(42)
-                if target_negative_count < len(negative_windows):
-                    sampled_indices = np.random.choice(
-                        len(negative_windows),
-                        size=target_negative_count,
-                        replace=False
-                    )
-                    selected_negative = [negative_windows[i] for i in sampled_indices]
-                    stats["discarded_negative_count"] = len(negative_windows) - target_negative_count
-                else:
-                    selected_negative = negative_windows
-                    stats["discarded_negative_count"] = 0
-                
-                stats["selected_positive_count"] = len(positive_windows)
-                stats["selected_negative_count"] = len(selected_negative)
-                
-                # Birleştir ve karıştır
-                all_windows = positive_windows + selected_negative
-                np.random.seed(42)
-                np.random.shuffle(all_windows)
-                
-                LOGGER.info("\nDengeli seçim sonucu:")
-                LOGGER.info(f"  Seçilen pozitif: {len(positive_windows)}")
-                LOGGER.info(f"  Seçilen negatif: {len(selected_negative)}")
-                LOGGER.info(f"  Atılan negatif: {stats['discarded_negative_count']}")
-                LOGGER.info(f"  Toplam seçilen: {len(all_windows)}")
-                if len(all_windows) > 0:
-                    actual_ratio = len(positive_windows) / len(all_windows)
-                    LOGGER.info(f"  Gerçek pozitif oranı: %{actual_ratio*100:.1f}")
-            else:
-                LOGGER.warning("Pozitif tile bulunamadı! Tüm tile'lar kullanılacak.")
-                all_windows = windows
-        else:
-            # Dengeli seçim yok, tüm tile'ları kullan
-            all_windows = windows
-        
+        # Tum tile pencereleri train/val bolumunden once hazir.
+        # Tek dengeleme mekanizmasi: tum tile pencereleri korunur,
+        # negatif azaltma yalnizca train splitte uygulanir.
+        all_windows = windows
+
         train_windows, val_windows, boundary_discarded, split_mode_effective = _split_windows_for_train_val(
             all_windows,
             train_ratio=train_ratio,
@@ -644,8 +738,10 @@ def create_training_tiles(
                     "train_negative_keep_ratio veya train_negative_max degerlerini artirin."
                 )
 
-        all_windows = train_windows + val_windows
-        train_window_set = set(train_windows)
+        tile_tasks: List[Tuple[int, int, str]] = (
+            [(row_off, col_off, "train") for row_off, col_off in train_windows]
+            + [(row_off, col_off, "val") for row_off, col_off in val_windows]
+        )
 
         LOGGER.info(
             "Train/Val planı: train=%d, val=%d, sınırda atılan=%d (%s)",
@@ -672,128 +768,70 @@ def create_training_tiles(
             )
 
             LOGGER.info("\nTile'lar işleniyor...")
-            for row_off, col_off in tqdm(all_windows, desc="İşleniyor"):
-                window = Window(col_off, row_off, tile_size, tile_size)
+            worker_error_count = 0
+            worker_error_samples: List[str] = []
 
-                # Maske oku
-                mask = mask_src.read(1, window=window).astype(np.float32)
+            def handle_tile_result(result: dict) -> None:
+                nonlocal worker_error_count, worker_error_samples
+                status = str(result.get("status", ""))
 
-                # Bantları oku
-                def read_band(band_i: int) -> Optional[np.ndarray]:
-                    if band_i <= 0:
-                        return None
-                    data = src.read(band_i, window=window)
-                    return data.astype(np.float32)
-
-                rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-                dsm = read_band(band_idx[3])
-                dtm = read_band(band_idx[4])
-
-                # Nodata kontrolü
-                if dtm is None:
+                if status == "skipped_nodata":
                     stats["skipped_nodata"] += 1
-                    continue
+                    if "error" in result:
+                        worker_error_count += 1
+                        if len(worker_error_samples) < 5:
+                            worker_error_samples.append(
+                                "(%s, %s): %s"
+                                % (
+                                    result.get("row_off"),
+                                    result.get("col_off"),
+                                    result.get("error"),
+                                )
+                            )
+                    return
 
-                nodata_ratio = np.sum(~np.isfinite(dtm)) / dtm.size
-                if nodata_ratio > max_nodata_ratio:
-                    stats["skipped_nodata"] += 1
-                    continue
-
-                # Pozitif piksel oranı kontrolü
-                positive_pixels = int(np.count_nonzero(mask > 0))
-                total_pixels = int(mask.size)
-                positive_ratio = (positive_pixels / total_pixels) if total_pixels > 0 else 0.0
-
-                # Boş tile kontrolü (min_positive_ratio > 0 ise)
-                if min_positive_ratio > 0 and positive_ratio < min_positive_ratio:
+                if status == "skipped_empty":
                     stats["skipped_empty"] += 1
-                    continue
+                    return
 
-                # Türevleri hesapla
-                try:
-                    ndsm = compute_ndsm(dsm, dtm)
-                    svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
-                        dtm, pixel_size=pixel_size
-                    )
-                    plan_curv, profile_curv = compute_curvatures(dtm, pixel_size=pixel_size)
-                    tpi = compute_tpi_multiscale(dtm, radii=tpi_radii)
-                except Exception as e:
-                    LOGGER.warning(f"Türev hesaplama hatası ({row_off}, {col_off}): {e}")
-                    stats["skipped_nodata"] += 1
-                    continue
+                if status != "ok":
+                    raise ValueError(f"Bilinmeyen tile sonucu: {status}")
 
-                # 12 kanallı tensor oluştur
-                stacked = stack_channels(
-                    rgb=rgb,
-                    svf=svf,
-                    pos_open=pos_open,
-                    neg_open=neg_open,
-                    lrm=lrm,
-                    slope=slope,
-                    ndsm=ndsm,
-                    plan_curv=plan_curv,
-                    profile_curv=profile_curv,
-                    tpi=tpi,
-                )
+                row_off = int(result["row_off"])
+                col_off = int(result["col_off"])
+                split_name = str(result["split"])
+                tile_name = str(result["tile_name"])
+                positive_ratio = float(result["positive_ratio"])
+                positive_pixels = int(result["positive_pixels"])
+                total_pixels = int(result["total_pixels"])
 
-                # Normalize et
-                if normalize:
-                    stacked = robust_norm(stacked)
-
-                # NaN temizle
-                stacked = np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0)
-                mask = np.nan_to_num(mask, nan=0.0)
-
-                # İstatistikler
                 if positive_ratio > 0:
                     stats["positive_tiles"] += 1
                 else:
                     stats["negative_tiles"] += 1
 
-                # Train/Val ayrımı
-                is_train = (row_off, col_off) in train_window_set
-
-                if is_train:
-                    images_dir = train_images_dir
-                    masks_dir = train_masks_dir
-                    split_name = "train"
+                if split_name == "train":
                     stats["train_tiles"] += 1
-                else:
-                    images_dir = val_images_dir
-                    masks_dir = val_masks_dir
-                    split_name = "val"
+                elif split_name == "val":
                     stats["val_tiles"] += 1
-
-                # Kaydet
-                base_tile_name = f"tile_{row_off:05d}_{col_off:05d}"
-                tile_name = f"{tile_prefix}_{base_tile_name}" if tile_prefix else base_tile_name
+                else:
+                    raise ValueError(f"Gecersiz split sonucu: {split_name}")
 
                 if tile_presence_grid is not None:
                     grid_r = int(row_off // stride)
                     grid_c = int(col_off // stride)
-                    if 0 <= grid_r < tile_presence_grid.shape[0] and 0 <= grid_c < tile_presence_grid.shape[1]:
+                    if (
+                        0 <= grid_r < tile_presence_grid.shape[0]
+                        and 0 <= grid_c < tile_presence_grid.shape[1]
+                    ):
                         tile_presence_grid[grid_r, grid_c] = np.float32(positive_ratio)
 
-                if save_format == "npy":
-                    np.save(images_dir / f"{tile_name}.npy", stacked.astype(np.float32))
-                    np.save(masks_dir / f"{tile_name}.npy", mask.astype(np.uint8))
-                else:  # npz
-                    np.savez_compressed(
-                        images_dir / f"{tile_name}.npz",
-                        image=stacked.astype(np.float32),
-                    )
-                    np.savez_compressed(
-                        masks_dir / f"{tile_name}.npz",
-                        mask=mask.astype(np.uint8),
-                    )
-
-                # Tile varlik olasiligi: GT pozitif piksel orani
                 tile_presence_writer.writerow(
                     [
                         tile_name,
                         split_name,
-                        int(row_off),
-                        int(col_off),
+                        row_off,
+                        col_off,
                         int(positive_ratio > 0.0),
                         f"{positive_ratio:.8f}",
                         f"{positive_ratio:.8f}",
@@ -802,7 +840,62 @@ def create_training_tiles(
                     ]
                 )
 
-                stats["total_tiles"] += 1    
+                stats["total_tiles"] += 1
+
+            worker_init_args = (
+                str(input_tif),
+                str(mask_tif),
+                tuple(int(b) for b in band_idx),
+                int(tile_size),
+                float(pixel_size),
+                tuple(int(r) for r in tpi_radii),
+                float(min_positive_ratio),
+                float(max_nodata_ratio),
+                bool(normalize),
+                str(save_format),
+                str(tile_prefix),
+                str(train_images_dir),
+                str(train_masks_dir),
+                str(val_images_dir),
+                str(val_masks_dir),
+            )
+
+            if num_workers == 1:
+                _init_tile_worker(*worker_init_args)
+                try:
+                    for result in tqdm(
+                        map(_process_single_tile, tile_tasks),
+                        total=len(tile_tasks),
+                        desc="Isleniyor",
+                    ):
+                        handle_tile_result(result)
+                finally:
+                    _close_tile_worker_context()
+            else:
+                with ProcessPoolExecutor(
+                    max_workers=num_workers,
+                    initializer=_init_tile_worker,
+                    initargs=worker_init_args,
+                ) as executor:
+                    futures = [
+                        executor.submit(_process_single_tile, task)
+                        for task in tile_tasks
+                    ]
+                    for future in tqdm(
+                        as_completed(futures),
+                        total=len(futures),
+                        desc="Isleniyor",
+                    ):
+                        handle_tile_result(future.result())
+
+            if worker_error_count > 0:
+                stats["worker_error_count"] = int(worker_error_count)
+                LOGGER.warning(
+                    "Turev hesaplama hatasi nedeniyle atlanan tile sayisi: %d",
+                    worker_error_count,
+                )
+                for idx, sample in enumerate(worker_error_samples, start=1):
+                    LOGGER.warning("  Ornek %d: %s", idx, sample)
     if tile_presence_grid is not None and tile_presence_grid.size > 0:
         grid_transform = source_transform * Affine.scale(stride, stride)
         with rasterio.open(
@@ -848,6 +941,7 @@ def create_training_tiles(
         "bands": bands,
         "tpi_radii": list(tpi_radii),
         "normalize": normalize,
+        "num_workers": int(num_workers),
         "tile_prefix": tile_prefix,
         "tile_presence_file": str(tile_presence_csv_path),
         "tile_presence_grid_file": str(tile_presence_grid_path),
@@ -875,14 +969,6 @@ def create_training_tiles(
     LOGGER.info(f"Atlanan (nodata): {stats['skipped_nodata']}")
     LOGGER.info(f"Atlanan (boş): {stats['skipped_empty']}")
     
-    if stats.get("balanced_selection", False):
-        LOGGER.info("\nDengeli Seçim İstatistikleri:")
-        LOGGER.info(f"  Orijinal pozitif: {stats.get('original_positive_count', 0)}")
-        LOGGER.info(f"  Orijinal negatif: {stats.get('original_negative_count', 0)}")
-        LOGGER.info(f"  Seçilen pozitif: {stats.get('selected_positive_count', 0)}")
-        LOGGER.info(f"  Seçilen negatif: {stats.get('selected_negative_count', 0)}")
-        LOGGER.info(f"  Atılan negatif: {stats.get('discarded_negative_count', 0)}")
-
     if train_negative_keep_ratio < 1.0 or train_negative_max is not None:
         LOGGER.info("\nTrain Negatif Filtre Istatistikleri:")
         LOGGER.info(
@@ -977,13 +1063,11 @@ def main():
     else:
         tpi_default = str(config_tpi_radii).strip() or "5,15,30"
 
-    config_balance_ratio = CONFIG.get("balance_ratio", None)
-    if config_balance_ratio is not None:
-        config_balance_ratio = float(config_balance_ratio)
     config_train_negative_keep_ratio = float(CONFIG.get("train_negative_keep_ratio", 1.0))
     config_train_negative_max = CONFIG.get("train_negative_max", None)
     if config_train_negative_max is not None:
         config_train_negative_max = int(config_train_negative_max)
+    config_num_workers = int(CONFIG.get("num_workers", max(1, (os.cpu_count() or 1) - 1)))
     config_tile_prefix = str(CONFIG.get("tile_prefix", "")).strip()
 
     parser = argparse.ArgumentParser(
@@ -1064,13 +1148,10 @@ def main():
         help="Kayit formati",
     )
     parser.add_argument(
-        "--balance-ratio",
-        type=float,
-        default=config_balance_ratio,
-        help=(
-            "Pozitif/negatif dengeleme orani (0-1). Ornek: 0.4 = %%40 pozitif, %%60 negatif. "
-            "None = dengeleme yok. Onerilen: 0.4 (hafif dengeli)"
-        ),
+        "--num-workers",
+        type=int,
+        default=config_num_workers,
+        help="Paralel worker sayisi. 1=sekansiyel.",
     )
     parser.add_argument(
         "--train-negative-keep-ratio",
@@ -1150,7 +1231,7 @@ def main():
             train_ratio=args.train_ratio,
             normalize=not args.no_normalize,
             save_format=args.format,
-            balance_ratio=args.balance_ratio,
+            num_workers=args.num_workers,
             split_mode=args.split_mode,
             train_negative_keep_ratio=args.train_negative_keep_ratio,
             train_negative_max=args.train_negative_max,
@@ -1170,4 +1251,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

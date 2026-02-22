@@ -110,6 +110,16 @@ T = TypeVar("T")
 
 SESSION_RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+_WARN_ONCE_KEYS: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Emit a warning only once per Python process."""
+    if key in _WARN_ONCE_KEYS:
+        return
+    _WARN_ONCE_KEYS.add(key)
+    LOGGER.warning(message)
+
 
 def _safe_token(value: str) -> str:
     token = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value.strip())
@@ -1369,51 +1379,139 @@ def compute_derivatives_with_rvt(
     pos_open, neg_open = _compute_openness(float(max(radii)))
 
     log_fn("  → LRM (Local Relief Model) hesaplanıyor...")
-    try:
-        # LRM may also have different radius/nodata keywords
-        def _call_lrm() -> np.ndarray:
-            radius_keys = ("search_radius", "radius", "r_max", "max_radius", "max_search_radius")
-            nodata_keys = ("no_data", "nodata")
-            last_err: Optional[Exception] = None
-            for rk in radius_keys:
-                for nk in nodata_keys:
-                    try:
-                        return rvt_vis.local_relief_model(
-                            dem=dtm_filled,
-                            resolution=pixel_size,
-                            **{rk: float(max(radii)), nk: None},
-                        )
-                    except TypeError as e:
-                        last_err = e
-                        continue
-            for rk in radius_keys:
+
+    def _call_local_relief_model() -> np.ndarray:
+        radius_keys = ("search_radius", "radius", "r_max", "max_radius", "max_search_radius")
+        nodata_keys = ("no_data", "nodata")
+        last_err: Optional[Exception] = None
+        for rk in radius_keys:
+            for nk in nodata_keys:
                 try:
                     return rvt_vis.local_relief_model(
                         dem=dtm_filled,
                         resolution=pixel_size,
-                        **{rk: float(max(radii))},
+                        **{rk: float(max(radii)), nk: None},
                     )
                 except TypeError as e:
                     last_err = e
                     continue
+        for rk in radius_keys:
             try:
-                return rvt_vis.local_relief_model(dem=dtm_filled, resolution=pixel_size)
-            except Exception as e:
-                if last_err is not None:
-                    raise last_err
-                raise e
+                return rvt_vis.local_relief_model(
+                    dem=dtm_filled,
+                    resolution=pixel_size,
+                    **{rk: float(max(radii))},
+                )
+            except TypeError as e:
+                last_err = e
+                continue
+        try:
+            return rvt_vis.local_relief_model(dem=dtm_filled, resolution=pixel_size)
+        except Exception as e:
+            if last_err is not None:
+                raise last_err
+            raise e
 
-        lrm = _as_float32_array(_call_lrm(), "local_relief_model")
-    except AttributeError:
-        LOGGER.warning("rvt.vis.local_relief_model eksik; Gaussian fallback kullanılıyor.")
+    def _call_slrm() -> np.ndarray:
+        target_radius_px = int(round(float(max(radii)) / max(float(pixel_size), 1e-6)))
+        radius_candidates: List[int] = []
+        for candidate in (target_radius_px, int(round(float(max(radii)))), 20):
+            candidate = max(10, min(50, int(candidate)))
+            if candidate not in radius_candidates:
+                radius_candidates.append(candidate)
+
+        last_err: Optional[Exception] = None
+        for radius_cell in radius_candidates:
+            try:
+                return rvt_vis.slrm(
+                    dem=dtm_filled,
+                    radius_cell=int(radius_cell),
+                    no_data=None,
+                )
+            except TypeError as e:
+                last_err = e
+            try:
+                return rvt_vis.slrm(
+                    dem=dtm_filled,
+                    radius_cell=int(radius_cell),
+                )
+            except TypeError as e:
+                last_err = e
+                continue
+        if last_err is not None:
+            raise last_err
+        return rvt_vis.slrm(dem=dtm_filled)
+
+    lrm: np.ndarray
+    lrm_ready = False
+    if hasattr(rvt_vis, "local_relief_model"):
+        try:
+            lrm = _as_float32_array(_call_local_relief_model(), "local_relief_model")
+            lrm_ready = True
+        except Exception:
+            lrm_ready = False
+
+    if not lrm_ready and hasattr(rvt_vis, "slrm"):
+        try:
+            lrm = _as_float32_array(_call_slrm(), "slrm")
+            lrm_ready = True
+        except Exception:
+            lrm_ready = False
+
+    if not lrm_ready:
+        _warn_once(
+            "rvt_local_relief_model_missing",
+            "RVT LRM fonksiyonu eksik/uyumsuz; Gaussian fallback kullaniliyor.",
+        )
         _lrm_sigma = DEFAULTS.gaussian_lrm_sigma if gaussian_lrm_sigma is None else float(gaussian_lrm_sigma)
         low_pass = gaussian_filter(dtm_filled, sigma=_lrm_sigma)
         lrm = (dtm_filled - low_pass).astype(np.float32)
 
-    # slope signature also varies across versions; try with/without keywords.
-    # If slope is unavailable in rvt.vis, fall back to numpy gradient.
+    # slope signature also varies across versions; try slope and slope_aspect.
+    # If both are unavailable, fall back to numpy gradient.
     log_fn("  → Slope (eğim) hesaplanıyor...")
+
+    def _call_slope_aspect() -> np.ndarray:
+        candidates = (
+            {
+                "dem": dtm_filled,
+                "resolution_x": pixel_size,
+                "resolution_y": pixel_size,
+                "output_units": "degree",
+                "no_data": None,
+            },
+            {
+                "dem": dtm_filled,
+                "resolution_x": pixel_size,
+                "resolution_y": pixel_size,
+                "output_units": "degree",
+            },
+            {
+                "dem": dtm_filled,
+                "resolution": pixel_size,
+                "output_units": "degree",
+                "no_data": None,
+            },
+            {
+                "dem": dtm_filled,
+                "resolution": pixel_size,
+                "output_units": "degree",
+            },
+            {"dem": dtm_filled},
+        )
+        last_err: Optional[Exception] = None
+        for kwargs in candidates:
+            try:
+                return rvt_vis.slope_aspect(**kwargs)
+            except TypeError as e:
+                last_err = e
+                continue
+        if last_err is not None:
+            raise last_err
+        return rvt_vis.slope_aspect(dtm_filled)
+
     slope: np.ndarray
+    slope_ready = False
     if hasattr(rvt_vis, "slope"):
         try:
             slope_res = rvt_vis.slope(
@@ -1423,16 +1521,29 @@ def compute_derivatives_with_rvt(
                 no_data=None,
             )
             slope = _as_float32_array(slope_res, "slope")
+            slope_ready = True
         except TypeError:
             try:
                 slope = _as_float32_array(
                     rvt_vis.slope(dem=dtm_filled, resolution=pixel_size),
                     "slope",
                 )
-            except Exception as e:  # pragma: no cover - defensive
-                raise e
-    else:
-        LOGGER.warning("rvt.vis.slope eksik; gradyan tabanlı fallback kullanılıyor.")
+                slope_ready = True
+            except Exception:
+                slope_ready = False
+
+    if not slope_ready and hasattr(rvt_vis, "slope_aspect"):
+        try:
+            slope = _as_float32_array(_call_slope_aspect(), "slope_aspect")
+            slope_ready = True
+        except Exception:
+            slope_ready = False
+
+    if not slope_ready:
+        _warn_once(
+            "rvt_slope_missing",
+            "RVT slope fonksiyonu eksik/uyumsuz; gradyan tabanli fallback kullaniliyor.",
+        )
         # Compute slope in degrees: arctan(sqrt((dz/dx)^2 + (dz/dy)^2))
         # Use filled DTM to avoid NaNs breaking gradient
         gy, gx = np.gradient(dtm_filled.astype(np.float32), pixel_size, pixel_size)

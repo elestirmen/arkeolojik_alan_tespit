@@ -1683,7 +1683,8 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 | `--tile-size` | `256` | Piksel cinsinden karo boyutu |
 | `--overlap` | `64` | Karolar arası örtüşme |
 | `--train-ratio` | `0.8` | %80 eğitim, %20 doğrulama |
-| `--balance-ratio` | `None` | Pozitif/negatif dengeleme (örn. `0.4` = %40 pozitif) |
+| `--train-negative-keep-ratio` | `1.0` | Tamamen negatif eğitim karolarını tutma oranı (`0`=hepsini at, `1`=hepsini tut) |
+| `--train-negative-max` | `None` | Tutulacak negatif eğitim karo sayısı için opsiyonel üst sınır |
 | `--min-positive` | `0.0` | Karoyu dahil etmek için min pozitif piksel oranı |
 | `--bands` | `1,2,3,4,5` | Bant sırası: R,G,B,DSM,DTM |
 
@@ -1691,9 +1692,9 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 
 | Senaryo | Komut |
 |---------|-------|
-| **Standart** | `--tile-size 256 --overlap 64 --balance-ratio 0.4` |
+| **Standart** | `--tile-size 256 --overlap 64` |
 | **Büyük yapılar** | `--tile-size 512 --overlap 128` |
-| **Dengesiz veri** (<%5 arkeolojik) | `--balance-ratio 0.4 --min-positive 0.01` |
+| **Dengesiz veri** (<%5 arkeolojik) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
 | **Hızlı test** | `--tile-size 256 --train-ratio 0.9` |
 
 #### Çıktı: 12 Kanal Açıklaması
@@ -1851,7 +1852,7 @@ python archaeo_detect.py
 | Kayıp düşmüyor | Öğrenme oranı çok yüksek | `--lr 5e-5` veya `1e-5` kullanın |
 | GPU bellek yetersiz | Batch boyutu çok büyük | `--batch-size 4` veya `--no-amp` kullanın |
 | Aşırı öğrenme (train << val loss) | Çok az veri | Daha fazla karo ekleyin veya `--loss focal` kullanın |
-| Tüm tahminler = 0 | Sınıf dengesizliği | `--loss focal` kullanın, veri hazırlamada `--balance-ratio 0.4` |
+| Tüm tahminler = 0 | Sınıf dengesizliği | `--loss focal` kullanın, veri hazırlamada negatif eğitim karolarını azaltın (örn. `--train-negative-keep-ratio 0.2`) |
 | Eğitim çok yavaş | GPU yok / küçük batch | GPU kullanın, `--batch-size` artırın, AMP etkinleştirin |
 
 #### Hızlı Tanı Komutları
@@ -1903,13 +1904,13 @@ python -c "import numpy as np; d=np.load('training_data/train/images/tile_00000_
 ### 📚 Tam Örnek: Uçtan Uca
 
 ```bash
-# 1. Dengeli örnekleme ile eğitim verisi oluştur
+# 1. Eğitim verisini oluştur (tek dengeleme mekanizması: train-negatif filtreleme)
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
   --output training_data \
   --tile-size 256 \
-  --balance-ratio 0.4
+  --train-negative-keep-ratio 0.3
 
 # 2. Modeli eğit
 python training.py \

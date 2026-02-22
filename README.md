@@ -1772,7 +1772,8 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 | `--tile-size` | `256` | Tile dimensions in pixels |
 | `--overlap` | `64` | Overlap between tiles |
 | `--train-ratio` | `0.8` | 80% train, 20% validation |
-| `--balance-ratio` | `None` | Balance positive/negative tiles (e.g., `0.4` = 40% positive) |
+| `--train-negative-keep-ratio` | `1.0` | Keep ratio of fully-negative train tiles (`0`=drop all, `1`=keep all) |
+| `--train-negative-max` | `None` | Optional upper cap for kept negative train tiles |
 | `--min-positive` | `0.0` | Min positive pixel ratio to include tile |
 | `--bands` | `1,2,3,4,5` | Band order: R,G,B,DSM,DTM |
 
@@ -1780,9 +1781,9 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 
 | Scenario | Command |
 |----------|---------|
-| **Standard** | `--tile-size 256 --overlap 64 --balance-ratio 0.4` |
+| **Standard** | `--tile-size 256 --overlap 64` |
 | **Large structures** | `--tile-size 512 --overlap 128` |
-| **Imbalanced data** (<5% archaeological) | `--balance-ratio 0.4 --min-positive 0.01` |
+| **Imbalanced data** (<5% archaeological) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
 | **Quick test** | `--tile-size 256 --train-ratio 0.9` |
 
 #### Output: 12 Channels Explained
@@ -1940,7 +1941,7 @@ python archaeo_detect.py
 | Loss not decreasing | Learning rate too high | Use `--lr 5e-5` or `1e-5` |
 | GPU out of memory | Batch size too large | Use `--batch-size 4` or `--no-amp` |
 | Overfitting (train << val loss) | Too little data | Add more training tiles or use `--loss focal` |
-| All predictions = 0 | Class imbalance | Use `--loss focal` and `--balance-ratio 0.4` in data prep |
+| All predictions = 0 | Class imbalance | Use `--loss focal` and reduce train negatives (e.g., `--train-negative-keep-ratio 0.2`) in data prep |
 | Training too slow | No GPU / small batches | Use GPU, increase `--batch-size`, enable AMP |
 
 #### Quick Diagnostic Commands
@@ -1992,13 +1993,13 @@ python -c "import numpy as np; d=np.load('training_data/train/images/tile_00000_
 ### 📚 Complete Example: End-to-End
 
 ```bash
-# 1. Generate training data with balanced sampling
+# 1. Generate training data (single balancing mechanism: train-negative filtering)
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
   --output training_data \
   --tile-size 256 \
-  --balance-ratio 0.4
+  --train-negative-keep-ratio 0.3
 
 # 2. Train model
 python training.py \
