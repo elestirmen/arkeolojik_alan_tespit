@@ -132,55 +132,102 @@ LOGGER = logging.getLogger("training")
 # IDE uzerinden dogrudan "Run" ettiginizde bu degerler kullanilir.
 # Komut satirindan verilen argumanlar her zaman bu degerleri ezer.
 CONFIG: dict[str, object] = {
-    # Egitim veri dizini (train/ ve val/ klasorlerini icermeli)
+    # data:
+    # Egitim veri kok dizini.
+    # Beklenen yapi: train/images, train/masks, val/images, val/masks
     "data": "training_data",
-    # Segmentasyon modeli (SMP):
+
+    # arch:
+    # Segmentasyon model ailesi (segmentation_models_pytorch).
+    # Secim; hiz, bellek kullanimi ve kaliteyi birlikte etkiler.
     # Unet | UnetPlusPlus | DeepLabV3Plus | FPN | PSPNet | MAnet | Linknet
     "arch": "Unet",
-    # Encoder omurgasi (ornekler):
-    # resnet34 | resnet50 | efficientnet-b3 | mobilenet_v2 | densenet121
+
+    # encoder:
+    # BackBone/encoder secimi.
+    # Daha buyuk encoder genelde daha guclu temsil ama daha yuksek maliyet demektir.
+    # ornekler: resnet34 | resnet50 | efficientnet-b3 | mobilenet_v2 | densenet121
     "encoder": "resnet50",
-    # True ise CBAM attention varsayilan olarak kapatilir
+
+    # no_attention:
+    # True ise giristeki CBAM attention katmani kapatilir.
+    # False iken attention aktiftir.
     "no_attention": False,
-    # Egitim suresi
+
+    # epochs:
+    # Toplam egitim epoch sayisi.
     "epochs": 50,
-    # Batch boyutu
+
+    # batch_size:
+    # Batch boyutu.
+    # Yuksek deger daha stabil gradient verebilir; daha fazla VRAM ister.
     "batch_size": 8,
-    # Ogrenme orani
+
+    # lr:
+    # Ogrenme orani (AdamW).
+    # Cok yuksek olursa kararsizlik, cok dusuk olursa yavas ogrenme gorulebilir.
     "lr": 1e-4,
-    # Kayip fonksiyonu: bce | dice | combined | focal
-    # Not: class balance ayarlari (balance_mode/pos_weight) sadece bce ve combined
-    # kayiplarinda etkilidir.
+
+    # loss:
+    # Optimize edilen kayip fonksiyonu.
+    # bce | dice | combined | focal
+    # Not: balance_mode/pos_weight ayarlari sadece bce ve combined icin etkilidir.
     "loss": "combined",
-    # Sinif dengesizligi ayari:
+
+    # balance_mode:
+    # Sinif dengesizligi modu (BCE tarafinda agirliklandirma davranisi):
     # - none   : Agirliklandirma kapali (pos_weight=1.0 gibi davranir)
     # - auto   : Train maskelerinden piksel bazli negatif/pozitif orani hesaplanir
     #            ve bu orana gore otomatik pos_weight secilir
     # - manual : pos_weight degeri dogrudan kullanilir
-    # Not: Yalnizca bce ve combined loss tiplerinde etkilidir.
+    # Not: Yalnizca bce/combined icin etkilidir.
     "balance_mode": "auto",
-    # Manual modunda BCE positive class agirligi.
-    # 1.0 = agirlik yok, >1.0 = pozitif sinif hatalari daha fazla cezalandirilir.
-    # Cok dengesiz veri setlerinde 20-300 arasi degerler pratikte ise yarayabilir.
+
+    # pos_weight:
+    # Manual modda BCE pozitif sinif agirligi.
+    # Pozitif sinif azsa degeri artirmak recall'i destekleyebilir.
     "pos_weight": 1.0,
-    # Auto modunda hesaplanan pos_weight icin ust sinir (clip).
-    # Asiri buyuk agirliklarin egitimi kararsizlastirmasini engeller.
+
+    # max_auto_pos_weight:
+    # Auto modda hesaplanan pos_weight icin ust sinir (clip).
+    # Asiri buyuk agirliklarin egitimi bozmasini onler.
     "max_auto_pos_weight": 100.0,
-    # Erken durdurma sabri
+
+    # patience:
+    # Erken durdurma sabri (iyilesme olmayan epoch sayisi).
     "patience": 10,
-    # DataLoader worker sayisi
+
+    # workers:
+    # DataLoader worker sayisi.
+    # CPU cekirdek sayisi ve disk hizina gore ayarlanir.
     "workers": 4,
-    # True ise AMP (mixed precision) varsayilan olarak kapatilir
+
+    # no_amp:
+    # True ise mixed precision (AMP) kapatilir.
+    # CUDA'da genelde AMP acik kullanmak hiz/VRAM acisindan avantajlidir.
     "no_amp": False,
-    # Checkpoint cikti dizini
+
+    # output:
+    # Checkpoint cikti dizini.
     "output": "checkpoints",
-    # Her epoch sonunda da checkpoint kaydet
+
+    # save_every_epoch:
+    # True ise her epoch sonunda ek checkpoint kaydeder.
+    # Disk kullanimi artar ama geri analiz kolaylasir.
     "save_every_epoch": True,
-    # Epoch checkpoint'lerinin alt dizini
+
+    # epoch_dir:
+    # save_every_epoch aktifken, epoch checkpoint'lerinin tutulacagi alt klasor adi.
     "epoch_dir": "epochs",
-    # Rastgelelik sabiti
+
+    # seed:
+    # Rastgelelik sabiti.
+    # Deneyleri tekrar edilebilir kilmak icin sabit tutulur.
     "seed": 42,
-    # Tum maskeler negatif olsa da egitime devam et
+
+    # allow_all_negative:
+    # True ise tum maskeler negatif olsa bile egitim zorla devam eder.
+    # Veri hatasini erken yakalamak icin normalde False onerilir.
     "allow_all_negative": False,
 }
 # ===============================================
@@ -230,6 +277,9 @@ class ArchaeologyDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         img_path = self.image_files[idx]
         mask_path = self.masks_dir / img_path.name
+
+        if not mask_path.exists():
+            raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
         
         # Dosyaları oku
         if self.file_format == "npy":
@@ -238,6 +288,10 @@ class ArchaeologyDataset(Dataset):
         else:  # npz
             image = np.load(img_path)["image"]
             mask = np.load(mask_path)["mask"]
+
+        # Legacy veriyle uyumluluk: maskeyi zorunlu 0/1 yap.
+        image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        mask = np.where(np.isfinite(mask) & (mask > 0), 1.0, 0.0).astype(np.float32)
         
         # Veri artırma
         if self.augment:
@@ -446,14 +500,46 @@ class TrainingConfig:
     epoch_dir: str = "epochs"
 
 
-def _infer_file_format(data_dir: Path) -> str:
-    """Eğitim verisindeki dosya formatını (npz/npy) tespit eder."""
-    train_images = data_dir / "train" / "images"
-    if any(train_images.glob("*.npz")):
+def _detect_split_file_format(images_dir: Path) -> Optional[str]:
+    """Detect file format for a split directory and reject mixed extensions."""
+    has_npz = any(images_dir.glob("*.npz"))
+    has_npy = any(images_dir.glob("*.npy"))
+
+    if has_npz and has_npy:
+        raise ValueError(
+            f"Ayni klasorde hem .npz hem .npy bulundu: {images_dir}. "
+            "Tek bir format kullanin."
+        )
+    if has_npz:
         return "npz"
-    if any(train_images.glob("*.npy")):
+    if has_npy:
         return "npy"
-    raise ValueError(f"Desteklenen eğitim dosyası bulunamadı: {train_images} (*.npz / *.npy)")
+    return None
+
+
+def _infer_file_format(data_dir: Path) -> str:
+    """Egitim verisindeki dosya formatini (npz/npy) tespit eder."""
+    train_images = data_dir / "train" / "images"
+    val_images = data_dir / "val" / "images"
+
+    train_format = _detect_split_file_format(train_images)
+    val_format = _detect_split_file_format(val_images)
+
+    if train_format is None:
+        raise ValueError(
+            f"Desteklenen egitim dosyasi bulunamadi: {train_images} (*.npz / *.npy)"
+        )
+    if val_format is None:
+        raise ValueError(
+            f"Desteklenen dogrulama dosyasi bulunamadi: {val_images} (*.npz / *.npy)"
+        )
+    if train_format != val_format:
+        raise ValueError(
+            "Train ve val klasorlerinde farkli dosya formati bulundu: "
+            f"train={train_format}, val={val_format}"
+        )
+
+    return train_format
 
 
 def _load_mask_array(mask_path: Path, file_format: str) -> np.ndarray:

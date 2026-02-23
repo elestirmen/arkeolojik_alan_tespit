@@ -73,35 +73,97 @@ LOGGER = logging.getLogger("egitim_verisi")
 # IDE uzerinden dogrudan "Run" ettiginizde bu degerler kullanilir.
 # Komut satirindan verilen argumanlar her zaman bu degerleri ezer.
 CONFIG: dict[str, object] = {
-    # Girdi cok bantli raster (RGB + DSM + DTM)
+    # input:
+    # Cok bantli raster dosyasinin yolu.
+    # Beklenen icerik: RGB + DSM + DTM (hangi bant hangi role gidecek, bands ile belirlenir).
     "input": "on_veri/karlik_dag_rgb_dtm_dsm_5band.tif",
-    # Ground-truth maske (arkeolojik alan=1, arka plan=0)
+
+    # mask:
+    # Ground-truth maske dosyasinin yolu.
+    # 0 disindaki tum degerler pozitif sinif olarak ele alinir (otomatik 0/1'e cevrilir).
     "mask": "on_veri/karlik_dag_rgb_ground_truth.tif",
-    # Cikti dizini
+
+    # output:
+    # Cikti kok dizini.
+    # train/val, images/masks, metadata ve tile_presence dosyalari bu dizine yazilir.
     "output": "training_data",
-    # Tile ayarlari
+
+    # tile_size:
+    # Her ornegin (tile) uzamsal boyutu.
+    # Buyuk tile daha fazla baglam verir; disk, RAM ve islem suresini artirir.
     "tile_size": 256,
+
+    # overlap:
+    # Komsu tile'larin kac piksel ust uste binecegi.
+    # Yuksek overlap daha fazla ornek ureterek sinir gecislerini yumusatir, tekrarli veri artar.
     "overlap": 64,
-    # Bant sirasi: R,G,B,DSM,DTM
+
+    # bands:
+    # Girdi rasterindaki bant sirasi: "R,G,B,DSM,DTM".
+    # GeoTIFF bant indeksleri 1 tabanlidir (1,2,3,...).
     "bands": "1,2,3,4,5",
-    # TPI yaricaplari
+
+    # tpi_radii:
+    # TPI hesaplamasinda kullanilan coklu olcek yaricaplari (piksel).
+    # Farkli yaricaplar mikro ve makro topografik desenleri birlikte yakalamaya yardimci olur.
     "tpi_radii": (5, 15, 30),
-    # Filtreleme/split
+
+    # min_positive:
+    # Tile'in kabul edilmesi icin gereken minimum pozitif piksel orani.
+    # 0.0 oldugunda tamamen negatif tile'lar da dahil edilir.
     "min_positive": 0.0,
+
+    # max_nodata:
+    # Bir tile icin izin verilen maksimum gecersiz/nodata orani.
+    # Bu esik asilirsa tile atlanir.
     "max_nodata": 0.3,
+
+    # train_ratio:
+    # Train/val bolme orani (0-1).
+    # Ornek: 0.8 -> pencerelerin yaklasik %80'i train, %20'si val.
     "train_ratio": 0.8,
+
+    # split_mode:
+    # Train/val ayirma stratejisi.
+    # spatial: mekansal sizintiyi azaltmak icin siniri kesen tile'lari dislar.
+    # random: klasik rastgele bolme.
     "split_mode": "spatial",  # spatial | random
-    # On-isleme/kayit
+
+    # normalize:
+    # True ise her kanal robust sekilde 0-1 araligina cekilir (persentil kirpma tabanli).
+    # Bu, farkli olceklerdeki kanallari (RGB/slope/curvature vb.) benzer araliga getirir.
+    # False yaparsan ham degerler korunur; model egitimi genelde daha zorlasir.
     "normalize": True,
+
+    # format:
+    # Kayit formati.
+    # npz: sikistirilmis (daha az disk), npy: sikistirmasiz (genelde daha hizli I/O).
     "format": "npz",  # npy | npz
-    # Paralel worker sayisi (1 = sekansiyel)
-    "num_workers": max(1, (os.cpu_count() or 1) - 1),
-    # Train setindeki tamamen negatif (maskede hic 1 olmayan) tile'lari ne kadar tutalim?
-    # 1.0 = hepsini tut, 0.0 = hepsini at
-    "train_negative_keep_ratio": 1.0,
-    # Train setinde tutulacak negatif tile sayisina ust sinir (None = sinir yok)
+
+    # num_workers:
+    # Tile uretiminde kullanilacak paralel isci sayisi.
+    # 1 = sekansiyel; yuksek deger CPU ve disk I/O yukunu artirir.
+    "num_workers": 8,                 # max(1, (os.cpu_count() or 1) - 1) / 2,
+
+    # train_negative_keep_ratio:
+    # Train setindeki tamamen negatif tile'larin ne kadarinin tutulacagi (0-1).
+    # 1.0 = hepsini tut, 0.0 = hepsini at. Pozitif tile'lar bu filtreden etkilenmez.
+    "train_negative_keep_ratio": 0.2,
+
+    # train_negative_max:
+    # Train setinde tutulacak negatif tile sayisina ust sinir.
+    # None ise limit uygulanmaz.
     "train_negative_max": None,
-    "tile_prefix": "",  # Bos ise otomatik: t{tile}_ov{overlap}_b{bands}_{timestamp}
+
+    # tile_prefix:
+    # Tile dosya adlarina eklenecek on ek.
+    # Bos birakilirsa tile_size/overlap/bands/timestamp ile otomatik ad uretilir.
+    "tile_prefix": "",
+
+    # append:
+    # True: mevcut output icine yeni tile ekler (silmeden).
+    # False: once eski tile dosyalarini temizler, sonra yeniden uretir.
+    "append": True,
 }
 # ===============================================
 
@@ -160,6 +222,73 @@ def _validate_tile_generation_params(
 
     if errors:
         raise ValueError("Parametre dogrulama hatalari:\n- " + "\n- ".join(errors))
+
+
+def _sanitize_source_name(name: str) -> str:
+    """Filesystem-safe token for source names."""
+    safe = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in name)
+    safe = safe.strip("_")
+    return safe or "source"
+
+
+def _prepare_output_dirs(
+    output_dir: Path,
+    *,
+    save_format: str,
+    clean_output: bool,
+) -> Tuple[Path, Path, Path, Path]:
+    """
+    Prepare train/val image+mask directories.
+
+    clean_output=True:
+        remove old tile files to avoid stale mixing.
+    clean_output=False:
+        keep old files but forbid mixing .npy and .npz.
+    """
+    train_images_dir = output_dir / "train" / "images"
+    train_masks_dir = output_dir / "train" / "masks"
+    val_images_dir = output_dir / "val" / "images"
+    val_masks_dir = output_dir / "val" / "masks"
+    tile_dirs = [train_images_dir, train_masks_dir, val_images_dir, val_masks_dir]
+
+    for d in tile_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+    if clean_output:
+        removed_count = 0
+        for d in tile_dirs:
+            for pattern in ("*.npy", "*.npz"):
+                for tile_path in d.glob(pattern):
+                    tile_path.unlink()
+                    removed_count += 1
+
+        for stale_artifact in (
+            output_dir / "metadata.json",
+            output_dir / "tile_presence_scores.csv",
+            output_dir / "tile_presence_grid.tif",
+            output_dir / "tile_presence_grid_rgb.tif",
+        ):
+            if stale_artifact.exists():
+                stale_artifact.unlink()
+
+        if removed_count > 0:
+            LOGGER.info("Onceki calismadan %d tile dosyasi temizlendi.", removed_count)
+    else:
+        other_ext = ".npz" if save_format == "npy" else ".npy"
+        mixed_dir_samples: List[str] = []
+        for d in tile_dirs:
+            if any(d.glob(f"*{other_ext}")):
+                mixed_dir_samples.append(str(d))
+
+        if mixed_dir_samples:
+            raise ValueError(
+                "clean_output=False iken farkli formatta eski dosyalar bulundu. "
+                f"Beklenen format: .{save_format}, bulunan eski format: {other_ext}. "
+                "Format karisimi olmamasi icin --append kullanmayin veya dizini temizleyin. "
+                f"Sorunlu dizinler: {mixed_dir_samples}"
+            )
+
+    return train_images_dir, train_masks_dir, val_images_dir, val_masks_dir
 
 
 def _split_windows_for_train_val(
@@ -411,7 +540,8 @@ def _process_single_tile(task: Tuple[int, int, str]) -> dict:
     tile_size = int(ctx["tile_size"])
     window = Window(col_off, row_off, tile_size, tile_size)
 
-    mask = mask_src.read(1, window=window).astype(np.float32)
+    mask_raw = mask_src.read(1, window=window).astype(np.float32)
+    mask = np.where(np.isfinite(mask_raw) & (mask_raw > 0), 1, 0).astype(np.uint8)
 
     def read_band(band_i: int) -> Optional[np.ndarray]:
         if band_i <= 0:
@@ -439,7 +569,7 @@ def _process_single_tile(task: Tuple[int, int, str]) -> dict:
             "col_off": int(col_off),
         }
 
-    positive_pixels = int(np.count_nonzero(mask > 0))
+    positive_pixels = int(np.count_nonzero(mask))
     total_pixels = int(mask.size)
     positive_ratio = (positive_pixels / total_pixels) if total_pixels > 0 else 0.0
 
@@ -547,6 +677,7 @@ def create_training_tiles(
     train_negative_keep_ratio: float = 1.0,
     train_negative_max: Optional[int] = None,
     tile_prefix: str = "",
+    clean_output: bool = True,
 ) -> dict:
     """
     GeoTIFF'ten 12 kanallı eğitim tile'ları oluşturur.
@@ -605,13 +736,11 @@ def create_training_tiles(
     num_workers = int(num_workers)
     
     # Dizin yapısı oluştur
-    train_images_dir = output_dir / "train" / "images"
-    train_masks_dir = output_dir / "train" / "masks"
-    val_images_dir = output_dir / "val" / "images"
-    val_masks_dir = output_dir / "val" / "masks"
-    
-    for d in [train_images_dir, train_masks_dir, val_images_dir, val_masks_dir]:
-        d.mkdir(parents=True, exist_ok=True)
+    train_images_dir, train_masks_dir, val_images_dir, val_masks_dir = _prepare_output_dirs(
+        output_dir,
+        save_format=save_format,
+        clean_output=bool(clean_output),
+    )
     
     band_idx = [int(b) for b in bands.split(",")]
     
@@ -654,6 +783,7 @@ def create_training_tiles(
     LOGGER.info(f"TPI yarıçapları: {tpi_radii}")
     LOGGER.info(f"Paralel worker: {num_workers}")
     LOGGER.info(f"Tile prefix: {tile_prefix}")
+    LOGGER.info(f"Cikti temizleme: {'aktif' if clean_output else 'kapali (append modu)'}")
     LOGGER.info(
         "Train negatif filtre: keep_ratio=%.3f, max=%s",
         float(train_negative_keep_ratio),
@@ -716,6 +846,15 @@ def create_training_tiles(
                 "Mekansal bölme train/val için yeterli tile üretemedi; random bölmeye geri dönüldü."
             )
 
+        if len(train_windows) == 0:
+            raise ValueError(
+                "Train penceresi olusmadi. tile_size/overlap/train_ratio ayarlarini kontrol edin."
+            )
+        if len(val_windows) == 0:
+            raise ValueError(
+                "Val penceresi olusmadi. tile_size/overlap/train_ratio ayarlarini kontrol edin."
+            )
+
         if train_negative_keep_ratio < 1.0 or train_negative_max is not None:
             train_windows, train_filter_stats = _filter_train_negative_windows(
                 train_windows,
@@ -742,6 +881,11 @@ def create_training_tiles(
             [(row_off, col_off, "train") for row_off, col_off in train_windows]
             + [(row_off, col_off, "val") for row_off, col_off in val_windows]
         )
+
+        if not tile_tasks:
+            raise ValueError(
+                "Islenecek tile bulunamadi. max_nodata/min_positive ve split ayarlarini kontrol edin."
+            )
 
         LOGGER.info(
             "Train/Val planı: train=%d, val=%d, sınırda atılan=%d (%s)",
@@ -896,6 +1040,13 @@ def create_training_tiles(
                 )
                 for idx, sample in enumerate(worker_error_samples, start=1):
                     LOGGER.warning("  Ornek %d: %s", idx, sample)
+    if stats["train_tiles"] == 0 or stats["val_tiles"] == 0:
+        raise ValueError(
+            "Uretilen veri train/val dengesini saglamiyor "
+            f"(train={stats['train_tiles']}, val={stats['val_tiles']}). "
+            "max_nodata/min_positive veya split ayarlarini gevsetin."
+        )
+
     if tile_presence_grid is not None and tile_presence_grid.size > 0:
         grid_transform = source_transform * Affine.scale(stride, stride)
         with rasterio.open(
@@ -941,6 +1092,8 @@ def create_training_tiles(
         "bands": bands,
         "tpi_radii": list(tpi_radii),
         "normalize": normalize,
+        "save_format": save_format,
+        "clean_output": bool(clean_output),
         "num_workers": int(num_workers),
         "tile_prefix": tile_prefix,
         "tile_presence_file": str(tile_presence_csv_path),
@@ -1023,6 +1176,9 @@ def create_tiles_from_multiple_sources(
         "positive_tiles": 0,
         "negative_tiles": 0,
     }
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_sources: List[dict] = []
     
     for i, (input_tif, mask_tif) in enumerate(sources):
         LOGGER.info(f"\n{'='*60}")
@@ -1030,13 +1186,25 @@ def create_tiles_from_multiple_sources(
         LOGGER.info(f"{'='*60}")
         
         # Her kaynak için ayrı alt dizin
-        source_output = output_dir / f"source_{i:02d}_{input_tif.stem}"
+        source_name = _sanitize_source_name(input_tif.stem)
+        source_output = output_dir / f"source_{i:02d}_{source_name}"
         
         stats = create_training_tiles(
             input_tif=input_tif,
             mask_tif=mask_tif,
             output_dir=source_output,
             **kwargs,
+        )
+
+        summary_sources.append(
+            {
+                "source_index": int(i),
+                "name": source_name,
+                "input_file": str(input_tif),
+                "mask_file": str(mask_tif),
+                "output_dir": str(source_output),
+                "stats": stats,
+            }
         )
         
         # İstatistikleri birleştir
@@ -1050,6 +1218,15 @@ def create_tiles_from_multiple_sources(
     LOGGER.info(f"Eğitim: {all_stats['train_tiles']}")
     LOGGER.info(f"Doğrulama: {all_stats['val_tiles']}")
     
+    summary = {
+        "created_at": datetime.now().isoformat(),
+        "num_sources": len(summary_sources),
+        "sources": summary_sources,
+        "aggregate_stats": all_stats,
+    }
+    with open(output_dir / "multi_source_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
     return all_stats
 
 
@@ -1069,6 +1246,7 @@ def main():
         config_train_negative_max = int(config_train_negative_max)
     config_num_workers = int(CONFIG.get("num_workers", max(1, (os.cpu_count() or 1) - 1)))
     config_tile_prefix = str(CONFIG.get("tile_prefix", "")).strip()
+    config_append = bool(CONFIG.get("append", False))
 
     parser = argparse.ArgumentParser(
         description="12 kanalli arkeolojik tespit egitim verisi olusturma",
@@ -1187,7 +1365,23 @@ def main():
             "Bos ise otomatik: t{tile}_ov{overlap}_b{bands}_{timestamp}"
         ),
     )
+    parser.add_argument(
+        "--append",
+        dest="append",
+        action="store_true",
+        help=(
+            "Mevcut cikti dizinindeki tile dosyalarini silmeden yeni tile ekle. "
+            "Varsayilan davranis eski tile dosyalarini temizlemektir."
+        ),
+    )
+    parser.add_argument(
+        "--no-append",
+        dest="append",
+        action="store_false",
+        help="Mevcut cikti dizinindeki tile dosyalarini temizleyerek yeniden olustur.",
+    )
     parser.set_defaults(no_normalize=not bool(CONFIG.get("normalize", True)))
+    parser.set_defaults(append=config_append)
 
     args = parser.parse_args()
 
@@ -1236,6 +1430,7 @@ def main():
             train_negative_keep_ratio=args.train_negative_keep_ratio,
             train_negative_max=args.train_negative_max,
             tile_prefix=args.tile_prefix,
+            clean_output=not args.append,
         )
     except Exception as e:
         LOGGER.error(f"Hata: {e}")
