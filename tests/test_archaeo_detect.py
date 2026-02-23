@@ -644,6 +644,48 @@ class TestCandidateLocationTable:
         assert out_path.suffix == ".csv"
         assert out_path.exists()
 
+    def test_export_candidate_table_xlsx_contains_clickable_google_maps_link(self, tmp_path):
+        import archaeo_detect as module
+        from shapely.geometry import Polygon
+
+        if module.Workbook is None:
+            pytest.skip("openpyxl kurulu degil")
+
+        try:
+            from openpyxl import load_workbook
+        except Exception:
+            pytest.skip("openpyxl load_workbook kullanilamadi")
+
+        polygon = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+        records = [
+            {
+                "id": 1,
+                "area_m2": 100.0,
+                "score_mean": 0.9,
+                "geometry": polygon,
+            }
+        ]
+
+        out_base = tmp_path / "candidates_gps"
+        out_path = export_candidate_locations_table(
+            records=records,
+            crs=RasterioCRS.from_epsg(3857),
+            out_base=out_base,
+        )
+
+        assert out_path is not None
+        assert out_path.suffix == ".xlsx"
+        assert out_path.exists()
+
+        workbook = load_workbook(out_path)
+        worksheet = workbook["candidate_locations"]
+        headers = [cell.value for cell in worksheet[1]]
+        maps_col_idx = headers.index("google_maps_url") + 1
+        maps_cell = worksheet.cell(row=2, column=maps_col_idx)
+        assert maps_cell.hyperlink is not None
+        assert str(maps_cell.hyperlink.target).startswith("https://maps.google.com/?q=")
+        workbook.close()
+
 
 # ============================================================================
 # Ana Test Çalıştırıcı

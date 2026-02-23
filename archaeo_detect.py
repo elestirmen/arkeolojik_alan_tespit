@@ -4184,8 +4184,14 @@ def export_candidate_locations_table(
         ws = wb.active
         ws.title = "candidate_locations"
         ws.append(field_order)
-        for row in rows:
+        google_maps_col = field_order.index("google_maps_url") + 1
+        for row_idx, row in enumerate(rows, start=2):
             ws.append([row.get(col) for col in field_order])
+            maps_url = str(row.get("google_maps_url") or "").strip()
+            if maps_url:
+                cell = ws.cell(row=row_idx, column=google_maps_col)
+                cell.hyperlink = maps_url
+                cell.style = "Hyperlink"
         ws.freeze_panes = "A2"
         xlsx_path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(xlsx_path)

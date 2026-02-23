@@ -771,6 +771,11 @@ rgb_only: false               # true yaparsan SVF/Openness/LRM/Slope/nDSM kanall
 # ÖNERİ: Sonuçları GIS'te analiz edecekseniz true yapın
 vectorize: true
 
+# export_candidate_excel: Vektor adaylarini GPS koordinat tablosu olarak disa aktar
+# - true: Her *.gpkg icin aday merkezlerini iceren *_gps.xlsx (veya CSV fallback) uretir
+# - false: GPS/Excel tablo ciktisi uretilmez
+export_candidate_excel: true
+
 # min_area: Minimum poligon alanı (metrekare)
 # - Bu alandan küçük poligonlar çıktıdan filtrelenir
 # - Amaç: Çok küçük, anlamsız tespit bölgelerini temizlemek

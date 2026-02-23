@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from training import BCELoss, validate
+from training import (
+    ArchaeologyDataset,
+    BCELoss,
+    _select_train_indices_by_neg_pos_ratio,
+    validate,
+)
 
 
 class _LogitFromInputModel(nn.Module):
@@ -61,3 +70,78 @@ def test_validate_threshold_sweep_finds_better_threshold() -> None:
     assert sweep is not None
     assert sweep["best_iou"] > 0.99
     assert abs(sweep["best_threshold"] - 0.3) < 1e-6
+
+
+def _write_npz_tile(split_dir: Path, tile_name: str, positive: bool) -> None:
+    image = np.zeros((12, 8, 8), dtype=np.float32)
+    mask = np.zeros((8, 8), dtype=np.uint8)
+    if positive:
+        mask[2:4, 2:4] = 1
+    np.savez_compressed(split_dir / "images" / tile_name, image=image)
+    np.savez_compressed(split_dir / "masks" / tile_name, mask=mask)
+
+
+def _build_npz_train_dataset(tmp_path: Path, positive_count: int, negative_count: int) -> ArchaeologyDataset:
+    split_dir = tmp_path / "train"
+    (split_dir / "images").mkdir(parents=True, exist_ok=True)
+    (split_dir / "masks").mkdir(parents=True, exist_ok=True)
+
+    for idx in range(positive_count):
+        _write_npz_tile(split_dir, f"pos_{idx}.npz", positive=True)
+    for idx in range(negative_count):
+        _write_npz_tile(split_dir, f"neg_{idx}.npz", positive=False)
+
+    return ArchaeologyDataset(split_dir, augment=False, file_format="npz")
+
+
+def test_train_negative_ratio_sampling_keeps_all_positive_and_target_negative(tmp_path: Path) -> None:
+    dataset = _build_npz_train_dataset(tmp_path, positive_count=2, negative_count=5)
+
+    selected_indices, stats = _select_train_indices_by_neg_pos_ratio(
+        train_dataset=dataset,
+        neg_to_pos_ratio=1.0,
+        seed=42,
+    )
+
+    assert stats["positive_samples"] == 2
+    assert stats["negative_samples"] == 5
+    assert stats["target_negative_keep"] == 2
+    assert stats["selected_negative_samples"] == 2
+    assert stats["selected_total_samples"] == 4
+    selected_names = {dataset.image_files[i].name for i in selected_indices}
+    assert {"pos_0.npz", "pos_1.npz"}.issubset(selected_names)
+    assert len([name for name in selected_names if name.startswith("neg_")]) == 2
+
+
+def test_train_negative_ratio_sampling_zero_ratio_keeps_only_positive(tmp_path: Path) -> None:
+    dataset = _build_npz_train_dataset(tmp_path, positive_count=3, negative_count=4)
+
+    selected_indices, stats = _select_train_indices_by_neg_pos_ratio(
+        train_dataset=dataset,
+        neg_to_pos_ratio=0.0,
+        seed=42,
+    )
+
+    assert stats["target_negative_keep"] == 0
+    assert stats["selected_negative_samples"] == 0
+    assert stats["selected_total_samples"] == 3
+    selected_names = {dataset.image_files[i].name for i in selected_indices}
+    assert all(name.startswith("pos_") for name in selected_names)
+
+
+def test_train_negative_ratio_sampling_rejects_invalid_values(tmp_path: Path) -> None:
+    dataset = _build_npz_train_dataset(tmp_path, positive_count=1, negative_count=1)
+
+    with pytest.raises(ValueError, match="train_neg_to_pos_ratio"):
+        _select_train_indices_by_neg_pos_ratio(
+            train_dataset=dataset,
+            neg_to_pos_ratio=-0.1,
+            seed=42,
+        )
+
+    with pytest.raises(ValueError, match="train_neg_sample_seed"):
+        _select_train_indices_by_neg_pos_ratio(
+            train_dataset=dataset,
+            neg_to_pos_ratio=1.0,
+            seed=-1,
+        )

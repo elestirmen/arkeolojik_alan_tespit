@@ -37,13 +37,13 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from tqdm import tqdm
 
 # Segmentation Models PyTorch
@@ -181,7 +181,7 @@ CONFIG: dict[str, object] = {
     #            ve bu orana gore otomatik pos_weight secilir
     # - manual : pos_weight degeri dogrudan kullanilir
     # Not: Yalnizca bce/combined icin etkilidir.
-    "balance_mode": "auto",
+    "balance_mode": None,             #"auto",
 
     # pos_weight:
     # Manual modda BCE pozitif sinif agirligi.
@@ -242,6 +242,17 @@ CONFIG: dict[str, object] = {
     # True ise tum maskeler negatif olsa bile egitim zorla devam eder.
     # Veri hatasini erken yakalamak icin normalde False onerilir.
     "allow_all_negative": False,
+
+    # train_neg_to_pos_ratio:
+    # Train setinde negatif ornekleri pozitiflere gore oransal olarak alt-ornekle.
+    # None: kapali (tum train ornekleri kullanilir)
+    # 1.0: negatif ~= pozitif
+    # 0.5: negatif ~= pozitifin yarisi
+    "train_neg_to_pos_ratio": 1, #None,
+
+    # train_neg_sample_seed:
+    # Oran bazli negatif alt-orneklemede rastgelelik tohumu.
+    "train_neg_sample_seed": 42,
 }
 # ===============================================
 
@@ -556,6 +567,8 @@ class TrainingConfig:
     num_workers: int = 4
     use_amp: bool = True  # Mixed precision
     seed: int = 42
+    train_neg_to_pos_ratio: Optional[float] = None
+    train_neg_sample_seed: int = 42
     
     # Çıktı
     output_dir: Path = field(default_factory=lambda: Path("checkpoints"))
@@ -652,6 +665,67 @@ def _count_positive_mask_pixels(mask_dir: Path, file_format: str) -> Tuple[int, 
         positive_pixels += int(np.count_nonzero(mask > 0))
 
     return total_pixels, positive_pixels
+
+
+def _select_train_indices_by_neg_pos_ratio(
+    train_dataset: ArchaeologyDataset,
+    neg_to_pos_ratio: Optional[float],
+    seed: int,
+) -> Tuple[List[int], Dict[str, int]]:
+    """Train setinde negatif tile'lari pozitiflere gore alt-ornekle."""
+    ratio: Optional[float] = None
+    if neg_to_pos_ratio is not None:
+        ratio = float(neg_to_pos_ratio)
+        if ratio < 0:
+            raise ValueError(
+                f"train_neg_to_pos_ratio None veya >= 0 olmalı, verilen: {neg_to_pos_ratio}"
+            )
+    if int(seed) < 0:
+        raise ValueError(f"train_neg_sample_seed negatif olamaz, verilen: {seed}")
+
+    positive_indices: List[int] = []
+    negative_indices: List[int] = []
+
+    for idx, img_path in enumerate(train_dataset.image_files):
+        mask_path = train_dataset.masks_dir / img_path.name
+        if not mask_path.exists():
+            raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
+        mask = _load_mask_array(mask_path, train_dataset.file_format)
+        if np.any(mask > 0):
+            positive_indices.append(idx)
+        else:
+            negative_indices.append(idx)
+
+    if ratio is None:
+        target_negative_keep = len(negative_indices)
+    else:
+        target_negative_keep = int(round(len(positive_indices) * ratio))
+        target_negative_keep = max(0, min(target_negative_keep, len(negative_indices)))
+
+    if target_negative_keep >= len(negative_indices):
+        selected_negative_indices = list(negative_indices)
+    elif target_negative_keep <= 0:
+        selected_negative_indices = []
+    else:
+        rng = np.random.RandomState(int(seed))
+        selected_pos = rng.choice(
+            len(negative_indices),
+            size=target_negative_keep,
+            replace=False,
+        )
+        selected_negative_indices = sorted(negative_indices[int(i)] for i in selected_pos)
+
+    selected_indices = sorted(positive_indices + selected_negative_indices)
+    stats = {
+        "total_samples": len(train_dataset),
+        "positive_samples": len(positive_indices),
+        "negative_samples": len(negative_indices),
+        "target_negative_keep": int(target_negative_keep),
+        "selected_positive_samples": len(positive_indices),
+        "selected_negative_samples": len(selected_negative_indices),
+        "selected_total_samples": len(selected_indices),
+    }
+    return selected_indices, stats
 
 
 def create_model(config: TrainingConfig) -> nn.Module:
@@ -927,8 +1001,23 @@ def train(config: TrainingConfig) -> Path:
         file_format=file_format,
     )
     
+    train_loader_dataset: Dataset = train_dataset
+    train_sampling_stats: Optional[Dict[str, int]] = None
+    if config.train_neg_to_pos_ratio is not None:
+        selected_indices, train_sampling_stats = _select_train_indices_by_neg_pos_ratio(
+            train_dataset=train_dataset,
+            neg_to_pos_ratio=config.train_neg_to_pos_ratio,
+            seed=config.train_neg_sample_seed,
+        )
+        if len(selected_indices) == 0:
+            raise ValueError(
+                "Train set alt-ornekleme sonrasi bos kaldi. "
+                "--train-neg-to-pos-ratio degerini artirin veya devre disi birakin."
+            )
+        train_loader_dataset = Subset(train_dataset, selected_indices)
+
     train_loader = DataLoader(
-        train_dataset,
+        train_loader_dataset,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
@@ -942,7 +1031,19 @@ def train(config: TrainingConfig) -> Path:
         pin_memory=True,
     )
     
-    LOGGER.info(f"Eğitim: {len(train_dataset)} örnek, Doğrulama: {len(val_dataset)} örnek")
+    if train_sampling_stats is None:
+        LOGGER.info(f"Eğitim: {len(train_dataset)} örnek, Doğrulama: {len(val_dataset)} örnek")
+    else:
+        LOGGER.info(
+            "Eğitim: %d/%d örnek (pozitif=%d, negatif=%d, secilen_negatif=%d, oran=%.3f), Doğrulama: %d örnek",
+            int(train_sampling_stats["selected_total_samples"]),
+            int(train_sampling_stats["total_samples"]),
+            int(train_sampling_stats["positive_samples"]),
+            int(train_sampling_stats["negative_samples"]),
+            int(train_sampling_stats["selected_negative_samples"]),
+            float(config.train_neg_to_pos_ratio),
+            len(val_dataset),
+        )
     
     # Model
     model = create_model(config)
@@ -1005,6 +1106,14 @@ def train(config: TrainingConfig) -> Path:
     LOGGER.info(
         f"Class balance: {config.balance_mode} (pos_weight={config.pos_weight:.4f})"
     )
+    if config.train_neg_to_pos_ratio is None:
+        LOGGER.info("Train negatif alt-ornekleme: kapalÄ±")
+    else:
+        LOGGER.info(
+            "Train negatif alt-ornekleme: neg/pos=%.3f (seed=%d)",
+            float(config.train_neg_to_pos_ratio),
+            int(config.train_neg_sample_seed),
+        )
     LOGGER.info(f"Epochs: {config.epochs}")
     LOGGER.info(f"Batch size: {config.batch_size}")
     LOGGER.info(f"Learning rate: {config.lr}")
@@ -1133,6 +1242,8 @@ def train(config: TrainingConfig) -> Path:
                 "loss_type": config.loss_type,
                 "balance_mode": config.balance_mode,
                 "pos_weight": config.pos_weight,
+                "train_neg_to_pos_ratio": config.train_neg_to_pos_ratio,
+                "train_neg_sample_seed": config.train_neg_sample_seed,
                 "metric_threshold": config.metric_threshold,
                 "val_threshold_sweep": config.val_threshold_sweep,
                 "val_threshold_min": config.val_threshold_min,
@@ -1374,6 +1485,27 @@ def main():
         help="Pozitif etiket içermeyen veri setleriyle eğitime devam et (önerilmez)",
     )
     
+    parser.add_argument(
+        "--train-neg-to-pos-ratio",
+        type=float,
+        default=(
+            None
+            if CONFIG["train_neg_to_pos_ratio"] is None
+            else float(CONFIG["train_neg_to_pos_ratio"])
+        ),
+        help=(
+            "Train setinde negatif tile alt-ornekleme oranı. "
+            "1.0: negatif~=pozitif, 0.5: negatif~=pozitifin yarısı. "
+            "Argüman verilmezse kapalı."
+        ),
+    )
+    parser.add_argument(
+        "--train-neg-sample-seed",
+        type=int,
+        default=int(CONFIG["train_neg_sample_seed"]),
+        help="Train negatif alt-ornekleme rastgelelik tohumu.",
+    )
+
     args = parser.parse_args()
     
     # Veri dizini kontrolü
@@ -1454,6 +1586,14 @@ def main():
         print("HATA: --val-threshold-min/max 0-1 aralığında olmalı.")
         sys.exit(1)
 
+    if args.train_neg_to_pos_ratio is not None and args.train_neg_to_pos_ratio < 0:
+        print("HATA: --train-neg-to-pos-ratio None veya 0'dan büyük/eşit olmalı.")
+        sys.exit(1)
+
+    if args.train_neg_sample_seed < 0:
+        print("HATA: --train-neg-sample-seed negatif olamaz.")
+        sys.exit(1)
+
     resolved_pos_weight = 1.0
     if args.balance_mode == "manual":
         resolved_pos_weight = float(args.pos_weight)
@@ -1506,6 +1646,12 @@ def main():
         num_workers=args.workers,
         use_amp=not args.no_amp,
         seed=args.seed,
+        train_neg_to_pos_ratio=(
+            None
+            if args.train_neg_to_pos_ratio is None
+            else float(args.train_neg_to_pos_ratio)
+        ),
+        train_neg_sample_seed=int(args.train_neg_sample_seed),
         output_dir=Path(args.output),
         save_every_epoch=bool(CONFIG["save_every_epoch"]),
         epoch_dir=str(CONFIG["epoch_dir"]),
