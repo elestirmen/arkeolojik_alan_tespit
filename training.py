@@ -248,7 +248,7 @@ CONFIG: dict[str, object] = {
     # None: kapali (tum train ornekleri kullanilir)
     # 1.0: negatif ~= pozitif
     # 0.5: negatif ~= pozitifin yarisi
-    "train_neg_to_pos_ratio": 1, #None,
+    "train_neg_to_pos_ratio": 2, #None,
 
     # train_neg_sample_seed:
     # Oran bazli negatif alt-orneklemede rastgelelik tohumu.
