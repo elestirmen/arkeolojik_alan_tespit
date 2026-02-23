@@ -14,6 +14,7 @@ from uuid import uuid4
 import numpy as np
 import pytest
 import torch
+from rasterio.crs import CRS as RasterioCRS
 
 # Proje kök dizinini path'e ekle
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,8 +22,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from archaeo_detect import (
     PipelineDefaults,
     build_config_from_args,
+    export_candidate_locations_table,
     percentile_clip,
     compute_ndsm,
+    _build_candidate_location_rows,
     _otsu_threshold_0to1,
     robust_norm,
     robust_norm_fixed,
@@ -588,6 +591,58 @@ class TestConfigOverride:
         assert config.enable_yolo is False
         assert config.cache_derivatives is False
         assert config.yolo_conf == pytest.approx(defaults.yolo_conf)
+
+
+# ============================================================================
+# Candidate Location Table Tests
+# ============================================================================
+
+class TestCandidateLocationTable:
+    def test_build_candidate_rows_converts_to_wgs84(self):
+        from shapely.geometry import Polygon
+
+        polygon = Polygon([(0, 0), (1000, 0), (1000, 1000), (0, 1000)])
+        records = [
+            {
+                "id": 1,
+                "area_m2": 1_000_000.0,
+                "score_mean": 0.85,
+                "geometry": polygon,
+            }
+        ]
+
+        rows = _build_candidate_location_rows(records, RasterioCRS.from_epsg(3857))
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["candidate_id"] == 1
+        assert row["gps_lat"] == pytest.approx(0.00449, abs=0.001)
+        assert row["gps_lon"] == pytest.approx(0.00449, abs=0.001)
+        assert row["google_maps_url"].startswith("https://maps.google.com/?q=")
+
+    def test_export_candidate_table_falls_back_to_csv_without_openpyxl(self, tmp_path, monkeypatch):
+        from shapely.geometry import Polygon
+
+        polygon = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+        records = [
+            {
+                "id": 1,
+                "area_m2": 100.0,
+                "score_mean": 0.9,
+                "geometry": polygon,
+            }
+        ]
+
+        monkeypatch.setattr("archaeo_detect.Workbook", None)
+        out_base = tmp_path / "candidates_gps"
+        out_path = export_candidate_locations_table(
+            records=records,
+            crs=RasterioCRS.from_epsg(3857),
+            out_base=out_base,
+        )
+
+        assert out_path is not None
+        assert out_path.suffix == ".csv"
+        assert out_path.exists()
 
 
 # ============================================================================

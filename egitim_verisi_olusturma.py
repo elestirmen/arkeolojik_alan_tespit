@@ -31,13 +31,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional, Tuple, List
-import json
+from typing import Any, Optional, Tuple, List
 from datetime import datetime
 
 import numpy as np
@@ -76,12 +76,12 @@ CONFIG: dict[str, object] = {
     # input:
     # Cok bantli raster dosyasinin yolu.
     # Beklenen icerik: RGB + DSM + DTM (hangi bant hangi role gidecek, bands ile belirlenir).
-    "input": "on_veri/karlik_dag_rgb_dtm_dsm_5band.tif",
+    "input": "on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif",
 
     # mask:
     # Ground-truth maske dosyasinin yolu.
     # 0 disindaki tum degerler pozitif sinif olarak ele alinir (otomatik 0/1'e cevrilir).
-    "mask": "on_veri/karlik_dag_rgb_ground_truth.tif",
+    "mask": "on_veri/karlik_vadi_rgb_ground_truth.tif",
 
     # output:
     # Cikti kok dizini.
@@ -289,6 +289,160 @@ def _prepare_output_dirs(
             )
 
     return train_images_dir, train_masks_dir, val_images_dir, val_masks_dir
+
+
+def _parse_csv_int_tuple(raw: Any) -> Tuple[int, ...]:
+    """Parse CSV/list-like value into integer tuple."""
+    if raw is None:
+        return tuple()
+    if isinstance(raw, (list, tuple)):
+        return tuple(int(v) for v in raw)
+    text = str(raw).strip()
+    if not text:
+        return tuple()
+    return tuple(int(part.strip()) for part in text.split(",") if part.strip())
+
+
+def _load_first_array_shape(data_dir: Path, *, save_format: str, key: str) -> Optional[Tuple[int, ...]]:
+    """Load shape of first array under data_dir for a given save format."""
+    pattern = f"*.{save_format}"
+    for path in sorted(data_dir.glob(pattern)):
+        if save_format == "npy":
+            arr = np.load(path, mmap_mode="r")
+            return tuple(int(v) for v in arr.shape)
+        with np.load(path) as packed:
+            if key not in packed:
+                raise ValueError(f"Append kontrolu: '{key}' anahtari bulunamadi: {path}")
+            arr = packed[key]
+            return tuple(int(v) for v in arr.shape)
+    return None
+
+
+def _validate_append_compatibility(
+    output_dir: Path,
+    *,
+    tile_size: int,
+    bands: str,
+    tpi_radii: Tuple[int, ...],
+    normalize: bool,
+    save_format: str,
+    expected_channels: int = 12,
+) -> None:
+    """
+    Ensure append mode does not silently mix incompatible tile datasets.
+
+    Checks metadata and existing tile shapes/channels.
+    """
+    output_dir = Path(output_dir)
+    metadata_path = output_dir / "metadata.json"
+    mismatches: List[str] = []
+
+    # 1) Existing tile shape/channel checks (works even if metadata is missing).
+    image_shape: Optional[Tuple[int, ...]] = None
+    mask_shape: Optional[Tuple[int, ...]] = None
+    for split in ("train", "val"):
+        if image_shape is None:
+            image_shape = _load_first_array_shape(
+                output_dir / split / "images",
+                save_format=save_format,
+                key="image",
+            )
+        if mask_shape is None:
+            mask_shape = _load_first_array_shape(
+                output_dir / split / "masks",
+                save_format=save_format,
+                key="mask",
+            )
+
+    if image_shape is not None:
+        if len(image_shape) != 3:
+            mismatches.append(
+                f"mevcut image shape gecersiz ({image_shape}); beklenen (C,H,W)"
+            )
+        else:
+            old_channels, old_h, old_w = image_shape
+            if (old_h, old_w) != (int(tile_size), int(tile_size)):
+                mismatches.append(
+                    f"tile_size uyusmuyor (mevcut: {old_h}x{old_w}, yeni: {tile_size}x{tile_size})"
+                )
+            if int(old_channels) != int(expected_channels):
+                mismatches.append(
+                    f"kanal sayisi uyusmuyor (mevcut: {old_channels}, yeni: {expected_channels})"
+                )
+
+    if mask_shape is not None:
+        if len(mask_shape) != 2:
+            mismatches.append(
+                f"mevcut mask shape gecersiz ({mask_shape}); beklenen (H,W)"
+            )
+        elif mask_shape != (int(tile_size), int(tile_size)):
+            mismatches.append(
+                f"mask tile_size uyusmuyor (mevcut: {mask_shape[0]}x{mask_shape[1]}, yeni: {tile_size}x{tile_size})"
+            )
+
+    # 2) Metadata checks for semantic consistency.
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+        except Exception as exc:
+            raise ValueError(
+                f"Append kontrolu icin metadata okunamadi: {metadata_path} ({exc})"
+            ) from exc
+
+        if not isinstance(metadata, dict):
+            raise ValueError(f"Append kontrolu: metadata dict olmali ({metadata_path})")
+
+        def _check(name: str, old_val: Any, new_val: Any) -> None:
+            if old_val is None:
+                return
+            if old_val != new_val:
+                mismatches.append(
+                    f"{name} uyusmuyor (mevcut: {old_val}, yeni: {new_val})"
+                )
+
+        _check("save_format", metadata.get("save_format"), str(save_format))
+        if metadata.get("tile_size") is not None:
+            _check("tile_size", int(metadata["tile_size"]), int(tile_size))
+        if metadata.get("num_channels") is not None:
+            _check(
+                "num_channels",
+                int(metadata["num_channels"]),
+                int(expected_channels),
+            )
+        if metadata.get("normalize") is not None:
+            _check("normalize", bool(metadata["normalize"]), bool(normalize))
+        if metadata.get("bands") is not None:
+            try:
+                old_bands = _parse_csv_int_tuple(metadata["bands"])
+                new_bands = _parse_csv_int_tuple(bands)
+                _check("bands", old_bands, new_bands)
+            except ValueError:
+                mismatches.append(
+                    f"bands degeri parse edilemedi (mevcut: {metadata.get('bands')}, yeni: {bands})"
+                )
+        if metadata.get("tpi_radii") is not None:
+            try:
+                old_tpi = _parse_csv_int_tuple(metadata["tpi_radii"])
+                new_tpi = tuple(int(r) for r in tpi_radii)
+                _check("tpi_radii", old_tpi, new_tpi)
+            except ValueError:
+                mismatches.append(
+                    f"tpi_radii parse edilemedi (mevcut: {metadata.get('tpi_radii')}, yeni: {tpi_radii})"
+                )
+    elif image_shape is not None or mask_shape is not None:
+        LOGGER.warning(
+            "Append modu: metadata.json bulunamadi, yalnizca tile shape/kanal uyumlulugu kontrol edildi."
+        )
+
+    if mismatches:
+        lines = "\n- ".join(mismatches)
+        raise ValueError(
+            "Append modu uyumsuz veri karisimi olusturur:\n- "
+            + lines
+            + "\nCozum: ayni ayarlarla append edin, farkli ayarlar icin ayri output dizini kullanin "
+            "veya --no-append ile temiz uretim yapin."
+        )
 
 
 def _split_windows_for_train_val(
@@ -734,7 +888,18 @@ def create_training_tiles(
         raise ValueError("tile_prefix '/' veya '\\' iceremez.")
 
     num_workers = int(num_workers)
-    
+
+    if not bool(clean_output):
+        _validate_append_compatibility(
+            output_dir=output_dir,
+            tile_size=int(tile_size),
+            bands=str(bands),
+            tpi_radii=tuple(int(r) for r in tpi_radii),
+            normalize=bool(normalize),
+            save_format=str(save_format),
+            expected_channels=12,
+        )
+
     # Dizin yapısı oluştur
     train_images_dir, train_masks_dir, val_images_dir, val_masks_dir = _prepare_output_dirs(
         output_dir,

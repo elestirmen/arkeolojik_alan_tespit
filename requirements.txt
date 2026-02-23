@@ -30,6 +30,7 @@ rvt>=2.0.0; python_version >= "3.11"
 # YardÄ±mcÄ± kÃ¼tÃ¼phaneler
 tqdm>=4.65.0,<5.0.0
 pyyaml>=6.0,<7.0.0
+openpyxl>=3.1.0,<4.0.0
 
 # YOLO11 desteÄŸi
 ultralytics>=8.1.0,<9.0.0

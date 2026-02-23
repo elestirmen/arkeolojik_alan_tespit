@@ -37,7 +37,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -196,6 +196,19 @@ CONFIG: dict[str, object] = {
     # patience:
     # Erken durdurma sabri (iyilesme olmayan epoch sayisi).
     "patience": 10,
+
+    # metric_threshold:
+    # Egitim/dogrulama metriklerini (IoU/F1/Precision/Recall) hesaplamak icin
+    # kullanilan olasilik esigi.
+    "metric_threshold": 0.5,
+
+    # val_threshold_sweep:
+    # Dogrulamada farkli esikleri tarayip en iyi IoU ve esigi raporlar.
+    # Bu ayar sadece metrik/raporlama icindir; loss'u etkilemez.
+    "val_threshold_sweep": True,
+    "val_threshold_min": 0.1,
+    "val_threshold_max": 0.9,
+    "val_threshold_step": 0.05,
 
     # workers:
     # DataLoader worker sayisi.
@@ -423,20 +436,38 @@ def calculate_metrics(
     threshold: float = 0.5
 ) -> Dict[str, float]:
     """Segmentasyon metriklerini hesaplar."""
-    
-    pred_binary = (torch.sigmoid(pred) > threshold).float()
-    
-    # Flatten
+
+    tp, fp, fn, tn = _compute_confusion_counts(pred, target, threshold)
+    return _metrics_from_confusion_counts(tp=tp, fp=fp, fn=fn, tn=tn)
+
+
+def _compute_confusion_counts(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    threshold: float,
+) -> Tuple[float, float, float, float]:
+    """Logit tahminlerden TP/FP/FN/TN piksel sayÄ±larÄ±nÄ± Ã§Ä±kar."""
+    pred_binary = (torch.sigmoid(pred) > float(threshold)).float()
+    target_binary = (target > 0.5).float()
+
     pred_flat = pred_binary.view(-1)
-    target_flat = target.view(-1)
-    
-    # True/False Positives/Negatives
-    tp = (pred_flat * target_flat).sum().item()
-    fp = (pred_flat * (1 - target_flat)).sum().item()
-    fn = ((1 - pred_flat) * target_flat).sum().item()
-    tn = ((1 - pred_flat) * (1 - target_flat)).sum().item()
-    
-    # Metrikler
+    target_flat = target_binary.view(-1)
+
+    tp = float((pred_flat * target_flat).sum().item())
+    fp = float((pred_flat * (1.0 - target_flat)).sum().item())
+    fn = float(((1.0 - pred_flat) * target_flat).sum().item())
+    tn = float(((1.0 - pred_flat) * (1.0 - target_flat)).sum().item())
+    return tp, fp, fn, tn
+
+
+def _metrics_from_confusion_counts(
+    *,
+    tp: float,
+    fp: float,
+    fn: float,
+    tn: float,
+) -> Dict[str, float]:
+    """TP/FP/FN/TN deÄŸerlerinden metrikleri hesapla."""
     eps = 1e-7
     precision = tp / (tp + fp + eps)
     recall = tp / (tp + fn + eps)
@@ -451,6 +482,31 @@ def calculate_metrics(
         "iou": iou,
         "accuracy": accuracy,
     }
+
+
+def _build_threshold_sweep(
+    *,
+    metric_threshold: float,
+    min_threshold: float,
+    max_threshold: float,
+    step: float,
+    enabled: bool,
+) -> Optional[Tuple[float, ...]]:
+    """Validation iÃ§in kullanÄ±lacak eÅŸik tarama listesini oluÅŸtur."""
+    if not enabled:
+        return None
+    if step <= 0:
+        return (float(metric_threshold),)
+    if min_threshold > max_threshold:
+        min_threshold, max_threshold = max_threshold, min_threshold
+
+    thresholds = np.arange(min_threshold, max_threshold + (0.5 * step), step, dtype=np.float32)
+    values = {
+        round(float(np.clip(th, 0.0, 1.0)), 6)
+        for th in thresholds
+    }
+    values.add(round(float(np.clip(metric_threshold, 0.0, 1.0)), 6))
+    return tuple(sorted(values))
 
 
 # ==============================================================================
@@ -479,7 +535,7 @@ class TrainingConfig:
     
     # Loss
     loss_type: str = "combined"  # "bce", "dice", "combined", "focal"
-    balance_mode: str = "none"  # "none", "auto", "manual"
+    balance_mode: str = "auto"  # "none", "auto", "manual"
     pos_weight: float = 1.0
     
     # Scheduler
@@ -488,6 +544,13 @@ class TrainingConfig:
     # Early stopping
     patience: int = 10
     min_delta: float = 1e-4
+
+    # Metric / validation
+    metric_threshold: float = 0.5
+    val_threshold_sweep: bool = True
+    val_threshold_min: float = 0.1
+    val_threshold_max: float = 0.9
+    val_threshold_step: float = 0.05
     
     # Diğer
     num_workers: int = 4
@@ -680,12 +743,13 @@ def train_one_epoch(
     device: torch.device,
     scaler: Optional[torch.cuda.amp.GradScaler],
     use_amp: bool,
+    metric_threshold: float,
 ) -> Tuple[float, Dict[str, float]]:
     """Bir epoch eğitim yapar."""
     
     model.train()
     total_loss = 0.0
-    all_metrics = {"precision": 0, "recall": 0, "f1": 0, "iou": 0, "accuracy": 0}
+    totals = {"tp": 0.0, "fp": 0.0, "fn": 0.0, "tn": 0.0}
     
     pbar = tqdm(train_loader, desc="Eğitim", leave=False)
     for images, masks in pbar:
@@ -709,17 +773,28 @@ def train_one_epoch(
         
         total_loss += loss.item()
         
-        # Metrikler
+        # Metrikler (global piksel confusion sayıları ile biriktirilir)
         with torch.no_grad():
-            metrics = calculate_metrics(outputs, masks)
-            for k, v in metrics.items():
-                all_metrics[k] += v
+            tp, fp, fn, tn = _compute_confusion_counts(
+                outputs,
+                masks,
+                threshold=metric_threshold,
+            )
+            totals["tp"] += tp
+            totals["fp"] += fp
+            totals["fn"] += fn
+            totals["tn"] += tn
         
         pbar.set_postfix(loss=f"{loss.item():.4f}")
     
     n = len(train_loader)
     avg_loss = total_loss / n
-    avg_metrics = {k: v / n for k, v in all_metrics.items()}
+    avg_metrics = _metrics_from_confusion_counts(
+        tp=totals["tp"],
+        fp=totals["fp"],
+        fn=totals["fn"],
+        tn=totals["tn"],
+    )
     
     return avg_loss, avg_metrics
 
@@ -730,12 +805,20 @@ def validate(
     val_loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-) -> Tuple[float, Dict[str, float]]:
+    metric_threshold: float = 0.5,
+    sweep_thresholds: Optional[Sequence[float]] = None,
+) -> Tuple[float, Dict[str, float], Optional[Dict[str, float]]]:
     """Doğrulama yapar."""
     
     model.eval()
     total_loss = 0.0
-    all_metrics = {"precision": 0, "recall": 0, "f1": 0, "iou": 0, "accuracy": 0}
+    fixed_totals = {"tp": 0.0, "fp": 0.0, "fn": 0.0, "tn": 0.0}
+    sweep_totals: Optional[Dict[float, Dict[str, float]]] = None
+    if sweep_thresholds:
+        sweep_totals = {
+            float(th): {"tp": 0.0, "fp": 0.0, "fn": 0.0, "tn": 0.0}
+            for th in sweep_thresholds
+        }
     
     for images, masks in tqdm(val_loader, desc="Doğrulama", leave=False):
         images = images.to(device)
@@ -745,16 +828,63 @@ def validate(
         loss = criterion(outputs, masks)
         
         total_loss += loss.item()
-        
-        metrics = calculate_metrics(outputs, masks)
-        for k, v in metrics.items():
-            all_metrics[k] += v
+
+        tp, fp, fn, tn = _compute_confusion_counts(
+            outputs,
+            masks,
+            threshold=metric_threshold,
+        )
+        fixed_totals["tp"] += tp
+        fixed_totals["fp"] += fp
+        fixed_totals["fn"] += fn
+        fixed_totals["tn"] += tn
+
+        if sweep_totals is not None:
+            for th, totals in sweep_totals.items():
+                stp, sfp, sfn, stn = _compute_confusion_counts(
+                    outputs,
+                    masks,
+                    threshold=th,
+                )
+                totals["tp"] += stp
+                totals["fp"] += sfp
+                totals["fn"] += sfn
+                totals["tn"] += stn
     
     n = len(val_loader)
     avg_loss = total_loss / n
-    avg_metrics = {k: v / n for k, v in all_metrics.items()}
+    avg_metrics = _metrics_from_confusion_counts(
+        tp=fixed_totals["tp"],
+        fp=fixed_totals["fp"],
+        fn=fixed_totals["fn"],
+        tn=fixed_totals["tn"],
+    )
+
+    sweep_summary: Optional[Dict[str, float]] = None
+    if sweep_totals is not None and len(sweep_totals) > 0:
+        best_threshold = float(metric_threshold)
+        best_metrics = dict(avg_metrics)
+        for th, totals in sweep_totals.items():
+            metrics = _metrics_from_confusion_counts(
+                tp=totals["tp"],
+                fp=totals["fp"],
+                fn=totals["fn"],
+                tn=totals["tn"],
+            )
+            if metrics["iou"] > best_metrics["iou"] + 1e-12:
+                best_metrics = metrics
+                best_threshold = float(th)
+
+        sweep_summary = {
+            "best_threshold": float(best_threshold),
+            "best_iou": float(best_metrics["iou"]),
+            "best_precision": float(best_metrics["precision"]),
+            "best_recall": float(best_metrics["recall"]),
+            "best_f1": float(best_metrics["f1"]),
+            "fixed_iou": float(avg_metrics["iou"]),
+        }
     
-    return avg_loss, avg_metrics
+    return avg_loss, avg_metrics, sweep_summary
 
 
 def train(config: TrainingConfig) -> Path:
@@ -852,8 +982,18 @@ def train(config: TrainingConfig) -> Path:
         "val_loss": [],
         "train_iou": [],
         "val_iou": [],
+        "val_iou_fixed": [],
+        "val_iou_best": [],
+        "val_iou_best_threshold": [],
         "lr": [],
     }
+    sweep_thresholds = _build_threshold_sweep(
+        metric_threshold=config.metric_threshold,
+        min_threshold=config.val_threshold_min,
+        max_threshold=config.val_threshold_max,
+        step=config.val_threshold_step,
+        enabled=config.val_threshold_sweep,
+    )
     
     LOGGER.info("\n" + "=" * 60)
     LOGGER.info("EĞİTİM BAŞLIYOR")
@@ -868,6 +1008,19 @@ def train(config: TrainingConfig) -> Path:
     LOGGER.info(f"Epochs: {config.epochs}")
     LOGGER.info(f"Batch size: {config.batch_size}")
     LOGGER.info(f"Learning rate: {config.lr}")
+    LOGGER.info(
+        "Metric threshold: %.2f | Val sweep: %s",
+        config.metric_threshold,
+        "aktif" if sweep_thresholds else "kapalı",
+    )
+    if sweep_thresholds:
+        LOGGER.info(
+            "Val threshold sweep aralığı: %.2f-%.2f (adım=%.2f, %d eşik)",
+            config.val_threshold_min,
+            config.val_threshold_max,
+            config.val_threshold_step,
+            len(sweep_thresholds),
+        )
     LOGGER.info(f"Mixed precision: {'Aktif' if config.use_amp else 'Kapalı'}")
     LOGGER.info(f"Checkpoint dizini: {config.output_dir.resolve()}")
     if epoch_checkpoint_dir is not None:
@@ -881,11 +1034,31 @@ def train(config: TrainingConfig) -> Path:
         
         # Eğitim
         train_loss, train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, scaler, config.use_amp
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            scaler,
+            config.use_amp,
+            config.metric_threshold,
         )
         
         # Doğrulama
-        val_loss, val_metrics = validate(model, val_loader, criterion, device)
+        val_loss, val_metrics, val_sweep = validate(
+            model,
+            val_loader,
+            criterion,
+            device,
+            metric_threshold=config.metric_threshold,
+            sweep_thresholds=sweep_thresholds,
+        )
+        val_iou_fixed = float(val_metrics["iou"])
+        val_iou_selection = val_iou_fixed
+        val_iou_selection_threshold = float(config.metric_threshold)
+        if val_sweep is not None:
+            val_iou_selection = float(val_sweep["best_iou"])
+            val_iou_selection_threshold = float(val_sweep["best_threshold"])
         
         # Scheduler güncelle
         if scheduler is not None:
@@ -900,22 +1073,36 @@ def train(config: TrainingConfig) -> Path:
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["train_iou"].append(train_metrics["iou"])
-        history["val_iou"].append(val_metrics["iou"])
+        history["val_iou"].append(val_iou_selection)
+        history["val_iou_fixed"].append(val_iou_fixed)
+        history["val_iou_best"].append(val_iou_selection)
+        history["val_iou_best_threshold"].append(val_iou_selection_threshold)
         history["lr"].append(current_lr)
         
         # Log
         epoch_time = time.time() - epoch_start
-        LOGGER.info(
-            f"Epoch {epoch+1:3d}/{config.epochs} | "
-            f"Train Loss: {train_loss:.4f} | "
-            f"Val Loss: {val_loss:.4f} | "
-            f"Val IoU: {val_metrics['iou']:.4f} | "
-            f"LR: {current_lr:.2e} | "
-            f"Süre: {epoch_time:.1f}s"
-        )
+        if val_sweep is None:
+            LOGGER.info(
+                f"Epoch {epoch+1:3d}/{config.epochs} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Val Loss: {val_loss:.4f} | "
+                f"Val IoU@{config.metric_threshold:.2f}: {val_iou_fixed:.4f} | "
+                f"LR: {current_lr:.2e} | "
+                f"Süre: {epoch_time:.1f}s"
+            )
+        else:
+            LOGGER.info(
+                f"Epoch {epoch+1:3d}/{config.epochs} | "
+                f"Train Loss: {train_loss:.4f} | "
+                f"Val Loss: {val_loss:.4f} | "
+                f"Val IoU@{config.metric_threshold:.2f}: {val_iou_fixed:.4f} | "
+                f"Val IoU(best): {val_iou_selection:.4f} @th={val_iou_selection_threshold:.2f} | "
+                f"LR: {current_lr:.2e} | "
+                f"Süre: {epoch_time:.1f}s"
+            )
         
         # En iyi model kontrolü
-        val_iou = float(val_metrics["iou"])
+        val_iou = float(val_iou_selection)
         loss_improved = val_loss < best_val_loss - config.min_delta
         iou_improved = np.isfinite(val_iou) and (val_iou > best_val_iou)
         improved = loss_improved or iou_improved
@@ -932,7 +1119,10 @@ def train(config: TrainingConfig) -> Path:
             "train_loss": train_loss,
             "train_iou": float(train_metrics["iou"]),
             "val_loss": val_loss,
-            "val_iou": val_iou,
+            "val_iou": val_iou_fixed,
+            "val_iou_selection": val_iou_selection,
+            "val_iou_threshold": float(config.metric_threshold),
+            "val_iou_selection_threshold": val_iou_selection_threshold,
             "lr": current_lr,
             "config": {
                 "arch": config.arch,
@@ -943,8 +1133,16 @@ def train(config: TrainingConfig) -> Path:
                 "loss_type": config.loss_type,
                 "balance_mode": config.balance_mode,
                 "pos_weight": config.pos_weight,
+                "metric_threshold": config.metric_threshold,
+                "val_threshold_sweep": config.val_threshold_sweep,
+                "val_threshold_min": config.val_threshold_min,
+                "val_threshold_max": config.val_threshold_max,
+                "val_threshold_step": config.val_threshold_step,
             },
         }
+        if val_sweep is not None:
+            epoch_checkpoint["val_iou_best"] = float(val_sweep["best_iou"])
+            epoch_checkpoint["val_iou_best_threshold"] = float(val_sweep["best_threshold"])
         if epoch_checkpoint_dir is not None:
             epoch_model_path = epoch_checkpoint_dir / f"epoch_{epoch+1:03d}_{model_name}.pth"
             torch.save(epoch_checkpoint, epoch_model_path)
@@ -962,7 +1160,7 @@ def train(config: TrainingConfig) -> Path:
             if iou_improved:
                 best_iou_model_path = config.output_dir / f"best_iou_{model_name}.pth"
                 iou_checkpoint = dict(epoch_checkpoint)
-                iou_checkpoint["best_metric"] = "val_iou"
+                iou_checkpoint["best_metric"] = "val_iou_selection"
                 torch.save(iou_checkpoint, best_iou_model_path)
                 LOGGER.info(f"  → En iyi IoU modeli kaydedildi: {best_iou_model_path.name}")
 
@@ -989,7 +1187,7 @@ def train(config: TrainingConfig) -> Path:
     LOGGER.info("=" * 60)
     LOGGER.info(f"Toplam süre: {total_time/60:.1f} dakika")
     LOGGER.info(f"En iyi Val Loss: {best_val_loss:.4f}")
-    LOGGER.info(f"En iyi Val IoU: {best_val_iou:.4f}")
+    LOGGER.info(f"En iyi Val IoU (selection): {best_val_iou:.4f}")
     LOGGER.info(f"En iyi loss modeli: {best_loss_model_path}")
     LOGGER.info(f"En iyi IoU modeli: {best_iou_model_path}")
     LOGGER.info(f"Varsayılan en iyi model: {best_model_path}")
@@ -1102,6 +1300,41 @@ def main():
             "Aşırı büyük ağırlıkların eğitimi dengesizleştirmesini engeller."
         ),
     )
+    parser.add_argument(
+        "--metric-threshold",
+        type=float,
+        default=float(CONFIG["metric_threshold"]),
+        help=(
+            "Metrik hesaplama eşiği (IoU/F1/Precision/Recall için). "
+            "0.5 klasik seçimdir; model düşük olasılık üretiyorsa daha düşük deneyin."
+        ),
+    )
+    parser.add_argument(
+        "--val-threshold-sweep",
+        action=argparse.BooleanOptionalAction,
+        default=bool(CONFIG["val_threshold_sweep"]),
+        help=(
+            "Doğrulamada birden fazla eşik tarayıp en iyi IoU eşiğini raporla."
+        ),
+    )
+    parser.add_argument(
+        "--val-threshold-min",
+        type=float,
+        default=float(CONFIG["val_threshold_min"]),
+        help="Validation eşik taraması alt sınırı.",
+    )
+    parser.add_argument(
+        "--val-threshold-max",
+        type=float,
+        default=float(CONFIG["val_threshold_max"]),
+        help="Validation eşik taraması üst sınırı.",
+    )
+    parser.add_argument(
+        "--val-threshold-step",
+        type=float,
+        default=float(CONFIG["val_threshold_step"]),
+        help="Validation eşik taraması adımı.",
+    )
     
     # Diğer
     parser.add_argument(
@@ -1209,6 +1442,18 @@ def main():
         print("HATA: --pos-weight 0'dan büyük olmalı.")
         sys.exit(1)
 
+    if not 0.0 < args.metric_threshold < 1.0:
+        print("HATA: --metric-threshold 0 ile 1 arasında olmalı (uçlar hariç).")
+        sys.exit(1)
+
+    if args.val_threshold_step <= 0:
+        print("HATA: --val-threshold-step 0'dan büyük olmalı.")
+        sys.exit(1)
+
+    if args.val_threshold_min < 0 or args.val_threshold_max > 1:
+        print("HATA: --val-threshold-min/max 0-1 aralığında olmalı.")
+        sys.exit(1)
+
     resolved_pos_weight = 1.0
     if args.balance_mode == "manual":
         resolved_pos_weight = float(args.pos_weight)
@@ -1253,6 +1498,11 @@ def main():
         balance_mode=args.balance_mode,
         pos_weight=resolved_pos_weight,
         patience=args.patience,
+        metric_threshold=float(args.metric_threshold),
+        val_threshold_sweep=bool(args.val_threshold_sweep),
+        val_threshold_min=float(args.val_threshold_min),
+        val_threshold_max=float(args.val_threshold_max),
+        val_threshold_step=float(args.val_threshold_step),
         num_workers=args.workers,
         use_amp=not args.no_amp,
         seed=args.seed,

@@ -24,6 +24,7 @@ Varsayımlar:
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import json
 import logging
@@ -83,6 +84,11 @@ try:
     import geopandas as gpd
 except ImportError:
     gpd = None  # geopandas is optional; fallback writer is used otherwise
+
+try:
+    from openpyxl import Workbook
+except ImportError:
+    Workbook = None  # openpyxl is optional; CSV fallback is used for candidate tables
 
 try:
     import fiona
@@ -542,6 +548,12 @@ class PipelineDefaults:
     vectorize: bool = field(
         default=True,
         metadata={"help": "Tespit maskelerini poligonlara dönüştürüp GeoPackage (.gpkg) olarak dışa aktar"},
+    )
+    export_candidate_excel: bool = field(
+        default=True,
+        metadata={
+            "help": "Vektörleşen adayları merkez koordinatları ve GPS (WGS84) kolonlarıyla Excel'e (.xlsx) aktar; openpyxl yoksa CSV yaz."
+        },
     )
     min_area: float = field(
         default=80.0,
@@ -4068,6 +4080,130 @@ def infer_classic_tiled(
     )
 
 
+def _format_crs_label(crs: Optional[RasterioCRS]) -> str:
+    """Return a compact CRS label for tabular exports."""
+    if crs is None:
+        return "unknown"
+    try:
+        epsg = crs.to_epsg()
+        if epsg is not None:
+            return f"EPSG:{epsg}"
+    except Exception:
+        pass
+    try:
+        text = crs.to_string()
+        if text:
+            return str(text)
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _build_candidate_location_rows(
+    records: Sequence[Dict[str, Any]],
+    crs: Optional[RasterioCRS],
+) -> List[Dict[str, Any]]:
+    """Build candidate location rows with native and optional WGS84 coordinates."""
+    if not records:
+        return []
+
+    to_wgs84: Optional[Transformer] = None
+    if crs is not None and CRS is not None and Transformer is not None:
+        try:
+            src_crs = CRS.from_wkt(crs.to_wkt())
+            to_wgs84 = Transformer.from_crs(src_crs, CRS.from_epsg(4326), always_xy=True)
+        except Exception:
+            to_wgs84 = None
+
+    native_crs = _format_crs_label(crs)
+    rows: List[Dict[str, Any]] = []
+    for rec in records:
+        geom = rec.get("geometry")
+        if geom is None or getattr(geom, "is_empty", False):
+            continue
+
+        center = geom.centroid
+        center_x = float(center.x)
+        center_y = float(center.y)
+        gps_lon: Optional[float] = None
+        gps_lat: Optional[float] = None
+        if to_wgs84 is not None:
+            try:
+                lon, lat = to_wgs84.transform(center_x, center_y)
+                gps_lon = float(lon)
+                gps_lat = float(lat)
+            except Exception:
+                gps_lon = None
+                gps_lat = None
+
+        google_maps_url = ""
+        if gps_lat is not None and gps_lon is not None:
+            google_maps_url = f"https://maps.google.com/?q={gps_lat:.8f},{gps_lon:.8f}"
+
+        rows.append(
+            {
+                "candidate_id": int(rec.get("id", len(rows) + 1)),
+                "area_m2": float(rec.get("area_m2", 0.0)),
+                "score_mean": float(rec.get("score_mean", 0.0)),
+                "center_x_native": center_x,
+                "center_y_native": center_y,
+                "native_crs": native_crs,
+                "gps_lon": gps_lon,
+                "gps_lat": gps_lat,
+                "google_maps_url": google_maps_url,
+            }
+        )
+    return rows
+
+
+def export_candidate_locations_table(
+    records: Sequence[Dict[str, Any]],
+    crs: Optional[RasterioCRS],
+    out_base: Path,
+) -> Optional[Path]:
+    """Write candidate locations as xlsx (preferred) or CSV fallback."""
+    rows = _build_candidate_location_rows(records=records, crs=crs)
+    if not rows:
+        return None
+
+    field_order = [
+        "candidate_id",
+        "area_m2",
+        "score_mean",
+        "center_x_native",
+        "center_y_native",
+        "native_crs",
+        "gps_lon",
+        "gps_lat",
+        "google_maps_url",
+    ]
+
+    xlsx_path = out_base.with_suffix(".xlsx")
+    if Workbook is not None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "candidate_locations"
+        ws.append(field_order)
+        for row in rows:
+            ws.append([row.get(col) for col in field_order])
+        ws.freeze_panes = "A2"
+        xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(xlsx_path)
+        return xlsx_path
+
+    csv_path = out_base.with_suffix(".csv")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=field_order)
+        writer.writeheader()
+        writer.writerows(rows)
+    LOGGER.warning(
+        "openpyxl not installed; candidate table written as CSV instead of XLSX: %s",
+        csv_path,
+    )
+    return csv_path
+
+
 def vectorize_predictions(
     mask: np.ndarray,
     prob_map: np.ndarray,
@@ -4078,6 +4214,7 @@ def vectorize_predictions(
     simplify_tol: Optional[float],
     opening_size: int,
     label_connectivity: int,
+    export_candidate_excel: bool = True,
 ) -> Optional[Path]:
     """Convert binary mask into polygons and write to GeoPackage."""
     if fiona is None and gpd is None:
@@ -4132,7 +4269,6 @@ def vectorize_predictions(
     # Bu, shapes() fonksiyonunun çok daha hızlı çalışmasını sağlar
     LOGGER.info("Label'lar yeniden numaralandırılıyor...")
     filtered_labels = np.zeros_like(labels)
-    new_label_mapping = {}  # eski_id -> yeni_id
     new_id = 1
     filtered_pixel_counts = []
     filtered_prob_sums = []
@@ -4140,7 +4276,6 @@ def vectorize_predictions(
     for old_id in range(1, num_features + 1):
         if valid_labels[old_id - 1]:
             filtered_labels[labels == old_id] = new_id
-            new_label_mapping[new_id] = old_id
             filtered_pixel_counts.append(pixel_counts[old_id - 1])
             filtered_prob_sums.append(prob_sums[old_id - 1])
             new_id += 1
@@ -4216,12 +4351,13 @@ def vectorize_predictions(
         LOGGER.info("No polygons passed the min-area filter; skipping vector output.")
         return None
 
-    out_path = out_path.with_suffix(".gpkg")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    base_out_path = out_path.with_suffix("")
+    gpkg_path = base_out_path.with_suffix(".gpkg")
+    gpkg_path.parent.mkdir(parents=True, exist_ok=True)
     LOGGER.info("GeoPackage dosyası yazılıyor (%d poligon)...", len(records))
     if gpd is not None:
         gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
-        gdf.to_file(out_path, driver="GPKG")
+        gdf.to_file(gpkg_path, driver="GPKG")
     else:
         if fiona is None:
             LOGGER.warning("Vector output skipped; fiona not available.")
@@ -4237,9 +4373,9 @@ def vectorize_predictions(
             },
         }
         crs_wkt = crs.to_wkt() if crs else None
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        gpkg_path.parent.mkdir(parents=True, exist_ok=True)
         with fiona.open(
-            out_path,
+            gpkg_path,
             mode="w",
             driver="GPKG",
             schema=schema,
@@ -4256,7 +4392,13 @@ def vectorize_predictions(
                         },
                     }
                 )
-    return out_path
+    if export_candidate_excel:
+        table_base = base_out_path.with_name(f"{base_out_path.name}_gps")
+        table_path = export_candidate_locations_table(records=records, crs=crs, out_base=table_base)
+        if table_path:
+            LOGGER.info("Aday konum tablosu yazıldı: %s", table_path)
+
+    return gpkg_path
 
 
 
@@ -5658,6 +5800,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("vectorize", "(set --no-vectorize to keep only raster outputs)."),
     )
     parser.add_argument(
+        "--export-candidate-excel",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("export_candidate_excel"),
+        dest="export_candidate_excel",
+        help=cli_help(
+            "export_candidate_excel",
+            "(set --no-export-candidate-excel to disable GPS candidate table output).",
+        ),
+    )
+    parser.add_argument(
         "--arch",
         default=default_for("arch"),
         help=cli_help("arch"),
@@ -6274,6 +6426,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     simplify_tol=config.simplify,
                     opening_size=config.vector_opening_size,
                     label_connectivity=config.label_connectivity,
+                    export_candidate_excel=config.export_candidate_excel,
                 )
                 if gpkg:
                     LOGGER.info("[%s] ✓ Vektör dosyası: %s", suffix, gpkg)
@@ -6690,6 +6843,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 simplify_tol=config.simplify,
                 opening_size=config.vector_opening_size,
                 label_connectivity=config.label_connectivity,
+                export_candidate_excel=config.export_candidate_excel,
             )
             if vector_file:
                 LOGGER.info("    ✓ Vektör çıktısı (%s): %s", label, vector_file)

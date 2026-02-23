@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+
+import numpy as np
 import pytest
 
 from egitim_verisi_olusturma import (
     _is_positive_for_balance,
     _probability_to_rgb_grid,
     _split_windows_for_train_val,
+    _validate_append_compatibility,
     _validate_tile_generation_params,
 )
 
@@ -136,3 +140,91 @@ def test_probability_to_rgb_grid_maps_values_and_nodata() -> None:
     assert int(rgb[0, 0, 3]) == 0
     assert int(rgb[1, 0, 3]) == 0
     assert int(rgb[2, 0, 3]) == 0
+
+
+def _write_minimal_npz_dataset(base_dir, tile_size: int = 256, channels: int = 12) -> None:
+    for rel in ("train/images", "train/masks", "val/images", "val/masks"):
+        (base_dir / rel).mkdir(parents=True, exist_ok=True)
+
+    image = np.random.rand(channels, tile_size, tile_size).astype(np.float32)
+    mask = np.zeros((tile_size, tile_size), dtype=np.uint8)
+    mask[0, 0] = 1
+
+    np.savez_compressed(base_dir / "train/images/sample.npz", image=image)
+    np.savez_compressed(base_dir / "train/masks/sample.npz", mask=mask)
+    np.savez_compressed(base_dir / "val/images/sample.npz", image=image)
+    np.savez_compressed(base_dir / "val/masks/sample.npz", mask=mask)
+
+
+def test_validate_append_compatibility_rejects_tile_size_mismatch(tmp_path) -> None:
+    _write_minimal_npz_dataset(tmp_path, tile_size=256, channels=12)
+
+    metadata = {
+        "tile_size": 256,
+        "bands": "1,2,3,4,5",
+        "tpi_radii": [5, 15, 30],
+        "normalize": True,
+        "save_format": "npz",
+        "num_channels": 12,
+    }
+    with open(tmp_path / "metadata.json", "w", encoding="utf-8") as f:
+        json.dump(metadata, f)
+
+    with pytest.raises(ValueError, match="tile_size uyusmuyor"):
+        _validate_append_compatibility(
+            output_dir=tmp_path,
+            tile_size=512,
+            bands="1,2,3,4,5",
+            tpi_radii=(5, 15, 30),
+            normalize=True,
+            save_format="npz",
+        )
+
+
+def test_validate_append_compatibility_rejects_normalize_mismatch(tmp_path) -> None:
+    _write_minimal_npz_dataset(tmp_path, tile_size=256, channels=12)
+
+    metadata = {
+        "tile_size": 256,
+        "bands": "1,2,3,4,5",
+        "tpi_radii": [5, 15, 30],
+        "normalize": True,
+        "save_format": "npz",
+        "num_channels": 12,
+    }
+    with open(tmp_path / "metadata.json", "w", encoding="utf-8") as f:
+        json.dump(metadata, f)
+
+    with pytest.raises(ValueError, match="normalize uyusmuyor"):
+        _validate_append_compatibility(
+            output_dir=tmp_path,
+            tile_size=256,
+            bands="1,2,3,4,5",
+            tpi_radii=(5, 15, 30),
+            normalize=False,
+            save_format="npz",
+        )
+
+
+def test_validate_append_compatibility_accepts_matching_settings(tmp_path) -> None:
+    _write_minimal_npz_dataset(tmp_path, tile_size=256, channels=12)
+
+    metadata = {
+        "tile_size": 256,
+        "bands": "1,2,3,4,5",
+        "tpi_radii": [5, 15, 30],
+        "normalize": True,
+        "save_format": "npz",
+        "num_channels": 12,
+    }
+    with open(tmp_path / "metadata.json", "w", encoding="utf-8") as f:
+        json.dump(metadata, f)
+
+    _validate_append_compatibility(
+        output_dir=tmp_path,
+        tile_size=256,
+        bands="1,2,3,4,5",
+        tpi_radii=(5, 15, 30),
+        normalize=True,
+        save_format="npz",
+    )
