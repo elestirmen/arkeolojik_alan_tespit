@@ -165,7 +165,7 @@ encoders: "resnet34,resnet50,efficientnet-b3,DenseNet121"
 # - null ise: ImageNet ağırlıkları kullanılır (zero-shot)
 # - Örnek: "models/unet_resnet34_5ep.pth"
 # NOT: Bu parametre yalnızca tek encoder modunda (encoders: "none") kullanılır
-weights: "checkpoints/epochs/epoch_011_Unet_resnet50_12ch_attention.pth"
+weights: "checkpoints/epochs/epoch_010_Unet_resnet50_12ch_attention.pth"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir

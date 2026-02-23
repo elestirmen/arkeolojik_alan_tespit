@@ -253,6 +253,18 @@ CONFIG: dict[str, object] = {
     # train_neg_sample_seed:
     # Oran bazli negatif alt-orneklemede rastgelelik tohumu.
     "train_neg_sample_seed": 42,
+
+    # val_keep_ratio:
+    # Val hedef boyutu train-secilen ornek sayisina gore hesaplanir:
+    # hedef_val ~= round(train_secilen * val_keep_ratio)
+    # 1.0: val hedefi train-secilen kadar
+    # 0.5: val hedefi train-secilenin yarisi
+    # Not: hedef, val toplamindan buyuk olamaz.c
+    "val_keep_ratio": 0.5,
+
+    # val_sample_seed:
+    # Val alt-ornekleme rastgelelik tohumu.
+    "val_sample_seed": 42,
 }
 # ===============================================
 
@@ -530,7 +542,6 @@ class TrainingConfig:
     
     # Veri
     data_dir: Path = field(default_factory=lambda: Path("training_data"))
-    
     # Model
     arch: str = "Unet"
     encoder: str = "resnet34"
@@ -569,6 +580,8 @@ class TrainingConfig:
     seed: int = 42
     train_neg_to_pos_ratio: Optional[float] = None
     train_neg_sample_seed: int = 42
+    val_keep_ratio: float = 1.0
+    val_sample_seed: int = 42
     
     # Çıktı
     output_dir: Path = field(default_factory=lambda: Path("checkpoints"))
@@ -726,6 +739,59 @@ def _select_train_indices_by_neg_pos_ratio(
         "selected_total_samples": len(selected_indices),
     }
     return selected_indices, stats
+
+
+def _select_indices_by_keep_ratio(
+    total_samples: int,
+    keep_ratio: float,
+    seed: int,
+) -> Tuple[List[int], Dict[str, int]]:
+    """Toplam orneklerden belirtilen oranda alt-ornek sec."""
+    if total_samples <= 0:
+        raise ValueError(f"total_samples pozitif olmalı, verilen: {total_samples}")
+
+    ratio = float(keep_ratio)
+    if not 0.0 < ratio <= 1.0:
+        raise ValueError(f"keep_ratio 0-1 aralığında olmalı (0 hariç), verilen: {keep_ratio}")
+    if int(seed) < 0:
+        raise ValueError(f"sample_seed negatif olamaz, verilen: {seed}")
+
+    if ratio >= 1.0:
+        selected_indices = list(range(total_samples))
+    else:
+        target_keep = int(round(total_samples * ratio))
+        target_keep = max(1, min(total_samples, target_keep))
+        rng = np.random.RandomState(int(seed))
+        selected = rng.choice(total_samples, size=target_keep, replace=False)
+        selected_indices = sorted(int(i) for i in selected)
+
+    stats = {
+        "total_samples": int(total_samples),
+        "selected_total_samples": int(len(selected_indices)),
+    }
+    return selected_indices, stats
+
+
+def _compute_val_target_samples(
+    train_selected_samples: int,
+    val_total_samples: int,
+    val_keep_ratio: float,
+) -> int:
+    """Val hedef ornek sayisini train-secilen ornek sayisina gore hesapla."""
+    if train_selected_samples <= 0:
+        raise ValueError(
+            f"train_selected_samples pozitif olmalı, verilen: {train_selected_samples}"
+        )
+    if val_total_samples <= 0:
+        raise ValueError(f"val_total_samples pozitif olmalı, verilen: {val_total_samples}")
+    if not 0.0 < float(val_keep_ratio) <= 1.0:
+        raise ValueError(
+            f"val_keep_ratio 0-1 aralığında olmalı (0 hariç), verilen: {val_keep_ratio}"
+        )
+
+    target = int(round(int(train_selected_samples) * float(val_keep_ratio)))
+    target = max(1, min(int(val_total_samples), int(target)))
+    return int(target)
 
 
 def create_model(config: TrainingConfig) -> nn.Module:
@@ -972,6 +1038,13 @@ def train(config: TrainingConfig) -> Path:
     # Seed ayarla
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
+
+    if not 0.0 < float(config.val_keep_ratio) <= 1.0:
+        raise ValueError(
+            f"val_keep_ratio 0-1 aralığında olmalı (0 hariç), verilen: {config.val_keep_ratio}"
+        )
+    if int(config.val_sample_seed) < 0:
+        raise ValueError(f"val_sample_seed negatif olamaz, verilen: {config.val_sample_seed}")
     
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1016,6 +1089,25 @@ def train(config: TrainingConfig) -> Path:
             )
         train_loader_dataset = Subset(train_dataset, selected_indices)
 
+    val_loader_dataset: Dataset = val_dataset
+    val_sampling_stats: Optional[Dict[str, int]] = None
+    train_selected_count = len(train_loader_dataset)
+    val_target_samples = _compute_val_target_samples(
+        train_selected_samples=train_selected_count,
+        val_total_samples=len(val_dataset),
+        val_keep_ratio=config.val_keep_ratio,
+    )
+    if val_target_samples < len(val_dataset):
+        val_keep_ratio_on_val = float(val_target_samples) / float(len(val_dataset))
+        val_indices, val_sampling_stats = _select_indices_by_keep_ratio(
+            total_samples=len(val_dataset),
+            keep_ratio=val_keep_ratio_on_val,
+            seed=config.val_sample_seed,
+        )
+        val_sampling_stats["target_samples"] = int(val_target_samples)
+        val_sampling_stats["reference_train_samples"] = int(train_selected_count)
+        val_loader_dataset = Subset(val_dataset, val_indices)
+
     train_loader = DataLoader(
         train_loader_dataset,
         batch_size=config.batch_size,
@@ -1024,27 +1116,51 @@ def train(config: TrainingConfig) -> Path:
         pin_memory=True,
     )
     val_loader = DataLoader(
-        val_dataset,
+        val_loader_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
         pin_memory=True,
     )
-    
-    if train_sampling_stats is None:
-        LOGGER.info(f"Eğitim: {len(train_dataset)} örnek, Doğrulama: {len(val_dataset)} örnek")
+    if train_sampling_stats is None and val_sampling_stats is None:
+        LOGGER.info(f"E?itim: {len(train_dataset)} ?rnek, Do?rulama: {len(val_dataset)} ?rnek")
     else:
+        train_count = (
+            int(train_sampling_stats["selected_total_samples"])
+            if train_sampling_stats is not None
+            else len(train_dataset)
+        )
+        val_count = (
+            int(val_sampling_stats["selected_total_samples"])
+            if val_sampling_stats is not None
+            else len(val_dataset)
+        )
         LOGGER.info(
-            "Eğitim: %d/%d örnek (pozitif=%d, negatif=%d, secilen_negatif=%d, oran=%.3f), Doğrulama: %d örnek",
-            int(train_sampling_stats["selected_total_samples"]),
-            int(train_sampling_stats["total_samples"]),
-            int(train_sampling_stats["positive_samples"]),
-            int(train_sampling_stats["negative_samples"]),
-            int(train_sampling_stats["selected_negative_samples"]),
-            float(config.train_neg_to_pos_ratio),
+            "E?itim: %d/%d ?rnek | Do?rulama: %d/%d ?rnek",
+            train_count,
+            len(train_dataset),
+            val_count,
             len(val_dataset),
         )
-    
+        if train_sampling_stats is not None:
+            LOGGER.info(
+                "  Train alt-ornekleme -> pozitif=%d, negatif=%d, secilen_negatif=%d, oran=%.3f",
+                int(train_sampling_stats["positive_samples"]),
+                int(train_sampling_stats["negative_samples"]),
+                int(train_sampling_stats["selected_negative_samples"]),
+                float(config.train_neg_to_pos_ratio),
+            )
+        if val_sampling_stats is not None:
+            LOGGER.info(
+                "  Val alt-ornekleme -> secilen=%d/%d, hedef=%d (train_ref=%d, oran=%.3f, seed=%d)",
+                int(val_sampling_stats["selected_total_samples"]),
+                len(val_dataset),
+                int(val_sampling_stats.get("target_samples", 0)),
+                int(val_sampling_stats.get("reference_train_samples", train_selected_count)),
+                float(config.val_keep_ratio),
+                int(config.val_sample_seed),
+            )
+
     # Model
     model = create_model(config)
     model = model.to(device)
@@ -1114,6 +1230,11 @@ def train(config: TrainingConfig) -> Path:
             float(config.train_neg_to_pos_ratio),
             int(config.train_neg_sample_seed),
         )
+    LOGGER.info(
+        "Val alt-ornekleme: hedef=round(train_secilen*%.3f), max=val_toplam (seed=%d)",
+        float(config.val_keep_ratio),
+        int(config.val_sample_seed),
+    )
     LOGGER.info(f"Epochs: {config.epochs}")
     LOGGER.info(f"Batch size: {config.batch_size}")
     LOGGER.info(f"Learning rate: {config.lr}")
@@ -1244,6 +1365,8 @@ def train(config: TrainingConfig) -> Path:
                 "pos_weight": config.pos_weight,
                 "train_neg_to_pos_ratio": config.train_neg_to_pos_ratio,
                 "train_neg_sample_seed": config.train_neg_sample_seed,
+                "val_keep_ratio": config.val_keep_ratio,
+                "val_sample_seed": config.val_sample_seed,
                 "metric_threshold": config.metric_threshold,
                 "val_threshold_sweep": config.val_threshold_sweep,
                 "val_threshold_min": config.val_threshold_min,
@@ -1505,6 +1628,18 @@ def main():
         default=int(CONFIG["train_neg_sample_seed"]),
         help="Train negatif alt-ornekleme rastgelelik tohumu.",
     )
+    parser.add_argument(
+        "--val-keep-ratio",
+        type=float,
+        default=float(CONFIG["val_keep_ratio"]),
+        help="Val hedef oranı (train-secilene gore). 0.5 = val hedefi train-secilenin yarısı.",
+    )
+    parser.add_argument(
+        "--val-sample-seed",
+        type=int,
+        default=int(CONFIG["val_sample_seed"]),
+        help="Val alt-ornekleme rastgelelik tohumu.",
+    )
 
     args = parser.parse_args()
     
@@ -1594,6 +1729,14 @@ def main():
         print("HATA: --train-neg-sample-seed negatif olamaz.")
         sys.exit(1)
 
+    if not 0.0 < args.val_keep_ratio <= 1.0:
+        print("HATA: --val-keep-ratio 0-1 aralığında olmalı (0 hariç).")
+        sys.exit(1)
+
+    if args.val_sample_seed < 0:
+        print("HATA: --val-sample-seed negatif olamaz.")
+        sys.exit(1)
+
     resolved_pos_weight = 1.0
     if args.balance_mode == "manual":
         resolved_pos_weight = float(args.pos_weight)
@@ -1652,6 +1795,8 @@ def main():
             else float(args.train_neg_to_pos_ratio)
         ),
         train_neg_sample_seed=int(args.train_neg_sample_seed),
+        val_keep_ratio=float(args.val_keep_ratio),
+        val_sample_seed=int(args.val_sample_seed),
         output_dir=Path(args.output),
         save_every_epoch=bool(CONFIG["save_every_epoch"]),
         epoch_dir=str(CONFIG["epoch_dir"]),

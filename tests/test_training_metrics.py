@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from training import (
     ArchaeologyDataset,
     BCELoss,
+    _compute_val_target_samples,
+    _select_indices_by_keep_ratio,
     _select_train_indices_by_neg_pos_ratio,
     validate,
 )
@@ -144,4 +146,73 @@ def test_train_negative_ratio_sampling_rejects_invalid_values(tmp_path: Path) ->
             train_dataset=dataset,
             neg_to_pos_ratio=1.0,
             seed=-1,
+        )
+
+
+def test_select_indices_by_keep_ratio_half() -> None:
+    selected_indices, stats = _select_indices_by_keep_ratio(
+        total_samples=10,
+        keep_ratio=0.5,
+        seed=42,
+    )
+    assert len(selected_indices) == 5
+    assert stats["selected_total_samples"] == 5
+    assert stats["total_samples"] == 10
+
+
+def test_select_indices_by_keep_ratio_keeps_at_least_one() -> None:
+    selected_indices, stats = _select_indices_by_keep_ratio(
+        total_samples=3,
+        keep_ratio=0.1,
+        seed=42,
+    )
+    assert len(selected_indices) == 1
+    assert stats["selected_total_samples"] == 1
+
+
+def test_select_indices_by_keep_ratio_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError, match="keep_ratio"):
+        _select_indices_by_keep_ratio(
+            total_samples=10,
+            keep_ratio=0.0,
+            seed=42,
+        )
+    with pytest.raises(ValueError, match="sample_seed"):
+        _select_indices_by_keep_ratio(
+            total_samples=10,
+            keep_ratio=0.5,
+            seed=-1,
+        )
+
+
+def test_compute_val_target_samples_uses_train_reference() -> None:
+    target = _compute_val_target_samples(
+        train_selected_samples=300,
+        val_total_samples=1000,
+        val_keep_ratio=0.5,
+    )
+    assert target == 150
+
+
+def test_compute_val_target_samples_clips_to_val_total() -> None:
+    target = _compute_val_target_samples(
+        train_selected_samples=5000,
+        val_total_samples=1200,
+        val_keep_ratio=1.0,
+    )
+    assert target == 1200
+
+
+def test_compute_val_target_samples_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError, match="train_selected_samples"):
+        _compute_val_target_samples(
+            train_selected_samples=0,
+            val_total_samples=100,
+            val_keep_ratio=0.5,
+        )
+    with pytest.raises(ValueError, match="val_keep_ratio"):
+        _compute_val_target_samples(
+            train_selected_samples=100,
+            val_total_samples=100,
+            val_keep_ratio=0.0,
         )
