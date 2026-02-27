@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.enums import ColorInterp
 from rasterio.transform import from_origin
 
 from veri_birlestir_rgb_dsm_dtm import _compose_rgb_dtm_dsm_5band
@@ -70,3 +71,10 @@ def test_compose_outputs_dsm_on_band4_and_dtm_on_band5(tmp_path: Path) -> None:
         assert np.allclose(src.read(3), 30)
         assert np.allclose(src.read(4), 222)
         assert np.allclose(src.read(5), 111)
+        assert src.colorinterp == (
+            ColorInterp.red,
+            ColorInterp.green,
+            ColorInterp.blue,
+            ColorInterp.undefined,
+            ColorInterp.undefined,
+        )

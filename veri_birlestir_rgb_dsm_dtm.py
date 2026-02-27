@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import numpy as np
 import rasterio
+from rasterio.enums import ColorInterp
 
 try:
     from tqdm import tqdm
@@ -187,12 +188,21 @@ def _compose_rgb_dtm_dsm_5band(
                 "blockxsize": block_size,
                 "blockysize": block_size,
                 "interleave": "band",
+                "photometric": "RGB",
                 "BIGTIFF": "IF_SAFER",
             }
             if compression_norm != "NONE":
                 profile["predictor"] = 3
 
             with rasterio.open(temp_output_path, "w", **profile) as dst:
+                # First 3 bands are true RGB; elevation bands are non-color extras.
+                dst.colorinterp = (
+                    ColorInterp.red,
+                    ColorInterp.green,
+                    ColorInterp.blue,
+                    ColorInterp.undefined,
+                    ColorInterp.undefined,
+                )
                 block_rows, block_cols = dst.block_shapes[0]
                 total_blocks = math.ceil(dst.height / block_rows) * math.ceil(dst.width / block_cols)
                 pbar = _open_progress(
