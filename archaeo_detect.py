@@ -24,7 +24,6 @@ Varsayımlar:
 from __future__ import annotations
 
 import argparse
-import csv
 import gc
 import json
 import logging
@@ -32,17 +31,20 @@ import math
 import shutil
 import sys
 import uuid
+import zipfile
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence, TextIO, Tuple, TypeVar
+from xml.sax.saxutils import escape as xml_escape
 
 import numpy as np
 import rasterio
 from rasterio.features import shapes
 from rasterio.crs import CRS as RasterioCRS
 from rasterio.transform import Affine
+from rasterio.warp import transform as rasterio_transform
 from rasterio.windows import Window
 from scipy import ndimage
 from scipy.ndimage import (
@@ -88,7 +90,7 @@ except ImportError:
 try:
     from openpyxl import Workbook
 except ImportError:
-    Workbook = None  # openpyxl is optional; CSV fallback is used for candidate tables
+    Workbook = None  # openpyxl is optional; a built-in XLSX writer is used as fallback
 
 try:
     import fiona
@@ -552,7 +554,7 @@ class PipelineDefaults:
     export_candidate_excel: bool = field(
         default=True,
         metadata={
-            "help": "Vektörleşen adayları merkez koordinatları ve GPS (WGS84) kolonlarıyla Excel'e (.xlsx) aktar; openpyxl yoksa CSV yaz."
+            "help": "Vektörleşen adayları merkez koordinatları ve GPS (WGS84) kolonlarıyla Excel'e (.xlsx) aktar; openpyxl yoksa yerleşik XLSX yazıcı kullan."
         },
     )
     min_area: float = field(
@@ -4099,6 +4101,206 @@ def _format_crs_label(crs: Optional[RasterioCRS]) -> str:
     return "unknown"
 
 
+def _can_vectorize_predictions() -> Tuple[bool, Optional[str]]:
+    """Return whether polygon vectorization dependencies are available."""
+    if fiona is None and gpd is None:
+        return False, "geopandas veya fiona kurulu degil"
+    if mapping is None or shape is None or shapely_transform is None:
+        return False, "shapely kurulu degil"
+    if CRS is None or Transformer is None:
+        return False, "pyproj kurulu degil"
+    return True, None
+
+
+def _transform_points_to_wgs84(
+    xs: Sequence[float],
+    ys: Sequence[float],
+    crs: Optional[RasterioCRS],
+) -> Tuple[List[Optional[float]], List[Optional[float]]]:
+    """Best-effort transform of native coordinates to WGS84 lon/lat."""
+    if not xs or not ys or crs is None:
+        return [None] * len(xs), [None] * len(ys)
+
+    try:
+        lon_vals, lat_vals = rasterio_transform(crs, "EPSG:4326", list(xs), list(ys))
+    except Exception:
+        return [None] * len(xs), [None] * len(ys)
+
+    lons: List[Optional[float]] = []
+    lats: List[Optional[float]] = []
+    for lon, lat in zip(lon_vals, lat_vals):
+        try:
+            lons.append(float(lon))
+            lats.append(float(lat))
+        except Exception:
+            lons.append(None)
+            lats.append(None)
+    return lons, lats
+
+
+def _xlsx_column_name(index: int) -> str:
+    """Convert 1-based column index to Excel column name."""
+    if index <= 0:
+        raise ValueError("Excel column index must be positive.")
+    letters: List[str] = []
+    while index > 0:
+        index, rem = divmod(index - 1, 26)
+        letters.append(chr(ord("A") + rem))
+    return "".join(reversed(letters))
+
+
+def _build_inline_xlsx_sheet_xml(
+    *,
+    rows: Sequence[Sequence[Any]],
+    sheet_name: str,
+) -> str:
+    """Build a minimal worksheet XML using inline strings/numbers."""
+    if not rows:
+        rows = [()]
+
+    max_cols = max(len(row) for row in rows)
+    max_cols = max(1, max_cols)
+    last_ref = f"{_xlsx_column_name(max_cols)}{max(1, len(rows))}"
+
+    row_xml: List[str] = []
+    for row_idx, row in enumerate(rows, start=1):
+        cell_xml: List[str] = []
+        for col_idx, value in enumerate(row, start=1):
+            cell_ref = f"{_xlsx_column_name(col_idx)}{row_idx}"
+            if value is None or value == "":
+                cell_xml.append(f'<c r="{cell_ref}" t="inlineStr"><is><t></t></is></c>')
+                continue
+            if isinstance(value, (int, float, np.integer, np.floating)) and np.isfinite(value):
+                cell_xml.append(f'<c r="{cell_ref}"><v>{value}</v></c>')
+                continue
+            text = xml_escape(str(value))
+            cell_xml.append(
+                f'<c r="{cell_ref}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
+            )
+        row_xml.append(f'<row r="{row_idx}">{"".join(cell_xml)}</row>')
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<dimension ref="A1:{last_ref}"/>'
+        '<sheetViews><sheetView workbookViewId="0">'
+        '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+        "</sheetView></sheetViews>"
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        f'<sheetData>{"".join(row_xml)}</sheetData>'
+        "</worksheet>"
+    )
+
+
+def _write_builtin_xlsx(
+    *,
+    rows: Sequence[Dict[str, Any]],
+    field_order: Sequence[str],
+    xlsx_path: Path,
+) -> Path:
+    """Write a minimal valid .xlsx file without external Excel libraries."""
+    sheet_rows: List[List[Any]] = [list(field_order)]
+    for row in rows:
+        sheet_rows.append([row.get(col) for col in field_order])
+
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="candidate_locations" sheetId="1" r:id="rId1"/></sheets>'
+        "</workbook>"
+    )
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        "</Relationships>"
+    )
+    package_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="xl/workbook.xml"/>'
+        "</Relationships>"
+    )
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        "</Types>"
+    )
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font></fonts>'
+        '<fills count="2"><fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill></fills>'
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        "</styleSheet>"
+    )
+    sheet_xml = _build_inline_xlsx_sheet_xml(rows=sheet_rows, sheet_name="candidate_locations")
+
+    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(xlsx_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types_xml)
+        zf.writestr("_rels/.rels", package_rels_xml)
+        zf.writestr("xl/workbook.xml", workbook_xml)
+        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        zf.writestr("xl/styles.xml", styles_xml)
+        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    return xlsx_path
+
+
+def _write_candidate_location_rows_xlsx(
+    *,
+    rows: Sequence[Dict[str, Any]],
+    field_order: Sequence[str],
+    out_base: Path,
+) -> Optional[Path]:
+    """Write candidate rows to XLSX, using built-in fallback if openpyxl is missing."""
+    xlsx_path = out_base.with_suffix(".xlsx")
+    if Workbook is not None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "candidate_locations"
+        ws.append(list(field_order))
+        if rows:
+            google_maps_col = list(field_order).index("google_maps_url") + 1
+            for row_idx, row in enumerate(rows, start=2):
+                ws.append([row.get(col) for col in field_order])
+                maps_url = str(row.get("google_maps_url") or "").strip()
+                if maps_url:
+                    cell = ws.cell(row=row_idx, column=google_maps_col)
+                    cell.hyperlink = maps_url
+                    cell.style = "Hyperlink"
+        ws.freeze_panes = "A2"
+        xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(xlsx_path)
+        return xlsx_path
+
+    _warn_once(
+        "builtin_xlsx_writer",
+        "openpyxl kurulu degil; aday tablosu yerlesik XLSX yazicisi ile olusturulacak.",
+    )
+    return _write_builtin_xlsx(rows=rows, field_order=field_order, xlsx_path=xlsx_path)
+
+
 def _build_candidate_location_rows(
     records: Sequence[Dict[str, Any]],
     crs: Optional[RasterioCRS],
@@ -4107,34 +4309,32 @@ def _build_candidate_location_rows(
     if not records:
         return []
 
-    to_wgs84: Optional[Transformer] = None
-    if crs is not None and CRS is not None and Transformer is not None:
-        try:
-            src_crs = CRS.from_wkt(crs.to_wkt())
-            to_wgs84 = Transformer.from_crs(src_crs, CRS.from_epsg(4326), always_xy=True)
-        except Exception:
-            to_wgs84 = None
-
     native_crs = _format_crs_label(crs)
-    rows: List[Dict[str, Any]] = []
+    centers_x: List[float] = []
+    centers_y: List[float] = []
     for rec in records:
         geom = rec.get("geometry")
         if geom is None or getattr(geom, "is_empty", False):
             continue
 
         center = geom.centroid
-        center_x = float(center.x)
-        center_y = float(center.y)
-        gps_lon: Optional[float] = None
-        gps_lat: Optional[float] = None
-        if to_wgs84 is not None:
-            try:
-                lon, lat = to_wgs84.transform(center_x, center_y)
-                gps_lon = float(lon)
-                gps_lat = float(lat)
-            except Exception:
-                gps_lon = None
-                gps_lat = None
+        centers_x.append(float(center.x))
+        centers_y.append(float(center.y))
+
+    gps_lons, gps_lats = _transform_points_to_wgs84(centers_x, centers_y, crs)
+
+    rows: List[Dict[str, Any]] = []
+    center_idx = 0
+    for rec in records:
+        geom = rec.get("geometry")
+        if geom is None or getattr(geom, "is_empty", False):
+            continue
+
+        center_x = centers_x[center_idx]
+        center_y = centers_y[center_idx]
+        gps_lon = gps_lons[center_idx]
+        gps_lat = gps_lats[center_idx]
+        center_idx += 1
 
         google_maps_url = ""
         if gps_lat is not None and gps_lon is not None:
@@ -4161,10 +4361,8 @@ def export_candidate_locations_table(
     crs: Optional[RasterioCRS],
     out_base: Path,
 ) -> Optional[Path]:
-    """Write candidate locations as xlsx (preferred) or CSV fallback."""
+    """Write candidate locations as XLSX."""
     rows = _build_candidate_location_rows(records=records, crs=crs)
-    if not rows:
-        return None
 
     field_order = [
         "candidate_id",
@@ -4177,37 +4375,123 @@ def export_candidate_locations_table(
         "gps_lat",
         "google_maps_url",
     ]
+    return _write_candidate_location_rows_xlsx(rows=rows, field_order=field_order, out_base=out_base)
 
-    xlsx_path = out_base.with_suffix(".xlsx")
-    if Workbook is not None:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "candidate_locations"
-        ws.append(field_order)
-        google_maps_col = field_order.index("google_maps_url") + 1
-        for row_idx, row in enumerate(rows, start=2):
-            ws.append([row.get(col) for col in field_order])
-            maps_url = str(row.get("google_maps_url") or "").strip()
-            if maps_url:
-                cell = ws.cell(row=row_idx, column=google_maps_col)
-                cell.hyperlink = maps_url
-                cell.style = "Hyperlink"
-        ws.freeze_panes = "A2"
-        xlsx_path.parent.mkdir(parents=True, exist_ok=True)
-        wb.save(xlsx_path)
-        return xlsx_path
 
-    csv_path = out_base.with_suffix(".csv")
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=field_order)
-        writer.writeheader()
-        writer.writerows(rows)
-    LOGGER.warning(
-        "openpyxl not installed; candidate table written as CSV instead of XLSX: %s",
-        csv_path,
+def export_candidate_locations_from_prediction(
+    *,
+    mask: np.ndarray,
+    prob_map: np.ndarray,
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    out_base: Path,
+    min_area: float,
+    opening_size: int,
+    label_connectivity: int,
+) -> Optional[Path]:
+    """Export candidate table directly from raster predictions without polygon libraries."""
+    field_order = [
+        "candidate_id",
+        "area_m2",
+        "score_mean",
+        "center_x_native",
+        "center_y_native",
+        "native_crs",
+        "gps_lon",
+        "gps_lat",
+        "google_maps_url",
+    ]
+    if mask.size == 0 or prob_map.size == 0:
+        LOGGER.warning("Bos mask/prob rasteri; aday Excel tablosu bos olarak yaziliyor.")
+        return _write_candidate_location_rows_xlsx(rows=[], field_order=field_order, out_base=out_base)
+
+    k = max(1, int(opening_size))
+    cleaned_mask = grey_opening(mask.astype(np.uint8), size=(k, k))
+    if int(label_connectivity) == 4:
+        structure = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=int)
+    else:
+        structure = np.ones((3, 3), dtype=int)
+
+    labels, num_features = ndimage.label(cleaned_mask.astype(bool), structure=structure)
+    if num_features == 0:
+        LOGGER.warning("Aday tablo icin esik ustunde bilesen bulunamadi; bos Excel yaziliyor.")
+        return _write_candidate_location_rows_xlsx(rows=[], field_order=field_order, out_base=out_base)
+
+    label_ids = np.arange(1, num_features + 1)
+    pixel_counts = np.asarray(
+        ndimage.sum(cleaned_mask.astype(np.uint8), labels, index=label_ids),
+        dtype=np.float64,
     )
-    return csv_path
+    prob_sums = np.asarray(
+        ndimage.sum(prob_map.astype(np.float32), labels, index=label_ids),
+        dtype=np.float64,
+    )
+    centers = ndimage.center_of_mass(cleaned_mask.astype(np.float32), labels, index=label_ids)
+
+    pixel_width = abs(transform[0])
+    pixel_height = abs(transform[4])
+    pixel_area = float(pixel_width * pixel_height)
+    native_crs = _format_crs_label(crs)
+
+    native_xs: List[float] = []
+    native_ys: List[float] = []
+    temp_rows: List[Tuple[int, float, float, float, float]] = []
+    next_id = 1
+    for idx, center in enumerate(centers):
+        pixels = float(pixel_counts[idx])
+        if pixels <= 0:
+            continue
+        area_m2 = pixels * pixel_area
+        if area_m2 < float(min_area):
+            continue
+        row_c, col_c = center
+        center_x, center_y = transform * (float(col_c) + 0.5, float(row_c) + 0.5)
+        native_xs.append(float(center_x))
+        native_ys.append(float(center_y))
+        mean_score = float(prob_sums[idx]) / pixels
+        temp_rows.append((next_id, area_m2, mean_score, float(center_x), float(center_y)))
+        next_id += 1
+
+    if not temp_rows:
+        LOGGER.warning("Aday tablo icin minimum alan filtresini gecen bilesen bulunamadi; bos Excel yaziliyor.")
+        return _write_candidate_location_rows_xlsx(rows=[], field_order=field_order, out_base=out_base)
+
+    gps_lons, gps_lats = _transform_points_to_wgs84(native_xs, native_ys, crs)
+    rows: List[Dict[str, Any]] = []
+    for idx, (candidate_id, area_m2, mean_score, center_x, center_y) in enumerate(temp_rows):
+        gps_lon = gps_lons[idx]
+        gps_lat = gps_lats[idx]
+        google_maps_url = ""
+        if gps_lat is not None and gps_lon is not None:
+            google_maps_url = f"https://maps.google.com/?q={gps_lat:.8f},{gps_lon:.8f}"
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "area_m2": area_m2,
+                "score_mean": mean_score,
+                "center_x_native": center_x,
+                "center_y_native": center_y,
+                "native_crs": native_crs,
+                "gps_lon": gps_lon,
+                "gps_lat": gps_lat,
+                "google_maps_url": google_maps_url,
+            }
+        )
+
+    return _write_candidate_location_rows_xlsx(rows=rows, field_order=field_order, out_base=out_base)
+
+
+def load_prediction_arrays(
+    *,
+    prob_path: Path,
+    mask_path: Path,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load prediction rasters from disk for downstream vector/table export."""
+    with rasterio.open(prob_path) as src_prob:
+        prob_arr = src_prob.read(1).astype(np.float32, copy=False)
+    with rasterio.open(mask_path) as src_mask:
+        mask_arr = src_mask.read(1).astype(np.uint8, copy=False)
+    return mask_arr, prob_arr
 
 
 def vectorize_predictions(
@@ -4355,6 +4639,12 @@ def vectorize_predictions(
 
     if not records:
         LOGGER.info("No polygons passed the min-area filter; skipping vector output.")
+        if export_candidate_excel:
+            empty_out_path = out_path.with_suffix("")
+            empty_base = empty_out_path.with_name(f"{empty_out_path.name}_gps")
+            empty_table = export_candidate_locations_table(records=[], crs=crs, out_base=empty_base)
+            if empty_table:
+                LOGGER.info("Bo? aday konum tablosu yaz?ld?: %s", empty_table)
         return None
 
     base_out_path = out_path.with_suffix("")
@@ -6108,11 +6398,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     is_large_raster = raster_pixels >= 200_000_000 or one_float_bytes >= int(1.5 * 1024**3)
     if is_large_raster and config.vectorize:
         LOGGER.warning(
-            "Vectorization disabled for very large rasters (%dx%d). Run on a smaller subset or vectorize in GIS.",
+            "Very large raster detected (%dx%d). Vectorization/candidate export will continue and may use substantial RAM.",
             raster_width,
             raster_height,
         )
-        config.vectorize = False
 
     # Yöntem etkinleştirme kontrolleri
     if not config.enable_deep_learning and not config.enable_classic and not config.enable_yolo:
@@ -6420,22 +6709,60 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             fusion_encoder_label = suffix
             dl_runs.append((suffix, outputs.prob_path))
             if config.vectorize:
-                LOGGER.info("[%s] Vektörleştirme başlatılıyor...", suffix)
+                LOGGER.info("[%s] Vekt?rle?tirme ba?lat?l?yor...", suffix)
                 vector_base = outputs.mask_path.with_suffix("")
-                gpkg = vectorize_predictions(
-                    mask=outputs.mask,
-                    prob_map=outputs.prob_map,
-                    transform=outputs.transform,
-                    crs=outputs.crs,
-                    out_path=vector_base,
-                    min_area=config.min_area,
-                    simplify_tol=config.simplify,
-                    opening_size=config.vector_opening_size,
-                    label_connectivity=config.label_connectivity,
-                    export_candidate_excel=config.export_candidate_excel,
-                )
-                if gpkg:
-                    LOGGER.info("[%s] ✓ Vektör dosyası: %s", suffix, gpkg)
+                vector_ok, vector_reason = _can_vectorize_predictions()
+                try:
+                    mask_arr = outputs.mask
+                    prob_arr = outputs.prob_map
+                    if mask_arr is None or prob_arr is None:
+                        mask_arr, prob_arr = load_prediction_arrays(
+                            prob_path=outputs.prob_path,
+                            mask_path=outputs.mask_path,
+                        )
+                except Exception as e:
+                    LOGGER.warning("[%s] Rasterlar vekt?rle?tirme/tablo i?in y?klenemedi: %s", suffix, e)
+                    mask_arr = None
+                    prob_arr = None
+
+                if mask_arr is None or prob_arr is None:
+                    LOGGER.warning("[%s] Vekt?r/tablo ??kt?s? atland?; rasterlar okunamad?.", suffix)
+                elif vector_ok:
+                    gpkg = vectorize_predictions(
+                        mask=mask_arr,
+                        prob_map=prob_arr,
+                        transform=outputs.transform,
+                        crs=outputs.crs,
+                        out_path=vector_base,
+                        min_area=config.min_area,
+                        simplify_tol=config.simplify,
+                        opening_size=config.vector_opening_size,
+                        label_connectivity=config.label_connectivity,
+                        export_candidate_excel=config.export_candidate_excel,
+                    )
+                    if gpkg:
+                        LOGGER.info("[%s] ? Vekt?r dosyas?: %s", suffix, gpkg)
+                elif config.export_candidate_excel:
+                    table_base = vector_base.with_name(f"{vector_base.name}_gps")
+                    table_path = export_candidate_locations_from_prediction(
+                        mask=mask_arr,
+                        prob_map=prob_arr,
+                        transform=outputs.transform,
+                        crs=outputs.crs,
+                        out_base=table_base,
+                        min_area=config.min_area,
+                        opening_size=config.vector_opening_size,
+                        label_connectivity=config.label_connectivity,
+                    )
+                    if table_path:
+                        LOGGER.info("[%s] ? Excel aday tablosu: %s", suffix, table_path)
+                    LOGGER.warning(
+                        "[%s] GeoPackage atland? (%s); yaln?zca Excel aday tablosu ?retildi.",
+                        suffix,
+                        vector_reason,
+                    )
+                else:
+                    LOGGER.warning("[%s] Vekt?r ??kt?s? atland? (%s).", suffix, vector_reason)
 
         if not dl_runs:
             parser.error(
@@ -6826,34 +7153,47 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
         for label, mask_arr, prob_arr, transform, crs_obj, out_base, prob_path, mask_path in vector_jobs:
             if mask_arr is None or prob_arr is None:
-                if is_large_raster:
-                    LOGGER.warning("Skipping vectorization for '%s' (large raster; arrays not kept in memory).", label)
-                    continue
                 try:
-                    with rasterio.open(prob_path) as _src:
-                        prob_arr = _src.read(1).astype(np.float32, copy=False)
-                    with rasterio.open(mask_path) as _src:
-                        mask_arr = _src.read(1).astype(np.uint8, copy=False)
+                    mask_arr, prob_arr = load_prediction_arrays(prob_path=prob_path, mask_path=mask_path)
                 except Exception as e:
                     LOGGER.warning("Could not load rasters for vectorization (%s): %s", label, e)
                     continue
 
-            LOGGER.info(f"  → {label} poligonlaştırılıyor...")
-            vector_file = vectorize_predictions(
-                mask=mask_arr,
-                prob_map=prob_arr,
-                transform=transform,
-                crs=crs_obj,
-                out_path=out_base,
-                min_area=config.min_area,
-                simplify_tol=config.simplify,
-                opening_size=config.vector_opening_size,
-                label_connectivity=config.label_connectivity,
-                export_candidate_excel=config.export_candidate_excel,
-            )
-            if vector_file:
-                LOGGER.info("    ✓ Vektör çıktısı (%s): %s", label, vector_file)
-        
+            vector_ok, vector_reason = _can_vectorize_predictions()
+            if vector_ok:
+                LOGGER.info(f"  ? {label} poligonla?t?r?l?yor...")
+                vector_file = vectorize_predictions(
+                    mask=mask_arr,
+                    prob_map=prob_arr,
+                    transform=transform,
+                    crs=crs_obj,
+                    out_path=out_base,
+                    min_area=config.min_area,
+                    simplify_tol=config.simplify,
+                    opening_size=config.vector_opening_size,
+                    label_connectivity=config.label_connectivity,
+                    export_candidate_excel=config.export_candidate_excel,
+                )
+                if vector_file:
+                    LOGGER.info("    ? Vekt?r ??kt?s? (%s): %s", label, vector_file)
+            elif config.export_candidate_excel:
+                LOGGER.info(f"  ? {label} i?in Excel aday tablosu olu?turuluyor...")
+                table_base = out_base.with_name(f"{out_base.name}_gps")
+                table_path = export_candidate_locations_from_prediction(
+                    mask=mask_arr,
+                    prob_map=prob_arr,
+                    transform=transform,
+                    crs=crs_obj,
+                    out_base=table_base,
+                    min_area=config.min_area,
+                    opening_size=config.vector_opening_size,
+                    label_connectivity=config.label_connectivity,
+                )
+                if table_path:
+                    LOGGER.info("    ? Excel aday tablosu (%s): %s", label, table_path)
+                LOGGER.warning("    GeoPackage atland? (%s); yaln?zca Excel aday tablosu ?retildi.", vector_reason)
+            else:
+                LOGGER.warning("    Vekt?r ??kt?s? atland? (%s).", vector_reason)
         LOGGER.info("")
         LOGGER.info("=" * 70)
         LOGGER.info("✅ TÜM İŞLEMLER TAMAMLANDI!")

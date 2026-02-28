@@ -213,7 +213,7 @@ trained_model_only: true
 #   - 0.7  : Çok seçici (sadece çok güvenli tespitler)
 #   - 0.4  : Daha liberal (daha fazla aday bölge)
 # ÖNERİ: 0.5-0.6 arasında başlayın, sonuçlara göre ayarlayın
-th: 0.4
+th: 0.3
 
 
 # ============================================================================
@@ -773,7 +773,7 @@ rgb_only: false               # true yaparsan SVF/Openness/LRM/Slope/nDSM kanall
 vectorize: true
 
 # export_candidate_excel: Vektor adaylarini GPS koordinat tablosu olarak disa aktar
-# - true: Her *.gpkg icin aday merkezlerini iceren *_gps.xlsx (veya CSV fallback) uretir
+# - true: Her *.gpkg icin aday merkezlerini iceren *_gps.xlsx uretir
 # - false: GPS/Excel tablo ciktisi uretilmez
 export_candidate_excel: true
 
@@ -788,7 +788,7 @@ export_candidate_excel: true
 #   - Gürültüyü azaltmak için: Yüksek değer (100-200 m²)
 #   - Tüm adayları görmek için: Düşük değer (20-50 m²)
 # ÖNERİ: Aradığınız yapı boyutuna göre ayarlayın, 80 m² dengeli bir değer
-min_area: 50.0
+min_area: 225.0
 
 # simplify: Poligon basitleştirme toleransı (metre)
 # - Douglas-Peucker algoritması ile poligon köşe sayısını azaltır
