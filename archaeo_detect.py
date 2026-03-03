@@ -7,8 +7,9 @@ Pipeline aşağıdaki adımları gerçekleştirir:
    kabartma modeli, eğim) Relief Visualization Toolbox (rvt-py) ile türetir.
 3. 9 kanallı tensör yığını [R, G, B, SVF, PosOpen, NegOpen, LRM, Slope, nDSM] oluşturur,
    kanalları robust 2-98 persentil ölçekleme ile normalize eder ve nodata değerlerini güvenli şekilde işler.
-4. Önceden eğitilmiş U-Net tipi model (segmentation_models_pytorch) ile karolara bölünmüş
-   çıkarım yapar, örtüşen karoları harmanlayarak kesintisiz olasılık haritası oluşturur.
+4. Önceden eğitilmiş derin öğrenme modeli ile karolara bölünmüş çıkarım yapar.
+   Model segmentasyon ise piksel-seviyesinde, tile-classification ise tile-seviyesinde
+   skor üretir; örtüşen karolar harmanlanarak kesintisiz olasılık haritası oluşturulur.
 5. İsteğe bağlı yüksek obje maskeleme uygular, eşikleme ile ikili maske oluşturur ve hem
    olasılık hem de maske GeoTIFF çıktılarını sıkıştırılmış olarak, jeoreferansı koruyarak yazar.
 6. İsteğe bağlı olarak tespit edilen özellikleri alan/skor öznitelikleriyle poligonlara dönüştürür 
@@ -369,6 +370,10 @@ class PipelineDefaults:
         default=True,
         metadata={"help": "Derin öğrenme ve klasik yöntem sonuçlarını birleştir (fusion)"},
     )
+    dl_task: str = field(
+        default="segmentation",
+        metadata={"help": "DL gorevi: 'segmentation' veya 'tile_classification'. Tile classification, her tile icin tek skor uretip overlap ile risk haritasi olusturur."},
+    )
     
     # ===== DERİN ÖĞRENME MODEL AYARLARI =====
     arch: str = field(
@@ -691,6 +696,11 @@ class PipelineDefaults:
             device_base = self.device.split(":")[0].lower()
             if device_base not in valid_devices and not device_base.startswith("cuda"):
                 errors.append(f"device geçersiz: {self.device}. Geçerli değerler: 'cpu', 'cuda', 'cuda:0', 'mps'")
+
+        if str(self.dl_task).strip().lower() not in {"segmentation", "tile_classification"}:
+            errors.append(
+                f"dl_task gecersiz: {self.dl_task}. Gecerli degerler: 'segmentation', 'tile_classification'"
+            )
         
         # Sigma ve radii kontrolleri
         if len(self.sigma_scales) == 0:
@@ -1870,6 +1880,48 @@ def get_num_channels(enable_curvature: bool = True, enable_tpi: bool = True) -> 
     return base_channels
 
 
+class TileClassifier(torch.nn.Module):
+    """SMP encoder tabanli tile-level binary classifier."""
+
+    def __init__(
+        self,
+        *,
+        encoder_name: str,
+        in_channels: int,
+        encoder_weights: Optional[str] = "imagenet",
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        if smp is None:
+            raise ImportError("Install segmentation_models_pytorch: pip install segmentation-models-pytorch")
+        self.encoder = smp.encoders.get_encoder(
+            encoder_name,
+            in_channels=in_channels,
+            depth=5,
+            weights=encoder_weights,
+        )
+        out_channels = list(getattr(self.encoder, "out_channels", []))
+        if not out_channels:
+            raise ValueError(f"Encoder cikis kanallari okunamadi: {encoder_name}")
+        self.pool = torch.nn.AdaptiveAvgPool2d(1)
+        self.dropout = (
+            torch.nn.Dropout(p=float(dropout))
+            if float(dropout) > 0.0
+            else torch.nn.Identity()
+        )
+        self.classifier = torch.nn.Linear(int(out_channels[-1]), 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feats = self.encoder(x)
+        if isinstance(feats, (list, tuple)):
+            x = feats[-1]
+        else:
+            x = feats
+        x = self.pool(x).flatten(1)
+        x = self.dropout(x)
+        return self.classifier(x)
+
+
 def build_model(
     arch: str = "Unet",
     encoder: str = "resnet34",
@@ -1909,6 +1961,30 @@ def build_model(
     else:
         model = base_model
     
+    return model
+
+
+def build_tile_classifier(
+    encoder: str = "resnet34",
+    in_ch: int = 12,
+    enable_attention: bool = True,
+    attention_reduction: int = 4,
+    encoder_weights: Optional[str] = None,
+) -> torch.nn.Module:
+    """Tile-level classification modeli olusturur."""
+    base_model = TileClassifier(
+        encoder_name=encoder,
+        in_channels=in_ch,
+        encoder_weights=encoder_weights,
+    )
+    if enable_attention:
+        model = AttentionWrapper(base_model, in_ch, reduction=attention_reduction)
+        LOGGER.debug(
+            "CBAM Attention modulu eklendi (tile classifier, reduction=%d)",
+            attention_reduction,
+        )
+    else:
+        model = base_model
     return model
 
 
@@ -2071,7 +2147,7 @@ def get_checkpoint_model_hints(weights_path: Path) -> Dict[str, Any]:
         return {}
 
     hints: Dict[str, Any] = {}
-    for key in ("arch", "encoder", "in_channels", "enable_attention", "attention_reduction"):
+    for key in ("arch", "encoder", "in_channels", "enable_attention", "attention_reduction", "task_type"):
         if key in cfg:
             hints[key] = cfg[key]
     return hints
@@ -2326,6 +2402,7 @@ def infer_tiled(
     model: torch.nn.Module,
     input_path: Path,
     band_idx: Sequence[int],
+    task_type: str,
     tile: int,
     overlap: int,
     device: torch.device,
@@ -2359,6 +2436,9 @@ def infer_tiled(
         precomputed_deriv: Önceden hesaplanmış RVT türevleri (cache kullanımı için).
                           None ise her tile için RVT yeniden hesaplanır.
     """
+    task_key = str(task_type).strip().lower()
+    if task_key not in {"segmentation", "tile_classification"}:
+        raise ValueError(f"Unsupported task_type: {task_type}")
     model.eval()
     model.to(device)
 
@@ -2882,7 +2962,11 @@ def infer_tiled(
             tensor = torch.from_numpy(normed).unsqueeze(0).to(device)
             with torch.no_grad(), autocast_ctx:
                 logits = model(tensor)
-                probs = torch.sigmoid(logits).cpu().numpy()[0, 0]
+                if task_key == "tile_classification":
+                    tile_prob_scalar = float(torch.sigmoid(logits).view(-1)[0].item())
+                    probs = np.full((tile, tile), tile_prob_scalar, dtype=np.float32)
+                else:
+                    probs = torch.sigmoid(logits).cpu().numpy()[0, 0]
 
             row_slice = slice(row, row + win_height)
             col_slice = slice(col, col + win_width)
@@ -2946,8 +3030,8 @@ def infer_tiled(
         # Parametreli dosya adı oluştur
         filename = build_filename_with_params(
             base_name=base_prefix.name,
-            mode_suffix="dl",
-            arch=arch,
+            mode_suffix="dlcls" if task_key == "tile_classification" else "dl",
+            arch="TileClassifier" if task_key == "tile_classification" else arch,
             encoder=encoder,
             weight_type=weight_type,
             threshold=threshold,
@@ -5943,7 +6027,7 @@ def precompute_derivatives(
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Arkeolojik alan tespiti için önceden eğitilmiş U-Net modeli.",
+        description="Arkeolojik alan tespiti için derin öğrenme / klasik yöntem CLI aracı.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -6021,6 +6105,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         default=default_for("enable_deep_learning"),
         dest="enable_deep_learning",
         help=cli_help("enable_deep_learning", "(--no-enable-deep-learning ile sadece klasik yöntemleri çalıştırabilirsiniz)."),
+    )
+    parser.add_argument(
+        "--dl-task",
+        default=default_for("dl_task"),
+        dest="dl_task",
+        help=cli_help("dl_task"),
     )
     parser.add_argument(
         "--enable-classic",
@@ -6357,6 +6447,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     )
                     config.arch = hint_arch
 
+            hint_task = str(checkpoint_hints.get("task_type", "")).strip().lower()
+            if hint_task and hint_task != str(config.dl_task).strip().lower():
+                if "dl_task" in cli_overrides:
+                    LOGGER.warning(
+                        "Checkpoint task '%s' ile --dl-task '%s' farkli; explicit CLI degeri korunuyor.",
+                        hint_task,
+                        config.dl_task,
+                    )
+                else:
+                    LOGGER.info(
+                        "Checkpoint metadata: task '%s' bulundu, dl_task '%s' -> '%s' guncellendi.",
+                        hint_task,
+                        config.dl_task,
+                        hint_task,
+                    )
+                    config.dl_task = hint_task
+
     ran_multi = enc_mode not in ("", "none")
     if config.enable_deep_learning and enc_mode in ("", "none"):
         if config.weights_template:
@@ -6379,6 +6486,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         weights_path = Path(config.weights)
         if not weights_path.exists():
             parser.error(f"Weights file not found: {weights_path}")
+
+    dl_task = str(config.dl_task).strip().lower()
 
     bands = parse_band_indexes(config.bands)
     out_prefix = resolve_out_prefix(input_path, config.out_prefix, config)
@@ -6454,6 +6563,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     LOGGER.info(f"  cache_derivatives_mode: {config.cache_derivatives_mode}")
     LOGGER.info(f"  cache_dir: {config.cache_dir}")
     LOGGER.info(f"  enable_deep_learning: {config.enable_deep_learning}")
+    LOGGER.info(f"  dl_task: {dl_task}")
     LOGGER.info(f"  enable_classic: {config.enable_classic}")
 
     cache_mode = str(getattr(config, "cache_derivatives_mode", "auto")).strip().lower()
@@ -6633,40 +6743,76 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 enable_tpi=config.enable_tpi
             )
             
-            if per_weights is not None:
-                LOGGER.info("[%s] Loading trained weights: %s", suffix, per_weights)
-                model = build_model(
-                    arch=config.arch,
-                    encoder=smp_name,
-                    in_ch=num_channels,
-                    enable_attention=config.enable_attention,
-                    attention_reduction=config.attention_reduction,
-                )
-                load_weights(model, per_weights, map_location=device)
-                wt = "trained"
-            elif config.zero_shot_imagenet:
-                LOGGER.info("[%s] Starting in zero-shot mode (ImageNet 3->%d inflate)", suffix, num_channels)
-                model = build_model_with_imagenet_inflated(
-                    arch=config.arch,
-                    encoder=smp_name,
-                    in_ch=num_channels,
-                    enable_attention=config.enable_attention,
-                    attention_reduction=config.attention_reduction,
-                )
-                wt = "imagenet"
+            if dl_task == "tile_classification":
+                if per_weights is not None:
+                    LOGGER.info("[%s] Loading trained tile-classification weights: %s", suffix, per_weights)
+                    model = build_tile_classifier(
+                        encoder=smp_name,
+                        in_ch=num_channels,
+                        enable_attention=config.enable_attention,
+                        attention_reduction=config.attention_reduction,
+                        encoder_weights=None,
+                    )
+                    load_weights(model, per_weights, map_location=device)
+                    wt = "trained"
+                elif config.zero_shot_imagenet:
+                    LOGGER.info("[%s] Starting in zero-shot tile-classification mode (ImageNet encoder)", suffix)
+                    model = build_tile_classifier(
+                        encoder=smp_name,
+                        in_ch=num_channels,
+                        enable_attention=config.enable_attention,
+                        attention_reduction=config.attention_reduction,
+                        encoder_weights="imagenet",
+                    )
+                    wt = "imagenet"
+                else:
+                    LOGGER.warning(
+                        "[%s] No weights found and zero_shot_imagenet is disabled; using random-init tile classifier.",
+                        suffix,
+                    )
+                    model = build_tile_classifier(
+                        encoder=smp_name,
+                        in_ch=num_channels,
+                        enable_attention=config.enable_attention,
+                        attention_reduction=config.attention_reduction,
+                        encoder_weights=None,
+                    )
+                    wt = "random"
             else:
-                LOGGER.warning(
-                    "[%s] No weights found and zero_shot_imagenet is disabled; using random init model.",
-                    suffix,
-                )
-                model = build_model(
-                    arch=config.arch,
-                    encoder=smp_name,
-                    in_ch=num_channels,
-                    enable_attention=config.enable_attention,
-                    attention_reduction=config.attention_reduction,
-                )
-                wt = "random"
+                if per_weights is not None:
+                    LOGGER.info("[%s] Loading trained weights: %s", suffix, per_weights)
+                    model = build_model(
+                        arch=config.arch,
+                        encoder=smp_name,
+                        in_ch=num_channels,
+                        enable_attention=config.enable_attention,
+                        attention_reduction=config.attention_reduction,
+                    )
+                    load_weights(model, per_weights, map_location=device)
+                    wt = "trained"
+                elif config.zero_shot_imagenet:
+                    LOGGER.info("[%s] Starting in zero-shot mode (ImageNet 3->%d inflate)", suffix, num_channels)
+                    model = build_model_with_imagenet_inflated(
+                        arch=config.arch,
+                        encoder=smp_name,
+                        in_ch=num_channels,
+                        enable_attention=config.enable_attention,
+                        attention_reduction=config.attention_reduction,
+                    )
+                    wt = "imagenet"
+                else:
+                    LOGGER.warning(
+                        "[%s] No weights found and zero_shot_imagenet is disabled; using random init model.",
+                        suffix,
+                    )
+                    model = build_model(
+                        arch=config.arch,
+                        encoder=smp_name,
+                        in_ch=num_channels,
+                        enable_attention=config.enable_attention,
+                        attention_reduction=config.attention_reduction,
+                    )
+                    wt = "random"
 
             enc_prefix = out_prefix.with_suffix("")
             enc_prefix = enc_prefix.parent / f"{enc_prefix.name}_{suffix}"
@@ -6675,6 +6821,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 model=model,
                 input_path=input_path,
                 band_idx=bands,
+                task_type=dl_task,
                 tile=config.tile,
                 overlap=config.overlap,
                 device=device,
@@ -6699,7 +6846,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 gaussian_lrm_sigma=config.gaussian_lrm_sigma,
                 rgb_only=config.rgb_only,
                 tpi_radii=config.tpi_radii,
-                arch=config.arch,
+                arch="TileClassifier" if dl_task == "tile_classification" else config.arch,
                 weight_type=wt,
             )
             LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
@@ -6795,34 +6942,63 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "enable_curvature/enable_tpi ayarlarinizi egitim konfigurasyonuyla eslestirin."
             )
         LOGGER.info("Loading trained weights in single-encoder mode: %s", weights_path)
-        model = build_model(
-            arch=config.arch,
-            encoder=config.encoder,
-            in_ch=num_channels,
-            enable_attention=config.enable_attention,
-            attention_reduction=config.attention_reduction,
-        )
+        if dl_task == "tile_classification":
+            model = build_tile_classifier(
+                encoder=config.encoder,
+                in_ch=num_channels,
+                enable_attention=config.enable_attention,
+                attention_reduction=config.attention_reduction,
+                encoder_weights=None,
+            )
+        else:
+            model = build_model(
+                arch=config.arch,
+                encoder=config.encoder,
+                in_ch=num_channels,
+                enable_attention=config.enable_attention,
+                attention_reduction=config.attention_reduction,
+            )
         load_weights(model, weights_path, map_location=device)
     elif enc_mode in ("", "none") and config.enable_deep_learning and config.zero_shot_imagenet:
-        LOGGER.info(f"Zero-shot mode: using ImageNet-pretrained encoder inflated to {num_channels} channels.")
-        if config.enable_attention:
-            LOGGER.info("CBAM Attention module is active.")
-        model = build_model_with_imagenet_inflated(
-            arch=config.arch,
-            encoder=config.encoder,
-            in_ch=num_channels,
-            enable_attention=config.enable_attention,
-            attention_reduction=config.attention_reduction,
-        )
+        if dl_task == "tile_classification":
+            LOGGER.info("Zero-shot tile-classification mode: using ImageNet-pretrained encoder.")
+            model = build_tile_classifier(
+                encoder=config.encoder,
+                in_ch=num_channels,
+                enable_attention=config.enable_attention,
+                attention_reduction=config.attention_reduction,
+                encoder_weights="imagenet",
+            )
+        else:
+            LOGGER.info(f"Zero-shot mode: using ImageNet-pretrained encoder inflated to {num_channels} channels.")
+            if config.enable_attention:
+                LOGGER.info("CBAM Attention module is active.")
+            model = build_model_with_imagenet_inflated(
+                arch=config.arch,
+                encoder=config.encoder,
+                in_ch=num_channels,
+                enable_attention=config.enable_attention,
+                attention_reduction=config.attention_reduction,
+            )
     elif enc_mode in ("", "none") and config.enable_deep_learning:
-        LOGGER.warning("No weights provided and zero_shot_imagenet is disabled; using random init model.")
-        model = build_model(
-            arch=config.arch,
-            encoder=config.encoder,
-            in_ch=num_channels,
-            enable_attention=config.enable_attention,
-            attention_reduction=config.attention_reduction,
-        )
+        if dl_task == "tile_classification":
+            LOGGER.warning("No weights provided and zero_shot_imagenet is disabled; using random-init tile classifier.")
+            model = build_tile_classifier(
+                encoder=config.encoder,
+                in_ch=num_channels,
+                enable_attention=config.enable_attention,
+                attention_reduction=config.attention_reduction,
+                encoder_weights=None,
+            )
+        else:
+            LOGGER.warning("No weights provided and zero_shot_imagenet is disabled; using random init model.")
+            model = build_model(
+                arch=config.arch,
+                encoder=config.encoder,
+                in_ch=num_channels,
+                enable_attention=config.enable_attention,
+                attention_reduction=config.attention_reduction,
+            )
     else:
         model = None
 
@@ -6841,6 +7017,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             model=model,
             input_path=input_path,
             band_idx=bands,
+            task_type=dl_task,
             tile=config.tile,
             overlap=config.overlap,
             device=device,
@@ -6864,7 +7041,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             gaussian_lrm_sigma=config.gaussian_lrm_sigma,
             rgb_only=config.rgb_only,
             tpi_radii=config.tpi_radii,
-            arch=config.arch,
+            arch="TileClassifier" if dl_task == "tile_classification" else config.arch,
             weight_type=single_wt,
         )
         # Record encoder for fusion filenames (single-encoder path)

@@ -70,6 +70,9 @@ bands: "1,2,3,4,5"
 #   - GPU olmazsa yavaş olabilir
 #   - İyi bir model gerektirir
 # ÖNERİ: Eğitilmiş bir modeliniz varsa true, yoksa false yapın
+# CLASSIFICATION PRESET:
+#   Bu dosya şu an tile-level classification odaklı preset'e ayarlı.
+#   Eğitilmiş bir TileClassifier checkpoint'i kullanmanız beklenir.
 enable_deep_learning: true
 
 # enable_classic: Klasik görüntü işleme yöntemleri (RVT, Hessian, Morfoloji)
@@ -97,7 +100,8 @@ enable_classic: false
 #   - Eğitilmiş model yoksa genel amaçlı sonuçlar verir
 # NOT: YOLO11 segmentasyon modeli (..-seg.pt) kullanmanız önerilir
 # ÖNERİ: RGB tabanlı tespit için true yapın, ultralytics kurulumu gerektirir
-enable_yolo: true
+# NOT: Tile-level classification preset'inde kapalı tutulması önerilir.
+enable_yolo: false
 
 # enable_fusion: Derin öğrenme ve klasik yöntemlerin birleştirilmesi
 # - true: Her iki yöntemin olasılık haritaları birleştirilir (alpha ile)
@@ -109,7 +113,16 @@ enable_yolo: true
 #   - Her iki yöntem de etkin olmalıdır (enable_deep_learning ve enable_classic)
 # UYARI: Fusion için hem DL hem de Classic true olmalıdır!
 # ÖNERİ: Mümkünse true kullanın, en dengeli sonuçları verir
-enable_fusion: true
+# NOT: Tile-level classification preset'inde classic kapalı olduğundan fusion da kapalıdır.
+enable_fusion: false
+
+# dl_task: Derin ogrenme gorevi
+# - "segmentation"        : Piksel seviyesinde olasilik/mask uretir
+# - "tile_classification" : Her tile icin tek skor uretir; overlap/feather ile
+#                           alansal risk haritasi olusturur
+# NOT:
+#   Bu preset'te tile-level classification aktif.
+dl_task: "tile_classification"
 
 
 # ============================================================================
@@ -143,6 +156,8 @@ arch: "Unet"
 #   - "vgg16"             → Klasik, basit
 #   - "densenet121"       → Yoğun bağlantılar
 # ÖNERİ: "resnet34" ile başlayın, sonra "efficientnet-b3" deneyin
+# CLASSIFICATION PRESET:
+#   Tek modelde "resnet50" iyi bir başlangıçtır.
 encoder: "resnet50"
 
 # encoders: ÇOKLU ENCODER modu
@@ -156,8 +171,9 @@ encoder: "resnet50"
 #   - Daha uzun çalışma süresi
 #   - Her encoder için ayrı model ağırlığı gerekebilir
 # ÖNERİ: Üretim için "all" veya 2-3 encoder kombinasyonu, test için "none"
-#encoders: "none"
-encoders: "resnet34,resnet50,efficientnet-b3,DenseNet121"
+# CLASSIFICATION PRESET:
+#   Tek checkpoint ile calismak icin "none" kullanin.
+encoders: "none"
 
 
 # weights: TEK ENCODER için model ağırlık dosyası (.pth)
@@ -166,7 +182,10 @@ encoders: "resnet34,resnet50,efficientnet-b3,DenseNet121"
 # - Örnek: "models/unet_resnet34_5ep.pth"
 # NOT: Bu parametre yalnızca tek encoder modunda (encoders: "none") kullanılır
 # weights: "checkpoints/epochs/epoch_032_Unet_resnet50_12ch_attention.pth"
-weights: "checkpoints/best_loss_Unet_resnet50_12ch_attention.pth"
+# CLASSIFICATION PRESET:
+#   Aşağıdaki yol tile-level classification eğitimi sonrası beklenen örnek addır.
+#   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
+weights: "checkpoints/best_loss_TileClassifier_resnet50_12ch_attention.pth"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir
@@ -213,7 +232,9 @@ trained_model_only: true
 #   - 0.7  : Çok seçici (sadece çok güvenli tespitler)
 #   - 0.4  : Daha liberal (daha fazla aday bölge)
 # ÖNERİ: 0.5-0.6 arasında başlayın, sonuçlara göre ayarlayın
-th: 0.3
+# CLASSIFICATION PRESET:
+#   Tile-level classification için 0.50 dengeli başlangıç eşiğidir.
+th: 0.50
 
 
 # ============================================================================
@@ -650,7 +671,9 @@ yolo_device: null
 #   - Güçlü GPU (12GB+): 2048 veya 4096
 # DİKKAT: Çok büyük karo GPU belleğini aşabilir (Out of Memory hatası)
 # ÖNERİ: 1024 iyi bir başlangıç noktasıdır
-tile: 1024
+# CLASSIFICATION PRESET:
+#   Daha yerel ama hâlâ bağlam taşıyan aday taraması için 384 önerilir.
+tile: 384
 
 # overlap: Karolar arası bindirme miktarı (piksel)
 # - Komşu karolar arasında örtüşen bölge boyutu
@@ -664,7 +687,9 @@ tile: 1024
 #   - Orta overlap (256): Dengeli, önerilen (tile boyutunun ~%25'i)
 #   - Büyük overlap (512+): En iyi kalite ama çok yavaş
 # ÖNERİ: Tile boyutunun 1/4'ü kadar overlap kullanın (örn: tile=1024, overlap=256)
-overlap: 512
+# CLASSIFICATION PRESET:
+#   tile=384 için overlap=128 dengeli başlangıçtır.
+overlap: 128
 
 # feather: Karo kenarlarında kosinüs yumuşatma (feathering)
 # - true: Karoların kenarlarına doğru tahminleri yumuşak geçiş ile karıştırır

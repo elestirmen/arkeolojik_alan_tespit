@@ -113,6 +113,14 @@ CONFIG: dict[str, object] = {
     # 0.0 oldugunda tamamen negatif tile'lar da dahil edilir.
     "min_positive": 0.0,
 
+    # tile_label_min_positive_ratio:
+    # Tile-level classification icin explicit tile etiketi uretilirken kullanilan
+    # pozitif piksel orani esigi.
+    # 0.0 ise tile icinde en az bir pozitif piksel olmasi yeterlidir.
+    # Bu ayar tile'i veri setine dahil etme filtresi DEGILDIR; sadece tile label
+    # uretimi icindir.
+    "tile_label_min_positive_ratio": 0.0,
+
     # max_nodata:
     # Bir tile icin izin verilen maksimum gecersiz/nodata orani.
     # Bu esik asilirsa tile atlanir.
@@ -172,6 +180,7 @@ def _validate_tile_generation_params(
     tile_size: int,
     overlap: int,
     min_positive_ratio: float,
+    tile_label_min_positive_ratio: float,
     max_nodata_ratio: float,
     train_ratio: float,
     save_format: str,
@@ -192,6 +201,11 @@ def _validate_tile_generation_params(
     if not 0.0 <= min_positive_ratio <= 1.0:
         errors.append(
             f"min_positive_ratio 0-1 arasinda olmali, verilen: {min_positive_ratio}"
+        )
+    if not 0.0 <= tile_label_min_positive_ratio <= 1.0:
+        errors.append(
+            "tile_label_min_positive_ratio 0-1 arasinda olmali, "
+            f"verilen: {tile_label_min_positive_ratio}"
         )
     if not 0.0 <= max_nodata_ratio <= 1.0:
         errors.append(
@@ -265,6 +279,7 @@ def _prepare_output_dirs(
         for stale_artifact in (
             output_dir / "metadata.json",
             output_dir / "tile_presence_scores.csv",
+            output_dir / "tile_labels.csv",
             output_dir / "tile_presence_grid.tif",
             output_dir / "tile_presence_grid_rgb.tif",
         ):
@@ -511,6 +526,14 @@ def _is_positive_for_balance(
     if threshold <= 0.0:
         return True
     return positive_ratio >= threshold
+
+
+def _positive_ratio_to_tile_label(
+    positive_ratio: float,
+    min_positive_ratio: float,
+) -> int:
+    """Pozitif oranini tile-level 0/1 etikete cevir."""
+    return int(_is_positive_for_balance(positive_ratio, min_positive_ratio))
 
 
 def _sample_windows_without_replacement(
@@ -822,6 +845,7 @@ def create_training_tiles(
     bands: str = "1,2,3,4,5",
     tpi_radii: Tuple[int, ...] = (5, 15, 30),
     min_positive_ratio: float = 0.0,
+    tile_label_min_positive_ratio: float = 0.0,
     max_nodata_ratio: float = 0.3,
     train_ratio: float = 0.8,
     normalize: bool = True,
@@ -844,7 +868,9 @@ def create_training_tiles(
         overlap: Örtüşme miktarı
         bands: Bant indeksleri "R,G,B,DSM,DTM" formatında
         tpi_radii: TPI yarıçapları
-        min_positive_ratio: Minimum pozitif piksel oranı (0-1)
+        min_positive_ratio: Dataset'e dahil etmek için minimum pozitif piksel oranı (0-1)
+        tile_label_min_positive_ratio: Tile-level classification etiketi için minimum
+            pozitif piksel oranı (0-1)
         max_nodata_ratio: Maksimum nodata oranı (0-1)
         train_ratio: Eğitim/doğrulama bölme oranı
         normalize: Tile'ları normalize et
@@ -868,6 +894,7 @@ def create_training_tiles(
         tile_size=tile_size,
         overlap=overlap,
         min_positive_ratio=min_positive_ratio,
+        tile_label_min_positive_ratio=tile_label_min_positive_ratio,
         max_nodata_ratio=max_nodata_ratio,
         train_ratio=train_ratio,
         save_format=save_format,
@@ -932,6 +959,7 @@ def create_training_tiles(
     }
 
     tile_presence_csv_path = output_dir / "tile_presence_scores.csv"
+    tile_labels_csv_path = output_dir / "tile_labels.csv"
     tile_presence_grid_path = output_dir / "tile_presence_grid.tif"
     tile_presence_grid_rgb_path = output_dir / "tile_presence_grid_rgb.tif"
     
@@ -946,6 +974,10 @@ def create_training_tiles(
     LOGGER.info(f"Bölme modu: {split_mode}")
     LOGGER.info(f"Bant sırası: {bands}")
     LOGGER.info(f"TPI yarıçapları: {tpi_radii}")
+    LOGGER.info(
+        "Tile label eşiği (classification): %.4f",
+        float(tile_label_min_positive_ratio),
+    )
     LOGGER.info(f"Paralel worker: {num_workers}")
     LOGGER.info(f"Tile prefix: {tile_prefix}")
     LOGGER.info(f"Cikti temizleme: {'aktif' if clean_output else 'kapali (append modu)'}")
@@ -1060,8 +1092,11 @@ def create_training_tiles(
             split_mode_effective,
         )
         
-        with open(tile_presence_csv_path, "w", newline="", encoding="utf-8") as tile_presence_fp:
+        with open(tile_presence_csv_path, "w", newline="", encoding="utf-8") as tile_presence_fp, open(
+            tile_labels_csv_path, "w", newline="", encoding="utf-8"
+        ) as tile_labels_fp:
             tile_presence_writer = csv.writer(tile_presence_fp)
+            tile_labels_writer = csv.writer(tile_labels_fp)
             tile_presence_writer.writerow(
                 [
                     "tile_name",
@@ -1073,6 +1108,21 @@ def create_training_tiles(
                     "presence_probability",
                     "positive_pixels",
                     "total_pixels",
+                ]
+            )
+            tile_labels_writer.writerow(
+                [
+                    "tile_name",
+                    "split",
+                    "image_relpath",
+                    "mask_relpath",
+                    "row_off",
+                    "col_off",
+                    "tile_label",
+                    "positive_ratio",
+                    "positive_pixels",
+                    "total_pixels",
+                    "label_threshold",
                 ]
             )
 
@@ -1146,6 +1196,29 @@ def create_training_tiles(
                         f"{positive_ratio:.8f}",
                         positive_pixels,
                         total_pixels,
+                    ]
+                )
+
+                tile_file_ext = str(save_format)
+                image_relpath = Path(split_name) / "images" / f"{tile_name}.{tile_file_ext}"
+                mask_relpath = Path(split_name) / "masks" / f"{tile_name}.{tile_file_ext}"
+                tile_label = _positive_ratio_to_tile_label(
+                    positive_ratio,
+                    float(tile_label_min_positive_ratio),
+                )
+                tile_labels_writer.writerow(
+                    [
+                        tile_name,
+                        split_name,
+                        str(image_relpath).replace("\\", "/"),
+                        str(mask_relpath).replace("\\", "/"),
+                        row_off,
+                        col_off,
+                        tile_label,
+                        f"{positive_ratio:.8f}",
+                        positive_pixels,
+                        total_pixels,
+                        f"{float(tile_label_min_positive_ratio):.8f}",
                     ]
                 )
 
@@ -1256,12 +1329,15 @@ def create_training_tiles(
         "overlap": overlap,
         "bands": bands,
         "tpi_radii": list(tpi_radii),
+        "min_positive_ratio": float(min_positive_ratio),
+        "tile_label_min_positive_ratio": float(tile_label_min_positive_ratio),
         "normalize": normalize,
         "save_format": save_format,
         "clean_output": bool(clean_output),
         "num_workers": int(num_workers),
         "tile_prefix": tile_prefix,
         "tile_presence_file": str(tile_presence_csv_path),
+        "tile_labels_file": str(tile_labels_csv_path),
         "tile_presence_grid_file": str(tile_presence_grid_path),
         "tile_presence_grid_rgb_file": str(tile_presence_grid_rgb_path),
         "num_channels": 12,
@@ -1311,6 +1387,7 @@ def create_training_tiles(
     LOGGER.info(f"  → Doğrulama görüntüleri: {val_images_dir}")
     LOGGER.info(f"  → Doğrulama maskeleri: {val_masks_dir}")
     LOGGER.info(f"  → Tile varlık skorları (CSV): {tile_presence_csv_path}")
+    LOGGER.info(f"  → Tile label manifesti (CSV): {tile_labels_csv_path}")
     LOGGER.info(f"  → Tile varlık grid rasterı: {tile_presence_grid_path}")
     LOGGER.info(f"  → Tile varlık renkli rasterı: {tile_presence_grid_rgb_path}")
     LOGGER.info(f"  → Metadata: {output_dir / 'metadata.json'}")
@@ -1409,6 +1486,9 @@ def main():
     config_train_negative_max = CONFIG.get("train_negative_max", None)
     if config_train_negative_max is not None:
         config_train_negative_max = int(config_train_negative_max)
+    config_tile_label_min_positive_ratio = float(
+        CONFIG.get("tile_label_min_positive_ratio", 0.0)
+    )
     config_num_workers = int(CONFIG.get("num_workers", max(1, (os.cpu_count() or 1) - 1)))
     config_tile_prefix = str(CONFIG.get("tile_prefix", "")).strip()
     config_append = bool(CONFIG.get("append", False))
@@ -1465,6 +1545,15 @@ def main():
         type=float,
         default=float(CONFIG.get("min_positive", 0.0)),
         help="Minimum pozitif piksel orani (0-1). 0=tum tile'lar dahil",
+    )
+    parser.add_argument(
+        "--tile-label-min-positive-ratio",
+        type=float,
+        default=config_tile_label_min_positive_ratio,
+        help=(
+            "Tile-level classification etiketi icin minimum pozitif piksel orani (0-1). "
+            "0 ise tile icinde en az bir pozitif piksel olmasi yeterlidir."
+        ),
     )
     parser.add_argument(
         "--max-nodata",
@@ -1586,6 +1675,7 @@ def main():
             bands=args.bands,
             tpi_radii=tpi_radii,
             min_positive_ratio=args.min_positive,
+            tile_label_min_positive_ratio=args.tile_label_min_positive_ratio,
             max_nodata_ratio=args.max_nodata,
             train_ratio=args.train_ratio,
             normalize=not args.no_normalize,
@@ -1607,6 +1697,7 @@ def main():
     print("\nOK - Egitim verisi olusturma tamamlandi!")
     print("  Simdi training.py ile model egitebilirsiniz:")
     print(f"  python training.py --data {args.output}")
+    print(f"  python training.py --data {args.output} --task tile_classification")
 
 
 if __name__ == "__main__":

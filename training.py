@@ -31,6 +31,7 @@ Gereksinimler:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import sys
@@ -137,6 +138,11 @@ CONFIG: dict[str, object] = {
     # Beklenen yapi: train/images, train/masks, val/images, val/masks
     "data": "training_data",
 
+    # task:
+    # segmentation       : Piksel maskesi ogrenilir
+    # tile_classification: Her tile icin tek skor/etiket ogrenilir
+    "task": "tile_classification",
+
     # arch:
     # Segmentasyon model ailesi (segmentation_models_pytorch).
     # Secim; hiz, bellek kullanimi ve kaliteyi birlikte etkiler.
@@ -172,7 +178,7 @@ CONFIG: dict[str, object] = {
     # Optimize edilen kayip fonksiyonu.
     # bce | dice | combined | focal
     # Not: balance_mode/pos_weight ayarlari sadece bce ve combined icin etkilidir.
-    "loss": "combined",
+    "loss": "bce",
 
     # balance_mode:
     # Sinif dengesizligi modu (BCE tarafinda agirliklandirma davranisi):
@@ -265,6 +271,12 @@ CONFIG: dict[str, object] = {
     # val_sample_seed:
     # Val alt-ornekleme rastgelelik tohumu.
     "val_sample_seed": 42,
+
+    # tile_label_min_positive_ratio:
+    # tile_classification modunda bir tile'in pozitif sayilmasi icin gereken
+    # minimum pozitif piksel orani. 0.0 => maskede en az bir pozitif piksel
+    # varsa tile pozitiftir.
+    "tile_label_min_positive_ratio": 0.0,
 }
 # ===============================================
 
@@ -272,6 +284,39 @@ CONFIG: dict[str, object] = {
 # ==============================================================================
 # DATASET
 # ==============================================================================
+
+def _mask_to_binary(mask: np.ndarray) -> np.ndarray:
+    """Maskeyi legacy/veri tipi farklarina karsi 0/1 float32 formatina getir."""
+    return np.where(np.isfinite(mask) & (mask > 0), 1.0, 0.0).astype(np.float32)
+
+
+def _mask_positive_ratio(mask: np.ndarray) -> float:
+    """Bir maskede pozitif piksel oranini hesapla."""
+    mask_bin = _mask_to_binary(mask)
+    total_pixels = int(mask_bin.size)
+    if total_pixels <= 0:
+        return 0.0
+    positive_pixels = int(np.count_nonzero(mask_bin))
+    return float(positive_pixels / total_pixels)
+
+
+def _mask_to_tile_label(
+    mask: np.ndarray,
+    min_positive_ratio: float = 0.0,
+) -> float:
+    """
+    Piksel maskesini tek bir tile etiketine indirger.
+
+    `min_positive_ratio=0.0` iken "maskede en az bir pozitif piksel varsa pozitif"
+    mantigi kullanilir.
+    """
+    positive_ratio = _mask_positive_ratio(mask)
+    if positive_ratio <= 0.0:
+        return 0.0
+    threshold = float(min_positive_ratio)
+    if threshold <= 0.0:
+        return 1.0
+    return 1.0 if positive_ratio >= threshold else 0.0
 
 class ArchaeologyDataset(Dataset):
     """
@@ -285,6 +330,8 @@ class ArchaeologyDataset(Dataset):
         data_dir: Path,
         augment: bool = True,
         file_format: str = "npz",
+        task_type: str = "segmentation",
+        tile_label_min_positive_ratio: float = 0.0,
     ):
         """
         Args:
@@ -297,6 +344,11 @@ class ArchaeologyDataset(Dataset):
         self.masks_dir = self.data_dir / "masks"
         self.augment = augment
         self.file_format = file_format
+        self.task_type = str(task_type).strip().lower()
+        self.tile_label_min_positive_ratio = float(tile_label_min_positive_ratio)
+        if self.task_type not in {"segmentation", "tile_classification"}:
+            raise ValueError(f"Desteklenmeyen task_type: {task_type}")
+        self.tile_labels: Optional[List[float]] = None
         
         # Dosyaları listele
         pattern = f"*.{file_format}"
@@ -304,7 +356,42 @@ class ArchaeologyDataset(Dataset):
         
         if len(self.image_files) == 0:
             raise ValueError(f"Hiç görüntü dosyası bulunamadı: {self.images_dir}")
-        
+
+        if self.task_type == "tile_classification":
+            manifest_labels = _load_tile_label_manifest(self.data_dir)
+            labels: List[float] = []
+            missing_manifest_label = False
+            for img_path in self.image_files:
+                tile_name = img_path.stem
+                manifest_label = None if manifest_labels is None else manifest_labels.get(tile_name)
+                if manifest_label is not None:
+                    labels.append(float(manifest_label))
+                    continue
+
+                missing_manifest_label = True
+                mask_path = self.masks_dir / img_path.name
+                if not mask_path.exists():
+                    raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
+                if self.file_format == "npy":
+                    mask = np.load(mask_path)
+                else:
+                    with np.load(mask_path) as packed:
+                        if "mask" not in packed:
+                            raise ValueError(f"'mask' anahtari bulunamadi: {mask_path}")
+                        mask = packed["mask"]
+                labels.append(
+                    _mask_to_tile_label(
+                        mask,
+                        min_positive_ratio=self.tile_label_min_positive_ratio,
+                    )
+                )
+            self.tile_labels = labels
+            if manifest_labels is not None and not missing_manifest_label:
+                LOGGER.info(
+                    "Tile label manifesti kullaniliyor: %s",
+                    self.data_dir.parent / "tile_labels.csv",
+                )
+
         LOGGER.info(f"Dataset yüklendi: {len(self.image_files)} örnek ({data_dir})")
     
     def __len__(self) -> int:
@@ -320,14 +407,27 @@ class ArchaeologyDataset(Dataset):
         # Dosyaları oku
         if self.file_format == "npy":
             image = np.load(img_path)  # (C, H, W)
-            mask = np.load(mask_path)  # (H, W)
         else:  # npz
             image = np.load(img_path)["image"]
+
+        image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+        if self.task_type == "tile_classification":
+            if self.augment:
+                image = self._augment_image(image)
+            image = torch.from_numpy(image.copy()).float()
+            if self.tile_labels is None:
+                raise RuntimeError("tile_labels hazir degil")
+            label = np.array([self.tile_labels[idx]], dtype=np.float32)
+            label = torch.from_numpy(label).float()
+            return image, label
+
+        if self.file_format == "npy":
+            mask = np.load(mask_path)  # (H, W)
+        else:  # npz
             mask = np.load(mask_path)["mask"]
 
-        # Legacy veriyle uyumluluk: maskeyi zorunlu 0/1 yap.
-        image = np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-        mask = np.where(np.isfinite(mask) & (mask > 0), 1.0, 0.0).astype(np.float32)
+        mask = _mask_to_binary(mask)
         
         # Veri artırma
         if self.augment:
@@ -338,7 +438,22 @@ class ArchaeologyDataset(Dataset):
         mask = torch.from_numpy(mask.copy()).unsqueeze(0).float()
         
         return image, mask
-    
+
+    def _augment_image(self, image: np.ndarray) -> np.ndarray:
+        """Tile-level classification icin yalnizca goruntu augmentasyonu."""
+
+        if np.random.random() > 0.5:
+            image = np.flip(image, axis=2).copy()
+
+        if np.random.random() > 0.5:
+            image = np.flip(image, axis=1).copy()
+
+        if np.random.random() > 0.25:
+            k = np.random.randint(1, 4)
+            image = np.rot90(image, k, axes=(1, 2)).copy()
+
+        return image
+
     def _augment(
         self, 
         image: np.ndarray, 
@@ -542,6 +657,8 @@ class TrainingConfig:
     
     # Veri
     data_dir: Path = field(default_factory=lambda: Path("training_data"))
+    task_type: str = "segmentation"
+    tile_label_min_positive_ratio: float = 0.0
     # Model
     arch: str = "Unet"
     encoder: str = "resnet34"
@@ -642,7 +759,45 @@ def _load_mask_array(mask_path: Path, file_format: str) -> np.ndarray:
         return packed["mask"]
 
 
-def _count_positive_mask_files(mask_dir: Path, file_format: str) -> Tuple[int, int]:
+def _load_tile_label_manifest(data_dir: Path) -> Optional[Dict[str, float]]:
+    """Kok dizindeki tile_labels.csv manifestinden split'e ait label'lari oku."""
+    root_dir = data_dir.parent
+    manifest_path = root_dir / "tile_labels.csv"
+    split_name = data_dir.name.strip().lower()
+    if not manifest_path.exists():
+        return None
+
+    labels: Dict[str, float] = {}
+    with open(manifest_path, "r", newline="", encoding="utf-8") as fp:
+        reader = csv.DictReader(fp)
+        for row in reader:
+            row_split = str(row.get("split", "")).strip().lower()
+            tile_name = str(row.get("tile_name", "")).strip()
+            if row_split != split_name or not tile_name:
+                continue
+            try:
+                labels[tile_name] = float(row.get("tile_label", "0"))
+            except (TypeError, ValueError):
+                continue
+
+    return labels or None
+
+
+def _count_positive_tile_labels_from_manifest(data_dir: Path) -> Optional[Tuple[int, int]]:
+    """Varsa manifestten toplam ve pozitif tile sayisini dondur."""
+    labels = _load_tile_label_manifest(data_dir)
+    if labels is None:
+        return None
+    total = len(labels)
+    positive = sum(1 for value in labels.values() if float(value) > 0.5)
+    return total, int(positive)
+
+
+def _count_positive_mask_files(
+    mask_dir: Path,
+    file_format: str,
+    tile_label_min_positive_ratio: float = 0.0,
+) -> Tuple[int, int]:
     """
     Maske dosyalarında en az bir pozitif piksel içeren tile sayısını döndür.
 
@@ -655,7 +810,10 @@ def _count_positive_mask_files(mask_dir: Path, file_format: str) -> Tuple[int, i
     for mask_path in mask_files:
         mask = _load_mask_array(mask_path, file_format)
 
-        if np.any(mask > 0):
+        if _mask_to_tile_label(
+            mask,
+            min_positive_ratio=tile_label_min_positive_ratio,
+        ) > 0.5:
             positive_files += 1
 
     return len(mask_files), positive_files
@@ -673,7 +831,7 @@ def _count_positive_mask_pixels(mask_dir: Path, file_format: str) -> Tuple[int, 
     positive_pixels = 0
 
     for mask_path in mask_files:
-        mask = _load_mask_array(mask_path, file_format)
+        mask = _mask_to_binary(_load_mask_array(mask_path, file_format))
         total_pixels += int(mask.size)
         positive_pixels += int(np.count_nonzero(mask > 0))
 
@@ -700,11 +858,15 @@ def _select_train_indices_by_neg_pos_ratio(
     negative_indices: List[int] = []
 
     for idx, img_path in enumerate(train_dataset.image_files):
-        mask_path = train_dataset.masks_dir / img_path.name
-        if not mask_path.exists():
-            raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
-        mask = _load_mask_array(mask_path, train_dataset.file_format)
-        if np.any(mask > 0):
+        if train_dataset.task_type == "tile_classification" and train_dataset.tile_labels is not None:
+            is_positive = float(train_dataset.tile_labels[idx]) > 0.5
+        else:
+            mask_path = train_dataset.masks_dir / img_path.name
+            if not mask_path.exists():
+                raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
+            mask = _load_mask_array(mask_path, train_dataset.file_format)
+            is_positive = np.any(mask > 0)
+        if is_positive:
             positive_indices.append(idx)
         else:
             negative_indices.append(idx)
@@ -794,24 +956,72 @@ def _compute_val_target_samples(
     return int(target)
 
 
+class TileClassifier(nn.Module):
+    """SMP encoder tabanli basit tile-level binary classifier."""
+
+    def __init__(
+        self,
+        *,
+        encoder_name: str,
+        in_channels: int,
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        smp_lib = _require_smp()
+        self.encoder = smp_lib.encoders.get_encoder(
+            encoder_name,
+            in_channels=in_channels,
+            depth=5,
+            weights="imagenet",
+        )
+        encoder_channels = list(getattr(self.encoder, "out_channels", []))
+        if not encoder_channels:
+            raise ValueError(f"Encoder cikis kanallari okunamadi: {encoder_name}")
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(p=float(dropout)) if float(dropout) > 0.0 else nn.Identity()
+        self.classifier = nn.Linear(int(encoder_channels[-1]), 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.encoder(x)
+        if isinstance(features, (list, tuple)):
+            x = features[-1]
+        else:
+            x = features
+        x = self.pool(x).flatten(1)
+        x = self.dropout(x)
+        return self.classifier(x)
+
+
+def _resolved_model_arch_name(config: TrainingConfig) -> str:
+    """Checkpoint/model adlarinda kullanilacak gercek model ailesi adi."""
+    if str(config.task_type).strip().lower() == "tile_classification":
+        return "TileClassifier"
+    return str(config.arch)
+
+
 def create_model(config: TrainingConfig) -> nn.Module:
     """Model oluşturur."""
 
-    smp_lib = _require_smp()
+    task_type = str(config.task_type).strip().lower()
 
-    if not hasattr(smp_lib, config.arch):
-        raise ValueError(f"Mimari bulunamadı: {config.arch}")
+    if task_type == "tile_classification":
+        base_model = TileClassifier(
+            encoder_name=config.encoder,
+            in_channels=config.in_channels,
+        )
+    else:
+        smp_lib = _require_smp()
+        if not hasattr(smp_lib, config.arch):
+            raise ValueError(f"Mimari bulunamadı: {config.arch}")
 
-    model_cls = getattr(smp_lib, config.arch)
-    
-    # Base model
-    base_model = model_cls(
-        encoder_name=config.encoder,
-        encoder_weights="imagenet",  # RGB kanalları için
-        in_channels=config.in_channels,
-        classes=1,
-        activation=None,
-    )
+        model_cls = getattr(smp_lib, config.arch)
+        base_model = model_cls(
+            encoder_name=config.encoder,
+            encoder_weights="imagenet",  # RGB kanalları için
+            in_channels=config.in_channels,
+            classes=1,
+            activation=None,
+        )
     
     # Attention ekle
     if config.enable_attention:
@@ -829,7 +1039,14 @@ def create_model(config: TrainingConfig) -> nn.Module:
 
 def create_loss(config: TrainingConfig) -> nn.Module:
     """Kayıp fonksiyonu oluşturur."""
-    
+
+    task_type = str(config.task_type).strip().lower()
+
+    if task_type == "tile_classification" and config.loss_type in {"dice", "combined"}:
+        raise ValueError(
+            "tile_classification icin sadece 'bce' veya 'focal' loss kullanilabilir."
+        )
+
     if config.loss_type == "bce":
         return BCELoss(pos_weight=config.pos_weight)
     elif config.loss_type == "dice":
@@ -1039,6 +1256,15 @@ def train(config: TrainingConfig) -> Path:
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
 
+    task_type = str(config.task_type).strip().lower()
+    if task_type not in {"segmentation", "tile_classification"}:
+        raise ValueError(f"Desteklenmeyen task_type: {config.task_type}")
+    if not 0.0 <= float(config.tile_label_min_positive_ratio) <= 1.0:
+        raise ValueError(
+            "tile_label_min_positive_ratio 0-1 araliginda olmali, "
+            f"verilen: {config.tile_label_min_positive_ratio}"
+        )
+
     if not 0.0 < float(config.val_keep_ratio) <= 1.0:
         raise ValueError(
             f"val_keep_ratio 0-1 aralığında olmalı (0 hariç), verilen: {config.val_keep_ratio}"
@@ -1067,11 +1293,15 @@ def train(config: TrainingConfig) -> Path:
         config.data_dir / "train",
         augment=True,
         file_format=file_format,
+        task_type=config.task_type,
+        tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
     )
     val_dataset = ArchaeologyDataset(
         config.data_dir / "val",
         augment=False,
         file_format=file_format,
+        task_type=config.task_type,
+        tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
     )
     
     train_loader_dataset: Dataset = train_dataset
@@ -1190,7 +1420,8 @@ def train(config: TrainingConfig) -> Path:
     best_loss_model_path: Optional[Path] = None
     best_iou_model_path: Optional[Path] = None
 
-    model_name = f"{config.arch}_{config.encoder}_{config.in_channels}ch"
+    model_arch_name = _resolved_model_arch_name(config)
+    model_name = f"{model_arch_name}_{config.encoder}_{config.in_channels}ch"
     if config.enable_attention:
         model_name += "_attention"
     
@@ -1215,7 +1446,8 @@ def train(config: TrainingConfig) -> Path:
     LOGGER.info("\n" + "=" * 60)
     LOGGER.info("EĞİTİM BAŞLIYOR")
     LOGGER.info("=" * 60)
-    LOGGER.info(f"Model: {config.arch} + {config.encoder}")
+    LOGGER.info(f"Task: {config.task_type}")
+    LOGGER.info(f"Model: {model_arch_name} + {config.encoder}")
     LOGGER.info(f"Girdi kanalları: {config.in_channels}")
     LOGGER.info(f"Attention: {'Aktif' if config.enable_attention else 'Kapalı'}")
     LOGGER.info(f"Loss: {config.loss_type}")
@@ -1355,9 +1587,11 @@ def train(config: TrainingConfig) -> Path:
             "val_iou_selection_threshold": val_iou_selection_threshold,
             "lr": current_lr,
             "config": {
-                "arch": config.arch,
+                "arch": model_arch_name,
                 "encoder": config.encoder,
                 "in_channels": config.in_channels,
+                "task_type": config.task_type,
+                "tile_label_min_positive_ratio": config.tile_label_min_positive_ratio,
                 "enable_attention": config.enable_attention,
                 "attention_reduction": config.attention_reduction,
                 "loss_type": config.loss_type,
@@ -1454,6 +1688,16 @@ def main():
         default=str(CONFIG["data"]),
         help="Eğitim verisi dizini (egitim_verisi_olusturma.py çıktısı)",
     )
+    parser.add_argument(
+        "--task",
+        type=str,
+        default=str(CONFIG["task"]),
+        choices=["segmentation", "tile_classification"],
+        help=(
+            "Egitim gorevi. segmentation: piksel maskesi ogren; "
+            "tile_classification: tile icin tek olasilik/etiket ogren."
+        ),
+    )
     
     # Model
     parser.add_argument(
@@ -1508,7 +1752,11 @@ def main():
     parser.add_argument(
         "--balance-mode",
         type=str,
-        default=str(CONFIG["balance_mode"]),
+        default=(
+            "none"
+            if CONFIG["balance_mode"] is None
+            else str(CONFIG["balance_mode"])
+        ),
         choices=["none", "auto", "manual"],
         help=(
             "Sınıf dengesizliği modu (yalnızca BCE/combined). "
@@ -1640,6 +1888,15 @@ def main():
         default=int(CONFIG["val_sample_seed"]),
         help="Val alt-ornekleme rastgelelik tohumu.",
     )
+    parser.add_argument(
+        "--tile-label-min-positive-ratio",
+        type=float,
+        default=float(CONFIG["tile_label_min_positive_ratio"]),
+        help=(
+            "tile_classification modunda pozitif tile etiketi icin gereken "
+            "minimum pozitif piksel orani. 0.0 ise herhangi bir pozitif piksel yeterlidir."
+        ),
+    )
 
     args = parser.parse_args()
     
@@ -1667,14 +1924,51 @@ def main():
         in_channels = 12
         LOGGER.warning(f"Metadata bulunamadı, varsayılan kanal sayısı kullanılıyor: {in_channels}")
 
+    if not 0.0 <= float(args.tile_label_min_positive_ratio) <= 1.0:
+        print("HATA: --tile-label-min-positive-ratio 0 ile 1 arasında olmalı.")
+        sys.exit(1)
+
+    if args.task == "tile_classification" and args.loss in {"dice", "combined"}:
+        print("HATA: tile_classification için --loss yalnızca 'bce' veya 'focal' olabilir.")
+        sys.exit(1)
+
     # Etiket dağılımını doğrula (tamamı negatif veri sessizce eğitime girmesin)
     file_format = _infer_file_format(data_dir)
-    train_total, train_positive = _count_positive_mask_files(data_dir / "train" / "masks", file_format)
-    val_total, val_positive = _count_positive_mask_files(data_dir / "val" / "masks", file_format)
-    LOGGER.info(
-        "Maske dağılımı | train: %d/%d pozitif tile | val: %d/%d pozitif tile",
-        train_positive, train_total, val_positive, val_total,
-    )
+    manifest_train_counts = None
+    manifest_val_counts = None
+    if args.task == "tile_classification":
+        manifest_train_counts = _count_positive_tile_labels_from_manifest(data_dir / "train")
+        manifest_val_counts = _count_positive_tile_labels_from_manifest(data_dir / "val")
+
+    if manifest_train_counts is not None:
+        train_total, train_positive = manifest_train_counts
+    else:
+        train_total, train_positive = _count_positive_mask_files(
+            data_dir / "train" / "masks",
+            file_format,
+            tile_label_min_positive_ratio=float(args.tile_label_min_positive_ratio),
+        )
+
+    if manifest_val_counts is not None:
+        val_total, val_positive = manifest_val_counts
+    else:
+        val_total, val_positive = _count_positive_mask_files(
+            data_dir / "val" / "masks",
+            file_format,
+            tile_label_min_positive_ratio=float(args.tile_label_min_positive_ratio),
+        )
+    if args.task == "tile_classification":
+        if manifest_train_counts is not None and manifest_val_counts is not None:
+            LOGGER.info("Tile label sayaclari tile_labels.csv manifestinden okundu.")
+        LOGGER.info(
+            "Tile etiket dağılımı | train: %d/%d pozitif tile | val: %d/%d pozitif tile",
+            train_positive, train_total, val_positive, val_total,
+        )
+    else:
+        LOGGER.info(
+            "Maske dağılımı | train: %d/%d pozitif tile | val: %d/%d pozitif tile",
+            train_positive, train_total, val_positive, val_total,
+        )
 
     total_positive = train_positive + val_positive
     if total_positive == 0 and not args.allow_all_negative:
@@ -1687,19 +1981,22 @@ def main():
             "Pozitif etiket bulunamadı, ancak --allow-all-negative nedeniyle eğitim devam edecek."
         )
 
-    train_total_pixels, train_positive_pixels = _count_positive_mask_pixels(
-        data_dir / "train" / "masks",
-        file_format,
-    )
-    train_positive_ratio = (
-        train_positive_pixels / train_total_pixels if train_total_pixels > 0 else 0.0
-    )
-    LOGGER.info(
-        "Train piksel dağılımı | pozitif: %d/%d (%.6f%%)",
-        train_positive_pixels,
-        train_total_pixels,
-        100.0 * train_positive_ratio,
-    )
+    train_total_pixels = 0
+    train_positive_pixels = 0
+    if args.task == "segmentation":
+        train_total_pixels, train_positive_pixels = _count_positive_mask_pixels(
+            data_dir / "train" / "masks",
+            file_format,
+        )
+        train_positive_ratio = (
+            train_positive_pixels / train_total_pixels if train_total_pixels > 0 else 0.0
+        )
+        LOGGER.info(
+            "Train piksel dağılımı | pozitif: %d/%d (%.6f%%)",
+            train_positive_pixels,
+            train_total_pixels,
+            100.0 * train_positive_ratio,
+        )
 
     if args.max_auto_pos_weight <= 0:
         print("HATA: --max-auto-pos-weight 0'dan büyük olmalı.")
@@ -1742,34 +2039,58 @@ def main():
         resolved_pos_weight = float(args.pos_weight)
         LOGGER.info("Manual class balance aktif: pos_weight=%.4f", resolved_pos_weight)
     elif args.balance_mode == "auto":
-        if train_positive_pixels == 0:
-            resolved_pos_weight = 1.0
-            LOGGER.warning(
-                "Auto class balance hesaplanamadı (train pozitif piksel yok), pos_weight=1.0 kullanılacak."
-            )
-        else:
-            train_negative_pixels = train_total_pixels - train_positive_pixels
-            # BCE pos_weight klasik yaklaşım: negatif/pozitif piksel oranı.
-            # Pozitif sınıf azaldıkça ağırlık artar.
-            raw_pos_weight = train_negative_pixels / train_positive_pixels
-            resolved_pos_weight = float(
-                np.clip(raw_pos_weight, 1.0, float(args.max_auto_pos_weight))
-            )
-            if raw_pos_weight != resolved_pos_weight:
-                LOGGER.info(
-                    "Auto class balance: ham pos_weight=%.4f, kırpılmış pos_weight=%.4f (max=%.4f)",
-                    raw_pos_weight,
-                    resolved_pos_weight,
-                    float(args.max_auto_pos_weight),
+        if args.task == "tile_classification":
+            if train_positive == 0:
+                resolved_pos_weight = 1.0
+                LOGGER.warning(
+                    "Auto class balance hesaplanamadı (train pozitif tile yok), pos_weight=1.0 kullanılacak."
                 )
             else:
-                LOGGER.info("Auto class balance: pos_weight=%.4f", resolved_pos_weight)
+                train_negative_tiles = train_total - train_positive
+                raw_pos_weight = train_negative_tiles / train_positive
+                resolved_pos_weight = float(
+                    np.clip(raw_pos_weight, 1.0, float(args.max_auto_pos_weight))
+                )
+                if raw_pos_weight != resolved_pos_weight:
+                    LOGGER.info(
+                        "Auto class balance (tile) : ham pos_weight=%.4f, kırpılmış pos_weight=%.4f (max=%.4f)",
+                        raw_pos_weight,
+                        resolved_pos_weight,
+                        float(args.max_auto_pos_weight),
+                    )
+                else:
+                    LOGGER.info("Auto class balance (tile): pos_weight=%.4f", resolved_pos_weight)
+        else:
+            if train_positive_pixels == 0:
+                resolved_pos_weight = 1.0
+                LOGGER.warning(
+                    "Auto class balance hesaplanamadı (train pozitif piksel yok), pos_weight=1.0 kullanılacak."
+                )
+            else:
+                train_negative_pixels = train_total_pixels - train_positive_pixels
+                # BCE pos_weight klasik yaklaşım: negatif/pozitif piksel oranı.
+                # Pozitif sınıf azaldıkça ağırlık artar.
+                raw_pos_weight = train_negative_pixels / train_positive_pixels
+                resolved_pos_weight = float(
+                    np.clip(raw_pos_weight, 1.0, float(args.max_auto_pos_weight))
+                )
+                if raw_pos_weight != resolved_pos_weight:
+                    LOGGER.info(
+                        "Auto class balance: ham pos_weight=%.4f, kırpılmış pos_weight=%.4f (max=%.4f)",
+                        raw_pos_weight,
+                        resolved_pos_weight,
+                        float(args.max_auto_pos_weight),
+                    )
+                else:
+                    LOGGER.info("Auto class balance: pos_weight=%.4f", resolved_pos_weight)
     else:
         LOGGER.info("Class balance kapalı: pos_weight=1.0")
     
     # Config oluştur
     config = TrainingConfig(
         data_dir=data_dir,
+        task_type=args.task,
+        tile_label_min_positive_ratio=float(args.tile_label_min_positive_ratio),
         arch=args.arch,
         encoder=args.encoder,
         in_channels=in_channels,
@@ -1812,8 +2133,13 @@ def main():
         print("\nEğitilmiş modeli kullanmak için config.yaml'da:")
         print(f"  weights: \"{best_model}\"")
         print("  zero_shot_imagenet: false")
+        if config.task_type == "tile_classification":
+            print("  dl_task: \"tile_classification\"")
         print("\nVeya komut satırından:")
-        print(f"  python archaeo_detect.py --weights {best_model}")
+        if config.task_type == "tile_classification":
+            print(f"  python archaeo_detect.py --weights {best_model} --dl-task tile_classification")
+        else:
+            print(f"  python archaeo_detect.py --weights {best_model}")
         print("=" * 60)
         
     except KeyboardInterrupt:
