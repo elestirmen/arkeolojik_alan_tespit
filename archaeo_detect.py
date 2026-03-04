@@ -583,7 +583,7 @@ class PipelineDefaults:
         metadata={"help": "Karo boyutu (piksel); büyük değer daha fazla GPU belleği kullanır ama daha az karo demektir"},
     )
     overlap: int = field(
-        default=256,
+        default=128,
         metadata={"help": "Komşu karolar arası bindirme (piksel); dikiş hatlarını azaltır ama işlem süresini artırır"},
     )
     feather: bool = field(
@@ -5125,10 +5125,13 @@ def build_session_folder_name(input_path: Path, config: PipelineDefaults) -> str
         param_tokens.append(f"ov{int(config.overlap)}")
     if config.min_area is not None:
         param_tokens.append(f"min{_fmt_float(float(config.min_area), decimals=0)}")
-    if config.weights:
-        param_tokens.append(f"w-{_safe_token(Path(config.weights).stem)}")
-    elif config.zero_shot_imagenet:
-        param_tokens.append("zeroshot")
+    if config.enable_deep_learning:
+        if config.weights:
+            param_tokens.append(f"model-{_safe_token(Path(config.weights).stem)}")
+        elif config.zero_shot_imagenet:
+            param_tokens.append("model-zeroshot")
+        elif config.encoder:
+            param_tokens.append(f"model-{_safe_token(config.encoder)}")
 
     if param_tokens:
         parts.append("_".join(param_tokens))
@@ -5138,17 +5141,18 @@ def build_session_folder_name(input_path: Path, config: PipelineDefaults) -> str
 
 def resolve_out_prefix(input_path: Path, prefix: Optional[str], config: PipelineDefaults) -> Path:
     """Resolve output prefix path."""
+    fallback_name = _output_base_path(input_path).name
     if prefix:
         out_path = Path(prefix)
         if out_path.is_dir():
             out_path = out_path / input_path.stem
+        out_name = _output_base_path(out_path).name or fallback_name
     else:
-        out_path = _output_base_path(input_path)
+        out_name = fallback_name
 
-    # Route all raster/vector outputs under a dedicated subfolder: 'ciktilar'
-    # Downstream code writes to base_prefix.parent; make that parent session-scoped.
+    # Route all outputs under project-root 'ciktilar/<session>/' regardless of input location.
     session_folder = build_session_folder_name(input_path, config)
-    return out_path.parent / "ciktilar" / session_folder / out_path.name
+    return Path("ciktilar") / session_folder / out_name
 
 
 def build_filename_with_params(

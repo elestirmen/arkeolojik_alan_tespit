@@ -185,7 +185,7 @@ encoders: "none"
 # CLASSIFICATION PRESET:
 #   Aşağıdaki yol tile-level classification eğitimi sonrası beklenen örnek addır.
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
-weights: "checkpoints/epoch_017_TileClassifier_resnet50_12ch_attention.pth"
+weights: "checkpoints/best_iou_TileClassifier_resnet50_12ch_attention.pth"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir
@@ -688,8 +688,8 @@ tile: 256
 #   - Büyük overlap (512+): En iyi kalite ama çok yavaş
 # ÖNERİ: Tile boyutunun 1/4'ü kadar overlap kullanın (örn: tile=1024, overlap=256)
 # CLASSIFICATION PRESET:
-#   Eğitimle birebir tutarlılık için overlap=64 kullanın.
-overlap: 64
+#   Eğitimle birebir tutarlılık için overlap=128 kullanın.
+overlap: 128
 
 # feather: Karo kenarlarında kosinüs yumuşatma (feathering)
 # - true: Karoların kenarlarına doğru tahminleri yumuşak geçiş ile karıştırır

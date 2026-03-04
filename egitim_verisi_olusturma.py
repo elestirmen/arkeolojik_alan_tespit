@@ -95,7 +95,7 @@ CONFIG: dict[str, object] = {
     # overlap:
     # Komsu tile'larin kac piksel ust uste binecegi.
     # Yuksek overlap daha fazla ornek ureterek sinir gecislerini yumusatir, tekrarli veri artar.
-    "overlap": 64,
+    "overlap": 128,
 
     # bands:
     # Girdi rasterindaki bant sirasi: "R,G,B,DSM,DTM".
@@ -837,7 +837,7 @@ def create_training_tiles(
     mask_tif: Path,
     output_dir: Path,
     tile_size: int = 256,
-    overlap: int = 64,
+    overlap: int = 128,
     bands: str = "1,2,3,4,5",
     tpi_radii: Tuple[int, ...] = (5, 15, 30),
     min_positive_ratio: float = 0.0,
@@ -1521,7 +1521,7 @@ def main():
     parser.add_argument(
         "--overlap",
         type=int,
-        default=int(CONFIG.get("overlap", 64)),
+        default=int(CONFIG.get("overlap", 128)),
         help="Tile ortusme miktari (piksel)",
     )
     parser.add_argument(
