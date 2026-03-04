@@ -8,14 +8,14 @@ maskelerinden 12 kanallı eğitim tile'ları oluşturur.
 
 Kanal Yapısı (12 kanal):
     [0-2]: RGB
-    [3]: SVF (Sky-View Factor)
-    [4]: Positive Openness
-    [5]: Negative Openness
-    [6]: LRM (Local Relief Model)
-    [7]: Slope
-    [8]: nDSM (normalize edilmiş DSM)
-    [9]: Plan Curvature
-    [10]: Profile Curvature
+    [3]: DSM
+    [4]: DTM
+    [5]: SVF (Sky-View Factor)
+    [6]: Positive Openness
+    [7]: Negative Openness
+    [8]: LRM (Local Relief Model)
+    [9]: Slope
+    [10]: nDSM (normalize edilmiş DSM)
     [11]: TPI (Topographic Position Index)
 
 Kullanım:
@@ -51,7 +51,6 @@ try:
     from archaeo_detect import (
         compute_derivatives_with_rvt,
         compute_ndsm,
-        compute_curvatures,
         compute_tpi_multiscale,
         stack_channels,
         robust_norm,
@@ -119,7 +118,7 @@ CONFIG: dict[str, object] = {
     # 0.0 ise tile icinde en az bir pozitif piksel olmasi yeterlidir.
     # Bu ayar tile'i veri setine dahil etme filtresi DEGILDIR; sadece tile label
     # uretimi icindir.
-    "tile_label_min_positive_ratio": 0.0,
+    "tile_label_min_positive_ratio": 0.02,
 
     # max_nodata:
     # Bir tile icin izin verilen maksimum gecersiz/nodata orani.
@@ -768,9 +767,6 @@ def _process_single_tile(task: Tuple[int, int, str]) -> dict:
             show_progress=False,
             log_steps=False,
         )
-        plan_curv, profile_curv = compute_curvatures(
-            dtm, pixel_size=float(ctx["pixel_size"])
-        )
         tpi = compute_tpi_multiscale(dtm, radii=ctx["tpi_radii"])
     except Exception as exc:
         return {
@@ -782,14 +778,14 @@ def _process_single_tile(task: Tuple[int, int, str]) -> dict:
 
     stacked = stack_channels(
         rgb=rgb,
+        dsm=dsm,
+        dtm=dtm,
         svf=svf,
         pos_open=pos_open,
         neg_open=neg_open,
         lrm=lrm,
         slope=slope,
         ndsm=ndsm,
-        plan_curv=plan_curv,
-        profile_curv=profile_curv,
         tpi=tpi,
     )
 
@@ -1342,8 +1338,8 @@ def create_training_tiles(
         "tile_presence_grid_rgb_file": str(tile_presence_grid_rgb_path),
         "num_channels": 12,
         "channel_names": [
-            "R", "G", "B", "SVF", "Pos_Openness", "Neg_Openness",
-            "LRM", "Slope", "nDSM", "Plan_Curvature", "Profile_Curvature", "TPI"
+            "R", "G", "B", "DSM", "DTM", "SVF",
+            "Pos_Openness", "Neg_Openness", "LRM", "Slope", "nDSM", "TPI"
         ],
         "stats": stats,
     }

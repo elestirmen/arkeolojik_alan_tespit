@@ -25,12 +25,15 @@ Varsayımlar:
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import gc
 import json
 import logging
 import math
+import os
 import shutil
 import sys
+import threading
 import uuid
 import zipfile
 from contextlib import ExitStack, nullcontext
@@ -120,6 +123,21 @@ T = TypeVar("T")
 SESSION_RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 _WARN_ONCE_KEYS: set[str] = set()
+_DERIV_CACHE_THREAD_LOCAL = threading.local()
+MODEL_CHANNEL_NAMES: Tuple[str, ...] = (
+    "R",
+    "G",
+    "B",
+    "DSM",
+    "DTM",
+    "SVF",
+    "Pos_Openness",
+    "Neg_Openness",
+    "LRM",
+    "Slope",
+    "nDSM",
+    "TPI",
+)
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -128,6 +146,59 @@ def _warn_once(key: str, message: str) -> None:
         return
     _WARN_ONCE_KEYS.add(key)
     LOGGER.warning(message)
+
+
+_KNOWN_OUTPUT_SUFFIXES = {
+    ".tif",
+    ".tiff",
+    ".gpkg",
+    ".xlsx",
+    ".csv",
+    ".geojson",
+    ".json",
+    ".shp",
+    ".vrt",
+}
+
+
+def _output_base_path(path: Path) -> Path:
+    """
+    Strip only real output extensions from a path.
+
+    Path.with_suffix("") truncates suffixless names that merely contain dots, such as
+    "trained_th0.5_mask". Output names use dots in threshold tokens, so only known file
+    extensions should be removed.
+    """
+    suffix = path.suffix.lower()
+    if suffix and suffix in _KNOWN_OUTPUT_SUFFIXES:
+        return path.with_suffix("")
+    return path
+
+
+def _candidate_table_base(path: Path) -> Path:
+    base_path = _output_base_path(path)
+    return base_path.with_name(f"{base_path.name}_gps")
+
+
+def _append_output_suffix(path: Path, suffix: str) -> Path:
+    """Append a file suffix without truncating dotted base names."""
+    if not suffix.startswith("."):
+        raise ValueError("suffix must start with '.'")
+    base_path = _output_base_path(path)
+    return base_path.parent / f"{base_path.name}{suffix}"
+
+
+_CANDIDATE_TABLE_FIELD_ORDER = [
+    "candidate_id",
+    "area_m2",
+    "score_mean",
+    "center_x_native",
+    "center_y_native",
+    "native_crs",
+    "gps_lon",
+    "gps_lat",
+    "google_maps_url",
+]
 
 
 def _safe_token(value: str) -> str:
@@ -183,12 +254,9 @@ def estimate_precompute_derivatives_bytes(
     - RGB (3), DTM (1), optional DSM (1)
     - RVT outputs (SVF, pos/neg openness, LRM, slope) (5)
     - nDSM (1)
-    - optional plan/profile curvature (2)
     - optional TPI (1)
     """
     float_arrays = 3 + 1 + (1 if has_dsm else 0) + 5 + 1
-    if enable_curvature:
-        float_arrays += 2
     if enable_tpi:
         float_arrays += 1
     return int(float_arrays * pixels * np.dtype(np.float32).itemsize)
@@ -608,6 +676,10 @@ class PipelineDefaults:
         default=2048,
         metadata={"help": "Raster-cache üretiminde blok boyutu (piksel). Büyük değer daha hızlı ama daha çok RAM kullanır."},
     )
+    deriv_cache_workers: int = field(
+        default=1,
+        metadata={"help": "Raster-cache hesaplamasÄ± iÃ§in worker sayÄ±sÄ±. 1=seri, 2-4 genelde daha iyi hÄ±z/RAM dengesi verir."},
+    )
     deriv_cache_halo: Optional[int] = field(
         default=None,
         metadata={"help": "Raster-cache için halo (piksel). None ise rvt_radii/tpi_radii/sigma'dan otomatik hesaplanır."},
@@ -724,6 +796,8 @@ class PipelineDefaults:
             errors.append(f"cache_derivatives_mode geçersiz: {self.cache_derivatives_mode} (auto/npz/raster)")
         if self.deriv_cache_chunk <= 0:
             errors.append(f"deriv_cache_chunk pozitif olmalı, verilen: {self.deriv_cache_chunk}")
+        if self.deriv_cache_workers <= 0:
+            errors.append(f"deriv_cache_workers pozitif olmalı, verilen: {self.deriv_cache_workers}")
         if self.deriv_cache_halo is not None and self.deriv_cache_halo < 0:
             errors.append(f"deriv_cache_halo negatif olamaz, verilen: {self.deriv_cache_halo}")
 
@@ -1668,56 +1742,43 @@ def _score_morph(dtm: np.ndarray, radii: Optional[Sequence[int]] = None) -> np.n
 
 def stack_channels(
     rgb: np.ndarray,
+    dsm: Optional[np.ndarray],
+    dtm: np.ndarray,
     svf: np.ndarray,
     pos_open: np.ndarray,
     neg_open: np.ndarray,
     lrm: np.ndarray,
     slope: np.ndarray,
     ndsm: np.ndarray,
-    plan_curv: Optional[np.ndarray] = None,
-    profile_curv: Optional[np.ndarray] = None,
     tpi: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Stack channels in the required order.
-    
-    Varsayılan 9 kanal (geriye uyumlu):
+
+    Varsayilan 11 kanal:
         [0-2]: RGB
-        [3]: SVF (Sky-View Factor)
-        [4]: Positive Openness
-        [5]: Negative Openness
-        [6]: LRM (Local Relief Model)
-        [7]: Slope
-        [8]: nDSM
-    
-    Gelişmiş 12 kanal (enable_curvature ve enable_tpi aktifse):
-        [9]: Plan Curvature
-        [10]: Profile Curvature
-        [11]: TPI (Topographic Position Index)
-    
-    Args:
-        rgb: RGB bantları (3, H, W)
-        svf: Sky-View Factor
-        pos_open: Positive Openness
-        neg_open: Negative Openness
-        lrm: Local Relief Model
-        slope: Eğim
-        ndsm: Normalize edilmiş DSM (DSM - DTM)
-        plan_curv: Plan Curvature (opsiyonel)
-        profile_curv: Profile Curvature (opsiyonel)
-        tpi: Topographic Position Index (opsiyonel)
-    
-    Returns:
-        Stacked tensor (C, H, W) where C is 9 or 12
+        [3]: DSM
+        [4]: DTM
+        [5]: SVF
+        [6]: Positive Openness
+        [7]: Negative Openness
+        [8]: LRM
+        [9]: Slope
+        [10]: nDSM
+
+    TPI aktifse:
+        [11]: TPI
     """
     if rgb.shape[0] != 3:
         raise ValueError("RGB input must have three channels.")
-    
-    # Temel 9 kanal
+
+    dsm_channel = dsm if dsm is not None else np.zeros_like(dtm, dtype=np.float32)
     channels = [
         rgb[0],
         rgb[1],
         rgb[2],
+        dsm_channel,
+        dtm,
         svf,
         pos_open,
         neg_open,
@@ -1725,15 +1786,9 @@ def stack_channels(
         slope,
         ndsm,
     ]
-    
-    # Gelişmiş kanalları ekle (varsa)
-    if plan_curv is not None:
-        channels.append(plan_curv)
-    if profile_curv is not None:
-        channels.append(profile_curv)
     if tpi is not None:
         channels.append(tpi)
-    
+
     stacked = np.stack([ch.astype(np.float32) for ch in channels], axis=0)
     return stacked
 
@@ -1865,16 +1920,13 @@ def get_num_channels(enable_curvature: bool = True, enable_tpi: bool = True) -> 
     """
     Aktif kanalların toplam sayısını döndürür.
     
-    Temel: 9 kanal (RGB + SVF + Openness + LRM + Slope + nDSM)
-    + Curvature: +2 kanal (Plan + Profile)
+    Temel: 11 kanal (RGB + DSM + DTM + SVF + Openness + LRM + Slope + nDSM)
     + TPI: +1 kanal
     
     Returns:
-        9, 11, 10, veya 12 (aktif özelliklere bağlı)
+        11 veya 12 (aktif özelliklere bağlı)
     """
-    base_channels = 9
-    if enable_curvature:
-        base_channels += 2  # Plan + Profile Curvature
+    base_channels = 11
     if enable_tpi:
         base_channels += 1  # TPI
     return base_channels
@@ -2147,10 +2199,79 @@ def get_checkpoint_model_hints(weights_path: Path) -> Dict[str, Any]:
         return {}
 
     hints: Dict[str, Any] = {}
-    for key in ("arch", "encoder", "in_channels", "enable_attention", "attention_reduction", "task_type"):
+    for key in ("arch", "encoder", "in_channels", "enable_attention", "attention_reduction", "task_type", "channel_names"):
         if key in cfg:
             hints[key] = cfg[key]
     return hints
+
+
+def load_training_metadata_hints(metadata_path: Path) -> Dict[str, Any]:
+    """Load optional training-data metadata for consistency warnings."""
+    if not metadata_path.exists():
+        return {}
+    try:
+        raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.debug("Could not read training metadata from %s: %s", metadata_path, exc)
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def warn_if_training_inference_mismatch(
+    *,
+    metadata: Dict[str, Any],
+    input_path: Path,
+    bands: Sequence[int],
+    tile: int,
+    overlap: int,
+    dl_task: str,
+) -> None:
+    """Emit warnings when inference settings differ from training-data metadata."""
+    if not metadata or str(dl_task).strip().lower() != "tile_classification":
+        return
+
+    meta_input_name = Path(str(metadata.get("input_file", "")).strip()).name
+    if meta_input_name and meta_input_name != input_path.name:
+        LOGGER.warning(
+            "Training metadata input '%s' ile inference input '%s' farkli.",
+            meta_input_name,
+            input_path.name,
+        )
+
+    meta_bands = str(metadata.get("bands", "")).strip()
+    bands_csv = ",".join(str(int(v)) for v in bands)
+    if meta_bands and meta_bands != bands_csv:
+        LOGGER.warning(
+            "Training metadata bands '%s' ile inference bands '%s' farkli.",
+            meta_bands,
+            bands_csv,
+        )
+
+    meta_tile = metadata.get("tile_size")
+    if meta_tile is not None and int(meta_tile) != int(tile):
+        LOGGER.warning(
+            "Training metadata tile_size=%s, inference tile=%s. Tile-classification icin ayni olmasi onerilir.",
+            meta_tile,
+            tile,
+        )
+
+    meta_overlap = metadata.get("overlap")
+    if meta_overlap is not None and int(meta_overlap) != int(overlap):
+        LOGGER.warning(
+            "Training metadata overlap=%s, inference overlap=%s. Tile-classification icin ayni olmasi onerilir.",
+            meta_overlap,
+            overlap,
+        )
+
+    meta_channel_names = metadata.get("channel_names")
+    if isinstance(meta_channel_names, list):
+        meta_channels = tuple(str(x) for x in meta_channel_names)
+        if meta_channels != MODEL_CHANNEL_NAMES:
+            LOGGER.warning(
+                "Training metadata channel_names mevcut DL semasiyla farkli. training=%s current=%s",
+                list(meta_channels),
+                list(MODEL_CHANNEL_NAMES),
+            )
 
 
 def load_weights(
@@ -2569,23 +2690,18 @@ def infer_tiled(
                     col_end = col_start + int(window.width)
 
                     rgb_s = precomputed_deriv.rgb[:, row_start:row_end, col_start:col_end].copy()
+                    dsm_s = (
+                        precomputed_deriv.dsm[row_start:row_end, col_start:col_end].copy()
+                        if precomputed_deriv.dsm is not None
+                        else None
+                    )
+                    dtm_s = precomputed_deriv.dtm[row_start:row_end, col_start:col_end].copy()
                     svf_s = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
                     pos_s = precomputed_deriv.pos_open[row_start:row_end, col_start:col_end].copy()
                     neg_s = precomputed_deriv.neg_open[row_start:row_end, col_start:col_end].copy()
                     lrm_s = precomputed_deriv.lrm[row_start:row_end, col_start:col_end].copy()
                     slope_s = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
                     ndsm_s = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
-                    # Yeni kanallar
-                    plan_curv_s = (
-                        precomputed_deriv.plan_curv[row_start:row_end, col_start:col_end].copy()
-                        if (enable_curvature and precomputed_deriv.plan_curv is not None)
-                        else None
-                    )
-                    profile_curv_s = (
-                        precomputed_deriv.profile_curv[row_start:row_end, col_start:col_end].copy()
-                        if (enable_curvature and precomputed_deriv.profile_curv is not None)
-                        else None
-                    )
                     tpi_s = (
                         precomputed_deriv.tpi[row_start:row_end, col_start:col_end].copy()
                         if (enable_tpi and precomputed_deriv.tpi is not None)
@@ -2595,16 +2711,16 @@ def infer_tiled(
                         log_rgb_only_once()
                         Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
                         Z = np.zeros((Hs, Ws), dtype=np.float32)
+                        dsm_s = Z
+                        dtm_s = Z
                         svf_s = Z
                         pos_s = Z
                         neg_s = Z
                         lrm_s = Z
                         slope_s = Z
                         ndsm_s = Z
-                        plan_curv_s = Z if enable_curvature else None
-                        profile_curv_s = Z if enable_curvature else None
                         tpi_s = Z if enable_tpi else None
-                    stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, plan_curv_s, profile_curv_s, tpi_s)
+                    stack_s = stack_channels(rgb_s, dsm_s, dtm_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, tpi_s)
                 elif deriv_ds is not None and deriv_band_map is not None:
                     def read_band(idx: int) -> Optional[np.ndarray]:
                         if idx <= 0:
@@ -2613,51 +2729,42 @@ def infer_tiled(
                         return np.ma.filled(data.astype(np.float32), np.nan)
 
                     rgb_s = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
+                    dsm_s = read_band(band_idx[3])
+                    dtm_s = read_band(band_idx[4])
 
                     if rgb_only:
                         log_rgb_only_once()
                         Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
                         Z = np.zeros((Hs, Ws), dtype=np.float32)
+                        dsm_s = Z
+                        dtm_s = Z
                         svf_s = Z
                         pos_s = Z
                         neg_s = Z
                         lrm_s = Z
                         slope_s = Z
                         ndsm_s = Z
-                        plan_curv_s = Z if enable_curvature else None
-                        profile_curv_s = Z if enable_curvature else None
                         tpi_s = Z if enable_tpi else None
                     else:
                         band_names: List[str] = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm"]
-                        if enable_curvature:
-                            band_names += ["plan_curv", "profile_curv"]
                         if enable_tpi:
                             band_names += ["tpi"]
                         indexes = [int(deriv_band_map[name]) for name in band_names]
                         deriv_stack = deriv_ds.read(indexes=indexes, window=window, boundless=True, masked=True)
                         deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
                         svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s = deriv_stack[:6]
-                        off = 6
-                        plan_curv_s = None
-                        profile_curv_s = None
-                        tpi_s = None
-                        if enable_curvature:
-                            plan_curv_s = deriv_stack[off]
-                            profile_curv_s = deriv_stack[off + 1]
-                            off += 2
-                        if enable_tpi:
-                            tpi_s = deriv_stack[off]
+                        tpi_s = deriv_stack[6] if enable_tpi else None
 
                     stack_s = stack_channels(
                         rgb_s,
+                        dsm_s,
+                        dtm_s,
                         svf_s,
                         pos_s,
                         neg_s,
                         lrm_s,
                         slope_s,
                         ndsm_s,
-                        plan_curv_s,
-                        profile_curv_s,
                         tpi_s,
                     )
                 else:
@@ -2677,14 +2784,14 @@ def infer_tiled(
                         log_rgb_only_once()
                         Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
                         Z = np.zeros((Hs, Ws), dtype=np.float32)
+                        dsm_s = Z
+                        dtm_s = Z
                         svf_s = Z
                         pos_s = Z
                         neg_s = Z
                         lrm_s = Z
                         slope_s = Z
                         ndsm_s = Z
-                        plan_curv_s = Z if enable_curvature else None
-                        profile_curv_s = Z if enable_curvature else None
                         tpi_s = Z if enable_tpi else None
                     else:
                         ndsm_s = compute_ndsm(dsm_s, dtm_s)
@@ -2696,14 +2803,10 @@ def infer_tiled(
                             show_progress=False,
                             log_steps=False,
                         )
-                        plan_curv_s = None
-                        profile_curv_s = None
                         tpi_s = None
-                        if enable_curvature:
-                            plan_curv_s, profile_curv_s = compute_curvatures(dtm_s, pixel_size=pixel_size)
                         if enable_tpi:
                             tpi_s = compute_tpi_multiscale(dtm_s, radii=tpi_radii)
-                    stack_s = stack_channels(rgb_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, plan_curv_s, profile_curv_s, tpi_s)
+                    stack_s = stack_channels(rgb_s, dsm_s, dtm_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, tpi_s)
 
                 Hs, Ws = stack_s.shape[1], stack_s.shape[2]
                 ch = min(TILE_SAMPLE_CROP_SIZE, Hs)
@@ -2768,17 +2871,6 @@ def infer_tiled(
                 slope = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
                 ndsm_tile = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
                 
-                # Yeni kanallar (varsa)
-                plan_curv_tile = (
-                    precomputed_deriv.plan_curv[row_start:row_end, col_start:col_end].copy()
-                    if (enable_curvature and precomputed_deriv.plan_curv is not None)
-                    else None
-                )
-                profile_curv_tile = (
-                    precomputed_deriv.profile_curv[row_start:row_end, col_start:col_end].copy()
-                    if (enable_curvature and precomputed_deriv.profile_curv is not None)
-                    else None
-                )
                 tpi_tile = (
                     precomputed_deriv.tpi[row_start:row_end, col_start:col_end].copy()
                     if (enable_tpi and precomputed_deriv.tpi is not None)
@@ -2798,10 +2890,6 @@ def infer_tiled(
                     slope = np.pad(slope, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     ndsm_tile = np.pad(ndsm_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     # Yeni kanallar için padding
-                    if plan_curv_tile is not None:
-                        plan_curv_tile = np.pad(plan_curv_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    if profile_curv_tile is not None:
-                        profile_curv_tile = np.pad(profile_curv_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     if tpi_tile is not None:
                         tpi_tile = np.pad(tpi_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
 
@@ -2809,14 +2897,14 @@ def infer_tiled(
                     log_rgb_only_once()
                     Ht, Wt = rgb.shape[1], rgb.shape[2]
                     Z = np.zeros((Ht, Wt), dtype=np.float32)
+                    dsm = Z
+                    dtm = Z
                     svf = Z
                     pos_open = Z
                     neg_open = Z
                     lrm = Z
                     slope = Z
                     ndsm_tile = Z
-                    plan_curv_tile = Z if enable_curvature else None
-                    profile_curv_tile = Z if enable_curvature else None
                     tpi_tile = Z if enable_tpi else None
 
                 valid_mask = np.isfinite(dtm)
@@ -2828,10 +2916,10 @@ def infer_tiled(
                     return np.ma.filled(data.astype(np.float32), np.nan)
 
                 rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
+                dsm = read_band(band_idx[3])
+                dtm = read_band(band_idx[4])
 
                 band_names: List[str] = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm"]
-                if enable_curvature:
-                    band_names += ["plan_curv", "profile_curv"]
                 if enable_tpi:
                     band_names += ["tpi"]
                 indexes = [int(deriv_band_map[name]) for name in band_names]
@@ -2839,37 +2927,23 @@ def infer_tiled(
                 deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
 
                 svf, pos_open, neg_open, lrm, slope, ndsm_tile = deriv_stack[:6]
-                off = 6
-                plan_curv_tile = None
-                profile_curv_tile = None
-                tpi_tile = None
-                if enable_curvature:
-                    plan_curv_tile = deriv_stack[off]
-                    profile_curv_tile = deriv_stack[off + 1]
-                    off += 2
-                if enable_tpi:
-                    tpi_tile = deriv_stack[off]
+                tpi_tile = deriv_stack[6] if enable_tpi else None
 
                 if pad_h or pad_w:
                     rgb = np.pad(rgb, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    dtm = np.pad(dtm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    if dsm is not None:
+                        dsm = np.pad(dsm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     svf = np.pad(svf, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     pos_open = np.pad(pos_open, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     neg_open = np.pad(neg_open, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     lrm = np.pad(lrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     slope = np.pad(slope, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     ndsm_tile = np.pad(ndsm_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    if plan_curv_tile is not None:
-                        plan_curv_tile = np.pad(
-                            plan_curv_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan
-                        )
-                    if profile_curv_tile is not None:
-                        profile_curv_tile = np.pad(
-                            profile_curv_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan
-                        )
                     if tpi_tile is not None:
                         tpi_tile = np.pad(tpi_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
 
-                valid_mask = np.isfinite(ndsm_tile)
+                valid_mask = np.isfinite(dtm)
             else:
                 # Normal mod - Her tile için RVT hesapla
                 def read_band(idx: int) -> Optional[np.ndarray]:
@@ -2911,14 +2985,14 @@ def infer_tiled(
                     log_rgb_only_once()
                     Ht, Wt = rgb.shape[1], rgb.shape[2]
                     Z = np.zeros((Ht, Wt), dtype=np.float32)
+                    dsm = Z
+                    dtm = Z
                     svf = Z
                     pos_open = Z
                     neg_open = Z
                     lrm = Z
                     slope = Z
                     ndsm_tile = Z
-                    plan_curv_tile = Z if enable_curvature else None
-                    profile_curv_tile = Z if enable_curvature else None
                     tpi_tile = Z if enable_tpi else None
                 else:
                     ndsm_tile = compute_ndsm(dsm, dtm)
@@ -2930,24 +3004,20 @@ def infer_tiled(
                         show_progress=False,
                         log_steps=False,
                     )
-                    plan_curv_tile = None
-                    profile_curv_tile = None
                     tpi_tile = None
-                    if enable_curvature:
-                        plan_curv_tile, profile_curv_tile = compute_curvatures(dtm, pixel_size=pixel_size)
                     if enable_tpi:
                         tpi_tile = compute_tpi_multiscale(dtm, radii=tpi_radii)
 
             stacked = stack_channels(
                 rgb=rgb,
+                dsm=dsm,
+                dtm=dtm,
                 svf=svf,
                 pos_open=pos_open,
                 neg_open=neg_open,
                 lrm=lrm,
                 slope=slope,
                 ndsm=ndsm_tile,
-                plan_curv=plan_curv_tile,
-                profile_curv=profile_curv_tile,
                 tpi=tpi_tile,
             )
             if global_norm and fixed_lows is not None and fixed_highs is not None:
@@ -3024,7 +3094,7 @@ def infer_tiled(
 
         prob_map = prob_acc
 
-        base_prefix = out_prefix.with_suffix("")
+        base_prefix = _output_base_path(out_prefix)
         base_prefix.parent.mkdir(parents=True, exist_ok=True)
         
         # Parametreli dosya adı oluştur
@@ -3484,7 +3554,7 @@ def infer_yolo_tiled(
         prob_map = prob_acc
         
         # Build output paths
-        base_prefix = out_prefix.with_suffix("")
+        base_prefix = _output_base_path(out_prefix)
         base_prefix.parent.mkdir(parents=True, exist_ok=True)
         
         filename = build_filename_with_params(
@@ -3622,7 +3692,7 @@ def infer_classic_tiled(
     unknown = [m for m in base_modes if m not in allowed]
     if unknown:
         raise ValueError(f"Unsupported classic mode(s): {', '.join(unknown)}")
-    base_prefix = out_prefix.with_suffix("")
+    base_prefix = _output_base_path(out_prefix)
     base_prefix.parent.mkdir(parents=True, exist_ok=True)
 
     with ExitStack() as stack:
@@ -4358,7 +4428,7 @@ def _write_candidate_location_rows_xlsx(
     out_base: Path,
 ) -> Optional[Path]:
     """Write candidate rows to XLSX, using built-in fallback if openpyxl is missing."""
-    xlsx_path = out_base.with_suffix(".xlsx")
+    xlsx_path = _append_output_suffix(out_base, ".xlsx")
     if Workbook is not None:
         wb = Workbook()
         ws = wb.active
@@ -4447,19 +4517,42 @@ def export_candidate_locations_table(
 ) -> Optional[Path]:
     """Write candidate locations as XLSX."""
     rows = _build_candidate_location_rows(records=records, crs=crs)
+    return _write_candidate_location_rows_xlsx(
+        rows=rows,
+        field_order=_CANDIDATE_TABLE_FIELD_ORDER,
+        out_base=out_base,
+    )
 
-    field_order = [
-        "candidate_id",
-        "area_m2",
-        "score_mean",
-        "center_x_native",
-        "center_y_native",
-        "native_crs",
-        "gps_lon",
-        "gps_lat",
-        "google_maps_url",
-    ]
-    return _write_candidate_location_rows_xlsx(rows=rows, field_order=field_order, out_base=out_base)
+
+def write_empty_candidate_locations_table(
+    *,
+    out_base: Path,
+) -> Optional[Path]:
+    """Always write an empty candidate XLSX with headers only."""
+    return _write_candidate_location_rows_xlsx(
+        rows=[],
+        field_order=_CANDIDATE_TABLE_FIELD_ORDER,
+        out_base=out_base,
+    )
+
+
+def ensure_candidate_locations_table_exists(
+    *,
+    out_base: Path,
+    log_prefix: str = "",
+    reason: Optional[str] = None,
+) -> Optional[Path]:
+    """Ensure a candidate XLSX exists; create an empty one if needed."""
+    prefix = f"{log_prefix} " if log_prefix else ""
+    xlsx_path = _append_output_suffix(out_base, ".xlsx")
+    if xlsx_path.exists():
+        return xlsx_path
+    if reason:
+        LOGGER.warning("%s%s", prefix, reason)
+    table_path = write_empty_candidate_locations_table(out_base=out_base)
+    if table_path:
+        LOGGER.info("%sBos Excel aday tablosu yazildi: %s", prefix, table_path)
+    return table_path
 
 
 def export_candidate_locations_from_prediction(
@@ -4474,20 +4567,9 @@ def export_candidate_locations_from_prediction(
     label_connectivity: int,
 ) -> Optional[Path]:
     """Export candidate table directly from raster predictions without polygon libraries."""
-    field_order = [
-        "candidate_id",
-        "area_m2",
-        "score_mean",
-        "center_x_native",
-        "center_y_native",
-        "native_crs",
-        "gps_lon",
-        "gps_lat",
-        "google_maps_url",
-    ]
     if mask.size == 0 or prob_map.size == 0:
         LOGGER.warning("Bos mask/prob rasteri; aday Excel tablosu bos olarak yaziliyor.")
-        return _write_candidate_location_rows_xlsx(rows=[], field_order=field_order, out_base=out_base)
+        return write_empty_candidate_locations_table(out_base=out_base)
 
     k = max(1, int(opening_size))
     cleaned_mask = grey_opening(mask.astype(np.uint8), size=(k, k))
@@ -4499,7 +4581,7 @@ def export_candidate_locations_from_prediction(
     labels, num_features = ndimage.label(cleaned_mask.astype(bool), structure=structure)
     if num_features == 0:
         LOGGER.warning("Aday tablo icin esik ustunde bilesen bulunamadi; bos Excel yaziliyor.")
-        return _write_candidate_location_rows_xlsx(rows=[], field_order=field_order, out_base=out_base)
+        return write_empty_candidate_locations_table(out_base=out_base)
 
     label_ids = np.arange(1, num_features + 1)
     pixel_counts = np.asarray(
@@ -4538,7 +4620,7 @@ def export_candidate_locations_from_prediction(
 
     if not temp_rows:
         LOGGER.warning("Aday tablo icin minimum alan filtresini gecen bilesen bulunamadi; bos Excel yaziliyor.")
-        return _write_candidate_location_rows_xlsx(rows=[], field_order=field_order, out_base=out_base)
+        return write_empty_candidate_locations_table(out_base=out_base)
 
     gps_lons, gps_lats = _transform_points_to_wgs84(native_xs, native_ys, crs)
     rows: List[Dict[str, Any]] = []
@@ -4561,8 +4643,11 @@ def export_candidate_locations_from_prediction(
                 "google_maps_url": google_maps_url,
             }
         )
-
-    return _write_candidate_location_rows_xlsx(rows=rows, field_order=field_order, out_base=out_base)
+    return _write_candidate_location_rows_xlsx(
+        rows=rows,
+        field_order=_CANDIDATE_TABLE_FIELD_ORDER,
+        out_base=out_base,
+    )
 
 
 def load_prediction_arrays(
@@ -4578,6 +4663,39 @@ def load_prediction_arrays(
     return mask_arr, prob_arr
 
 
+def export_candidate_locations_from_prediction_safe(
+    *,
+    mask: Optional[np.ndarray],
+    prob_map: Optional[np.ndarray],
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    out_base: Path,
+    min_area: float,
+    opening_size: int,
+    label_connectivity: int,
+    log_prefix: str = "",
+) -> Optional[Path]:
+    """Best-effort candidate XLSX export; fall back to an empty workbook on any failure."""
+    prefix = f"{log_prefix} " if log_prefix else ""
+    try:
+        if mask is None or prob_map is None:
+            LOGGER.warning("%sRaster verisi eksik; bos Excel yaziliyor.", prefix)
+            return write_empty_candidate_locations_table(out_base=out_base)
+        return export_candidate_locations_from_prediction(
+            mask=mask,
+            prob_map=prob_map,
+            transform=transform,
+            crs=crs,
+            out_base=out_base,
+            min_area=min_area,
+            opening_size=opening_size,
+            label_connectivity=label_connectivity,
+        )
+    except Exception as exc:
+        LOGGER.warning("%sAday Excel aktarimi basarisiz (%s); bos Excel yaziliyor.", prefix, exc)
+        return write_empty_candidate_locations_table(out_base=out_base)
+
+
 def vectorize_predictions(
     mask: np.ndarray,
     prob_map: np.ndarray,
@@ -4591,6 +4709,7 @@ def vectorize_predictions(
     export_candidate_excel: bool = True,
 ) -> Optional[Path]:
     """Convert binary mask into polygons and write to GeoPackage."""
+    table_base = _candidate_table_base(out_path)
     if fiona is None and gpd is None:
         LOGGER.warning("Vektör çıktısı atlandı; vektörleştirme için geopandas veya fiona yükleyin.")
         return None
@@ -4724,15 +4843,14 @@ def vectorize_predictions(
     if not records:
         LOGGER.info("No polygons passed the min-area filter; skipping vector output.")
         if export_candidate_excel:
-            empty_out_path = out_path.with_suffix("")
-            empty_base = empty_out_path.with_name(f"{empty_out_path.name}_gps")
+            empty_base = _candidate_table_base(out_path)
             empty_table = export_candidate_locations_table(records=[], crs=crs, out_base=empty_base)
             if empty_table:
                 LOGGER.info("Bo? aday konum tablosu yaz?ld?: %s", empty_table)
         return None
 
-    base_out_path = out_path.with_suffix("")
-    gpkg_path = base_out_path.with_suffix(".gpkg")
+    base_out_path = _output_base_path(out_path)
+    gpkg_path = _append_output_suffix(base_out_path, ".gpkg")
     gpkg_path.parent.mkdir(parents=True, exist_ok=True)
     LOGGER.info("GeoPackage dosyası yazılıyor (%d poligon)...", len(records))
     if gpd is not None:
@@ -4773,7 +4891,7 @@ def vectorize_predictions(
                     }
                 )
     if export_candidate_excel:
-        table_base = base_out_path.with_name(f"{base_out_path.name}_gps")
+        table_base = _candidate_table_base(base_out_path)
         table_path = export_candidate_locations_table(records=records, crs=crs, out_base=table_base)
         if table_path:
             LOGGER.info("Aday konum tablosu yazıldı: %s", table_path)
@@ -5025,7 +5143,7 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str], config: Pipeline
         if out_path.is_dir():
             out_path = out_path / input_path.stem
     else:
-        out_path = input_path.with_suffix("")
+        out_path = _output_base_path(input_path)
 
     # Route all raster/vector outputs under a dedicated subfolder: 'ciktilar'
     # Downstream code writes to base_prefix.parent; make that parent session-scoped.
@@ -5265,8 +5383,6 @@ def validate_derivative_raster_cache_metadata(
         return False
 
     required_bands = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm"]
-    if enable_curvature:
-        required_bands += ["plan_curv", "profile_curv"]
     if enable_tpi:
         required_bands += ["tpi"]
     missing = [b for b in required_bands if b not in band_map]
@@ -5354,6 +5470,130 @@ def _estimate_derivative_cache_halo_px(
     return max(2, halo_rvt, halo_gauss, halo_curv, halo_tpi)
 
 
+def _get_derivative_cache_thread_reader(input_path: str) -> Any:
+    """Reuse one raster reader per worker thread to avoid reopening on every block."""
+    reader = getattr(_DERIV_CACHE_THREAD_LOCAL, "reader", None)
+    reader_path = getattr(_DERIV_CACHE_THREAD_LOCAL, "reader_path", None)
+    if reader is None or reader_path != input_path:
+        if reader is not None:
+            try:
+                reader.close()
+            except Exception:
+                pass
+        reader = rasterio.open(input_path)
+        _DERIV_CACHE_THREAD_LOCAL.reader = reader
+        _DERIV_CACHE_THREAD_LOCAL.reader_path = input_path
+    return reader
+
+
+def _compute_derivative_cache_block_from_source(
+    src: Any,
+    *,
+    width: int,
+    height: int,
+    row: int,
+    col: int,
+    win_h: int,
+    win_w: int,
+    halo: int,
+    dtm_idx: int,
+    dsm_idx: int,
+    pixel_size: float,
+    rvt_radii: Sequence[float],
+    gaussian_lrm_sigma: Optional[float],
+    enable_curvature: bool,
+    enable_tpi: bool,
+    tpi_radii: Sequence[int],
+) -> np.ndarray:
+    row0 = max(0, int(row) - halo)
+    col0 = max(0, int(col) - halo)
+    row1 = min(height, int(row) + win_h + halo)
+    col1 = min(width, int(col) + win_w + halo)
+    padded = Window(col0, row0, col1 - col0, row1 - row0)
+
+    dtm_ma = src.read(dtm_idx, window=padded, boundless=False, masked=True)
+    dtm = np.ma.filled(dtm_ma.astype(np.float32), np.nan)
+
+    dsm: Optional[np.ndarray]
+    if dsm_idx > 0:
+        dsm_ma = src.read(dsm_idx, window=padded, boundless=False, masked=True)
+        dsm = np.ma.filled(dsm_ma.astype(np.float32), np.nan)
+    else:
+        dsm = None
+
+    ndsm = compute_ndsm(dsm, dtm)
+    svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+        dtm,
+        pixel_size=pixel_size,
+        radii=rvt_radii,
+        gaussian_lrm_sigma=gaussian_lrm_sigma,
+        show_progress=False,
+        log_steps=False,
+    )
+
+    tpi: Optional[np.ndarray] = None
+    if enable_tpi:
+        tpi = compute_tpi_multiscale(dtm, radii=tuple(int(x) for x in tpi_radii))
+
+    roff = int(row) - row0
+    coff = int(col) - col0
+    rs = slice(roff, roff + win_h)
+    cs = slice(coff, coff + win_w)
+
+    layers: List[np.ndarray] = [
+        svf[rs, cs],
+        pos_open[rs, cs],
+        neg_open[rs, cs],
+        lrm[rs, cs],
+        slope[rs, cs],
+        ndsm[rs, cs],
+    ]
+    if enable_tpi and tpi is not None:
+        layers.append(tpi[rs, cs])
+
+    return np.stack(layers, axis=0).astype(np.float32, copy=False)
+
+
+def _compute_derivative_cache_block(
+    input_path: str,
+    *,
+    width: int,
+    height: int,
+    row: int,
+    col: int,
+    win_h: int,
+    win_w: int,
+    halo: int,
+    dtm_idx: int,
+    dsm_idx: int,
+    pixel_size: float,
+    rvt_radii: Sequence[float],
+    gaussian_lrm_sigma: Optional[float],
+    enable_curvature: bool,
+    enable_tpi: bool,
+    tpi_radii: Sequence[int],
+) -> np.ndarray:
+    src = _get_derivative_cache_thread_reader(input_path)
+    return _compute_derivative_cache_block_from_source(
+        src,
+        width=width,
+        height=height,
+        row=row,
+        col=col,
+        win_h=win_h,
+        win_w=win_w,
+        halo=halo,
+        dtm_idx=dtm_idx,
+        dsm_idx=dsm_idx,
+        pixel_size=pixel_size,
+        rvt_radii=rvt_radii,
+        gaussian_lrm_sigma=gaussian_lrm_sigma,
+        enable_curvature=enable_curvature,
+        enable_tpi=enable_tpi,
+        tpi_radii=tpi_radii,
+    )
+
+
 def build_derivative_raster_cache(
     *,
     input_path: Path,
@@ -5367,11 +5607,14 @@ def build_derivative_raster_cache(
     enable_tpi: bool,
     tpi_radii: Sequence[int],
     chunk_size: int = 2048,
+    worker_count: int = 1,
     halo_px: Optional[int] = None,
 ) -> Dict[str, Any]:
     """RVT trevlerini blok blok hesaplayp GeoTIFF olarak cache'ler."""
     if chunk_size <= 0:
         raise ValueError("chunk_size pozitif olmal")
+    if worker_count <= 0:
+        raise ValueError("worker_count pozitif olmalı")
     if halo_px is not None and halo_px < 0:
         raise ValueError("halo_px negatif olamaz")
 
@@ -5420,10 +5663,6 @@ def build_derivative_raster_cache(
             "ndsm": 6,
         }
         next_band = 7
-        if enable_curvature:
-            band_map["plan_curv"] = next_band
-            band_map["profile_curv"] = next_band + 1
-            next_band += 2
         if enable_tpi:
             band_map["tpi"] = next_band
             next_band += 1
@@ -5446,6 +5685,7 @@ def build_derivative_raster_cache(
             "enable_tpi": bool(enable_tpi),
             "tpi_radii": [int(x) for x in (tpi_radii if enable_tpi else [])],
             "chunk_size": int(chunk_size),
+            "worker_count": int(worker_count),
             "halo_px": int(halo),
             "band_map": {k: int(v) for k, v in band_map.items()},
         }
@@ -5465,6 +5705,9 @@ def build_derivative_raster_cache(
         out_meta["interleave"] = "pixel"
 
         total_blocks = math.ceil(height / chunk_size) * math.ceil(width / chunk_size)
+        effective_workers = max(1, min(int(worker_count), total_blocks, os.cpu_count() or int(worker_count)))
+        block_radii = tuple(float(x) for x in radii_used)
+        block_tpi_radii = tuple(int(x) for x in tpi_radii)
         LOGGER.info(
             "Raster-cache oluŸturuluyor: %s (%d band, block=%d, halo=%d px)",
             cache_tif_path,
@@ -5474,72 +5717,89 @@ def build_derivative_raster_cache(
         )
 
         with rasterio.open(cache_tif_path, "w", **out_meta) as dst:
-            for window, row, col in progress_bar(
-                generate_windows(width, height, chunk_size, overlap=0),
-                total=total_blocks,
-                desc="DerivCache",
-                unit="block",
-            ):
-                win_h = int(window.height)
-                win_w = int(window.width)
-
-                row0 = max(0, int(row) - halo)
-                col0 = max(0, int(col) - halo)
-                row1 = min(height, int(row) + win_h + halo)
-                col1 = min(width, int(col) + win_w + halo)
-                padded = Window(col0, row0, col1 - col0, row1 - row0)
-
-                dtm_ma = src.read(dtm_idx, window=padded, boundless=False, masked=True)
-                dtm = np.ma.filled(dtm_ma.astype(np.float32), np.nan)
-
-                dsm: Optional[np.ndarray]
-                if dsm_idx > 0:
-                    dsm_ma = src.read(dsm_idx, window=padded, boundless=False, masked=True)
-                    dsm = np.ma.filled(dsm_ma.astype(np.float32), np.nan)
-                else:
-                    dsm = None
-
-                # Derivatives on padded window
-                ndsm = compute_ndsm(dsm, dtm)
-                svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
-                    dtm,
-                    pixel_size=pixel_size,
-                    radii=rvt_radii,
-                    gaussian_lrm_sigma=gaussian_lrm_sigma,
-                    show_progress=False,
-                    log_steps=False,
+            if effective_workers == 1:
+                for window, row, col in progress_bar(
+                    generate_windows(width, height, chunk_size, overlap=0),
+                    total=total_blocks,
+                    desc="DerivCache",
+                    unit="block",
+                ):
+                    data = _compute_derivative_cache_block_from_source(
+                        src,
+                        width=width,
+                        height=height,
+                        row=int(row),
+                        col=int(col),
+                        win_h=int(window.height),
+                        win_w=int(window.width),
+                        halo=halo,
+                        dtm_idx=dtm_idx,
+                        dsm_idx=dsm_idx,
+                        pixel_size=pixel_size,
+                        rvt_radii=block_radii,
+                        gaussian_lrm_sigma=sigma_used,
+                        enable_curvature=enable_curvature,
+                        enable_tpi=enable_tpi,
+                        tpi_radii=block_tpi_radii,
+                    )
+                    dst.write(data, window=window)
+            else:
+                LOGGER.info("Raster-cache paralel hesaplama etkin: %d worker", effective_workers)
+                window_iter = iter(generate_windows(width, height, chunk_size, overlap=0))
+                pending: Dict[Any, Tuple[Window, int, int]] = {}
+                progress = progress_bar(
+                    range(total_blocks),
+                    total=total_blocks,
+                    desc="DerivCache",
+                    unit="block",
                 )
 
-                plan_curv: Optional[np.ndarray] = None
-                profile_curv: Optional[np.ndarray] = None
-                tpi: Optional[np.ndarray] = None
-                if enable_curvature:
-                    plan_curv, profile_curv = compute_curvatures(dtm, pixel_size=pixel_size)
-                if enable_tpi:
-                    tpi = compute_tpi_multiscale(dtm, radii=tuple(int(x) for x in tpi_radii))
+                def _submit_next(executor: ThreadPoolExecutor) -> bool:
+                    try:
+                        window, row, col = next(window_iter)
+                    except StopIteration:
+                        return False
+                    future = executor.submit(
+                        _compute_derivative_cache_block,
+                        str(input_path),
+                        width=width,
+                        height=height,
+                        row=int(row),
+                        col=int(col),
+                        win_h=int(window.height),
+                        win_w=int(window.width),
+                        halo=halo,
+                        dtm_idx=dtm_idx,
+                        dsm_idx=dsm_idx,
+                        pixel_size=pixel_size,
+                        rvt_radii=block_radii,
+                        gaussian_lrm_sigma=sigma_used,
+                        enable_curvature=enable_curvature,
+                        enable_tpi=enable_tpi,
+                        tpi_radii=block_tpi_radii,
+                    )
+                    pending[future] = (window, int(row), int(col))
+                    return True
 
-                # Crop to the original (non-halo) window
-                roff = int(row) - row0
-                coff = int(col) - col0
-                rs = slice(roff, roff + win_h)
-                cs = slice(coff, coff + win_w)
+                try:
+                    with ThreadPoolExecutor(
+                        max_workers=effective_workers,
+                        thread_name_prefix="deriv-cache",
+                    ) as executor:
+                        for _ in range(effective_workers):
+                            if not _submit_next(executor):
+                                break
 
-                layers: List[np.ndarray] = [
-                    svf[rs, cs],
-                    pos_open[rs, cs],
-                    neg_open[rs, cs],
-                    lrm[rs, cs],
-                    slope[rs, cs],
-                    ndsm[rs, cs],
-                ]
-                if enable_curvature and plan_curv is not None and profile_curv is not None:
-                    layers.append(plan_curv[rs, cs])
-                    layers.append(profile_curv[rs, cs])
-                if enable_tpi and tpi is not None:
-                    layers.append(tpi[rs, cs])
-
-                data = np.stack(layers, axis=0).astype(np.float32, copy=False)
-                dst.write(data, window=window)
+                        while pending:
+                            done, _ = wait(tuple(pending.keys()), return_when=FIRST_COMPLETED)
+                            for future in done:
+                                window, _row, _col = pending.pop(future)
+                                data = future.result()
+                                dst.write(data, window=window)
+                                progress.update(1)
+                                _submit_next(executor)
+                finally:
+                    progress.close()
 
         metadata["complete"] = True
         _json_dump(cache_meta_path, metadata)
@@ -5864,9 +6124,6 @@ def precompute_derivatives(
                     
                     # Eğer yeni kanallar isteniyor ama cache'de yoksa, yeniden hesapla
                     need_recalc = False
-                    if enable_curvature and (plan_curv_cached is None or profile_curv_cached is None):
-                        LOGGER.info("Cache'de Curvature yok, yeniden hesaplanacak")
-                        need_recalc = True
                     if enable_tpi and tpi_cached is None:
                         LOGGER.info("Cache'de TPI yok, yeniden hesaplanacak")
                         need_recalc = True
@@ -5947,13 +6204,7 @@ def precompute_derivatives(
         plan_curv = None
         profile_curv = None
         tpi = None
-        
-        if enable_curvature:
-            LOGGER.info("Curvature kanalları hesaplanıyor (Plan + Profile)...")
-            plan_curv, profile_curv = compute_curvatures(dtm, pixel_size=pixel_size)
-            LOGGER.info("  → Plan Curvature: hendek/sırt ayrımı için")
-            LOGGER.info("  → Profile Curvature: teras/basamak tespiti için")
-        
+
         if enable_tpi:
             LOGGER.info(f"TPI (Topographic Position Index) hesaplanıyor (yarıçaplar: {tpi_radii})...")
             tpi = compute_tpi_multiscale(dtm, radii=tpi_radii)
@@ -6274,6 +6525,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("deriv_cache_chunk"),
     )
     parser.add_argument(
+        "--deriv-cache-workers",
+        type=int,
+        default=default_for("deriv_cache_workers"),
+        dest="deriv_cache_workers",
+        help=cli_help("deriv_cache_workers"),
+    )
+    parser.add_argument(
         "--deriv-cache-halo",
         type=int,
         default=default_for("deriv_cache_halo"),
@@ -6490,6 +6748,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     dl_task = str(config.dl_task).strip().lower()
 
     bands = parse_band_indexes(config.bands)
+    training_metadata = load_training_metadata_hints(Path("training_data") / "metadata.json")
+    warn_if_training_inference_mismatch(
+        metadata=training_metadata,
+        input_path=input_path,
+        bands=bands,
+        tile=int(config.tile),
+        overlap=int(config.overlap),
+        dl_task=dl_task,
+    )
     out_prefix = resolve_out_prefix(input_path, config.out_prefix, config)
 
     # Heuristic: treat very large rasters differently to avoid OOM in downstream steps (fusion/vectorization).
@@ -6636,6 +6903,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
             if raster_info is None:
                 chunk_size = int(getattr(config, "deriv_cache_chunk", 2048))
+                worker_count = int(getattr(config, "deriv_cache_workers", 1))
                 halo_px = getattr(config, "deriv_cache_halo", None)
                 if halo_px is not None:
                     halo_px = int(halo_px)
@@ -6651,6 +6919,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     enable_tpi=config.enable_tpi,
                     tpi_radii=config.tpi_radii,
                     chunk_size=chunk_size,
+                    worker_count=worker_count,
                     halo_px=halo_px,
                 )
                 raster_info = load_derivative_raster_cache_info(
@@ -6814,7 +7083,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     )
                     wt = "random"
 
-            enc_prefix = out_prefix.with_suffix("")
+            enc_prefix = _output_base_path(out_prefix)
             enc_prefix = enc_prefix.parent / f"{enc_prefix.name}_{suffix}"
 
             outputs = infer_tiled(
@@ -6855,9 +7124,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             # Store last encoder label for fusion filenames
             fusion_encoder_label = suffix
             dl_runs.append((suffix, outputs.prob_path))
-            if config.vectorize:
-                LOGGER.info("[%s] Vekt?rle?tirme ba?lat?l?yor...", suffix)
-                vector_base = outputs.mask_path.with_suffix("")
+            if config.vectorize or config.export_candidate_excel:
+                if config.vectorize:
+                    LOGGER.info("[%s] Vekt?rle?tirme/Excel aktar?m? ba?lat?l?yor...", suffix)
+                else:
+                    LOGGER.info("[%s] Excel aday tablosu olu?turuluyor (vekt?r kapal?).", suffix)
+                vector_base = _output_base_path(outputs.mask_path)
                 vector_ok, vector_reason = _can_vectorize_predictions()
                 try:
                     mask_arr = outputs.mask
@@ -6873,25 +7145,41 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     prob_arr = None
 
                 if mask_arr is None or prob_arr is None:
-                    LOGGER.warning("[%s] Vekt?r/tablo ??kt?s? atland?; rasterlar okunamad?.", suffix)
-                elif vector_ok:
-                    gpkg = vectorize_predictions(
-                        mask=mask_arr,
-                        prob_map=prob_arr,
-                        transform=outputs.transform,
-                        crs=outputs.crs,
-                        out_path=vector_base,
-                        min_area=config.min_area,
-                        simplify_tol=config.simplify,
-                        opening_size=config.vector_opening_size,
-                        label_connectivity=config.label_connectivity,
-                        export_candidate_excel=config.export_candidate_excel,
-                    )
+                    LOGGER.warning("[%s] Vekt?r/Excel ??kt?s? atland?; rasterlar okunamad?.", suffix)
+                    if config.export_candidate_excel:
+                        ensure_candidate_locations_table_exists(
+                            out_base=_candidate_table_base(vector_base),
+                            log_prefix=f"[{suffix}]",
+                            reason="Rasterlar okunamadigi icin bos Excel olusturuluyor.",
+                        )
+                elif config.vectorize and vector_ok:
+                    try:
+                        gpkg = vectorize_predictions(
+                            mask=mask_arr,
+                            prob_map=prob_arr,
+                            transform=outputs.transform,
+                            crs=outputs.crs,
+                            out_path=vector_base,
+                            min_area=config.min_area,
+                            simplify_tol=config.simplify,
+                            opening_size=config.vector_opening_size,
+                            label_connectivity=config.label_connectivity,
+                            export_candidate_excel=config.export_candidate_excel,
+                        )
+                    except Exception as e:
+                        LOGGER.warning("[%s] Vekt?r/Excel aktarimi basarisiz: %s", suffix, e)
+                        gpkg = None
                     if gpkg:
                         LOGGER.info("[%s] ? Vekt?r dosyas?: %s", suffix, gpkg)
+                    if config.export_candidate_excel:
+                        ensure_candidate_locations_table_exists(
+                            out_base=_candidate_table_base(vector_base),
+                            log_prefix=f"[{suffix}]",
+                            reason="Excel dosyasi bulunamadi; bos Excel olusturuluyor.",
+                        )
                 elif config.export_candidate_excel:
-                    table_base = vector_base.with_name(f"{vector_base.name}_gps")
-                    table_path = export_candidate_locations_from_prediction(
+                    table_base = _candidate_table_base(vector_base)
+                    table_path = export_candidate_locations_from_prediction_safe(
                         mask=mask_arr,
                         prob_map=prob_arr,
                         transform=outputs.transform,
@@ -6900,14 +7188,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         min_area=config.min_area,
                         opening_size=config.vector_opening_size,
                         label_connectivity=config.label_connectivity,
+                        log_prefix=f"[{suffix}]",
                     )
                     if table_path:
                         LOGGER.info("[%s] ? Excel aday tablosu: %s", suffix, table_path)
-                    LOGGER.warning(
-                        "[%s] GeoPackage atland? (%s); yaln?zca Excel aday tablosu ?retildi.",
-                        suffix,
-                        vector_reason,
-                    )
+                    if config.vectorize:
+                        LOGGER.warning(
+                            "[%s] GeoPackage atland? (%s); yaln?zca Excel aday tablosu ?retildi.",
+                            suffix,
+                            vector_reason,
+                        )
+                    else:
+                        LOGGER.info("[%s] Vekt?r ??kt?s? kapal?; yaln?zca Excel aday tablosu ?retildi.", suffix)
                 else:
                     LOGGER.warning("[%s] Vekt?r ??kt?s? atland? (%s).", suffix, vector_reason)
 
@@ -6940,6 +7232,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             parser.error(
                 f"Checkpoint in_channels={ckpt_in_ch} fakat mevcut ayarlar {num_channels} kanal uretiyor. "
                 "enable_curvature/enable_tpi ayarlarinizi egitim konfigurasyonuyla eslestirin."
+            )
+        ckpt_channel_names = checkpoint_hints.get("channel_names")
+        if isinstance(ckpt_channel_names, list):
+            ckpt_channels = tuple(str(x) for x in ckpt_channel_names)
+            if ckpt_channels != MODEL_CHANNEL_NAMES:
+                parser.error(
+                    f"Checkpoint channel_names={ckpt_channels} fakat mevcut kanal semasi {MODEL_CHANNEL_NAMES}. "
+                    "Bu checkpoint yeni RGB+DSM+DTM kanal duzeniyle uyumlu degil; modeli yeniden egitin."
+                )
+        elif ckpt_in_ch == num_channels:
+            LOGGER.warning(
+                "Checkpoint channel_names bilgisi icermiyor. Yeni kanal semasi %s; eski 12-kanal checkpoint semantik olarak uyumsuz olabilir.",
+                list(MODEL_CHANNEL_NAMES),
             )
         LOGGER.info("Loading trained weights in single-encoder mode: %s", weights_path)
         if dl_task == "tile_classification":
@@ -7142,7 +7447,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if ran_multi and dl_runs:
             fuse_filter_raw = (config.fuse_encoders or "all").strip().lower()
             fuse_filter = None if fuse_filter_raw == "all" else {s.strip().lower() for s in fuse_filter_raw.split(",") if s.strip()}
-            base_prefix = out_prefix.with_suffix("")
+            base_prefix = _output_base_path(out_prefix)
             base_prefix.parent.mkdir(parents=True, exist_ok=True)
             for enc_suffix, dl_prob_path in dl_runs:
                 if fuse_filter is not None and enc_suffix.lower() not in fuse_filter:
@@ -7191,7 +7496,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             fusion_encoder_label = fusion_encoder_label or dl_runs[-1][0]
             dl_prob_for_fusion = dl_runs[-1][1]
 
-        base_prefix = out_prefix.with_suffix("")
+        base_prefix = _output_base_path(out_prefix)
         base_prefix.parent.mkdir(parents=True, exist_ok=True)
         
         # Parametreli dosya adı oluştur (fusion için)
@@ -7231,7 +7536,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             LOGGER.info("✓ Birleştirilmiş (fused) çıktılar: %s, %s", fused_prob_path, fused_mask_path)
 
     # Vektörleştirme (etkinse)
-    if config.vectorize:
+    if config.vectorize or config.export_candidate_excel:
         LOGGER.info("")
         LOGGER.info("=" * 70)
         LOGGER.info("VEKTÖRLEŞTİRME BAŞLATILIYOR")
@@ -7257,7 +7562,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 outputs.prob_map,
                 outputs.transform,
                 outputs.crs,
-                outputs.mask_path.with_suffix(""),
+                _output_base_path(outputs.mask_path),
                 outputs.prob_path,
                 outputs.mask_path,
             ))
@@ -7268,7 +7573,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 yolo_outputs.prob_map,
                 yolo_outputs.transform,
                 yolo_outputs.crs,
-                yolo_outputs.mask_path.with_suffix(""),
+                _output_base_path(yolo_outputs.mask_path),
                 yolo_outputs.prob_path,
                 yolo_outputs.mask_path,
             ))
@@ -7280,7 +7585,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     classic_outputs.prob_map,
                     classic_outputs.transform,
                     classic_outputs.crs,
-                    classic_outputs.mask_path.with_suffix(""),
+                    _output_base_path(classic_outputs.mask_path),
                     classic_outputs.prob_path,
                     classic_outputs.mask_path,
                 )
@@ -7294,7 +7599,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                             mode_out.prob_map,
                             classic_outputs.transform,
                             classic_outputs.crs,
-                            mode_out.mask_path.with_suffix(""),
+                            _output_base_path(mode_out.mask_path),
                             mode_out.prob_path,
                             mode_out.mask_path,
                         )
@@ -7307,7 +7612,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     fusion_outputs.prob_map,
                     fusion_outputs.transform,
                     fusion_outputs.crs,
-                    fusion_outputs.mask_path.with_suffix(""),
+                    _output_base_path(fusion_outputs.mask_path),
                     fusion_outputs.prob_path,
                     fusion_outputs.mask_path,
                 )
@@ -7321,7 +7626,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         fused.prob_map,
                         fused.transform,
                         fused.crs,
-                        fused.mask_path.with_suffix(""),
+                        _output_base_path(fused.mask_path),
                         fused.prob_path,
                         fused.mask_path,
                     )
@@ -7334,29 +7639,48 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     mask_arr, prob_arr = load_prediction_arrays(prob_path=prob_path, mask_path=mask_path)
                 except Exception as e:
                     LOGGER.warning("Could not load rasters for vectorization (%s): %s", label, e)
+                    if config.export_candidate_excel:
+                        ensure_candidate_locations_table_exists(
+                            out_base=_candidate_table_base(out_base),
+                            log_prefix=f"({label})",
+                            reason="Rasterlar okunamadigi icin bos Excel olusturuluyor.",
+                        )
                     continue
 
             vector_ok, vector_reason = _can_vectorize_predictions()
-            if vector_ok:
+            if config.vectorize and vector_ok:
                 LOGGER.info(f"  ? {label} poligonla?t?r?l?yor...")
-                vector_file = vectorize_predictions(
-                    mask=mask_arr,
-                    prob_map=prob_arr,
-                    transform=transform,
-                    crs=crs_obj,
-                    out_path=out_base,
-                    min_area=config.min_area,
-                    simplify_tol=config.simplify,
-                    opening_size=config.vector_opening_size,
-                    label_connectivity=config.label_connectivity,
-                    export_candidate_excel=config.export_candidate_excel,
-                )
+                try:
+                    vector_file = vectorize_predictions(
+                        mask=mask_arr,
+                        prob_map=prob_arr,
+                        transform=transform,
+                        crs=crs_obj,
+                        out_path=out_base,
+                        min_area=config.min_area,
+                        simplify_tol=config.simplify,
+                        opening_size=config.vector_opening_size,
+                        label_connectivity=config.label_connectivity,
+                        export_candidate_excel=config.export_candidate_excel,
+                    )
+                except Exception as e:
+                    LOGGER.warning("Vector/Excel export failed (%s): %s", label, e)
+                    vector_file = None
                 if vector_file:
                     LOGGER.info("    ? Vekt?r ??kt?s? (%s): %s", label, vector_file)
+                if config.export_candidate_excel:
+                    ensure_candidate_locations_table_exists(
+                        out_base=_candidate_table_base(out_base),
+                        log_prefix=f"({label})",
+                        reason="Excel dosyasi bulunamadi; bos Excel olusturuluyor.",
+                    )
             elif config.export_candidate_excel:
-                LOGGER.info(f"  ? {label} i?in Excel aday tablosu olu?turuluyor...")
-                table_base = out_base.with_name(f"{out_base.name}_gps")
-                table_path = export_candidate_locations_from_prediction(
+                if config.vectorize:
+                    LOGGER.info(f"  ? {label} i?in Excel aday tablosu olu?turuluyor...")
+                else:
+                    LOGGER.info(f"  ? {label} i?in yaln?zca Excel aday tablosu olu?turuluyor...")
+                table_base = _candidate_table_base(out_base)
+                table_path = export_candidate_locations_from_prediction_safe(
                     mask=mask_arr,
                     prob_map=prob_arr,
                     transform=transform,
@@ -7365,10 +7689,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     min_area=config.min_area,
                     opening_size=config.vector_opening_size,
                     label_connectivity=config.label_connectivity,
+                    log_prefix=f"({label})",
                 )
                 if table_path:
                     LOGGER.info("    ? Excel aday tablosu (%s): %s", label, table_path)
-                LOGGER.warning("    GeoPackage atland? (%s); yaln?zca Excel aday tablosu ?retildi.", vector_reason)
+                if config.vectorize:
+                    LOGGER.warning("    GeoPackage atland? (%s); yaln?zca Excel aday tablosu ?retildi.", vector_reason)
+                else:
+                    LOGGER.info("    Vekt?r ??kt?s? kapal?; yaln?zca Excel aday tablosu ?retildi.")
             else:
                 LOGGER.warning("    Vekt?r ??kt?s? atland? (%s).", vector_reason)
         LOGGER.info("")

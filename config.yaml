@@ -30,7 +30,7 @@
 # Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
 #input: "gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
 #input: "karlik_vadi.tif"
-input: "karlik_vadi_rgb_dsm_dtm.tif"
+input: "on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
 # - null ise: Girdi dosya adından otomatik üretilir
@@ -185,7 +185,7 @@ encoders: "none"
 # CLASSIFICATION PRESET:
 #   Aşağıdaki yol tile-level classification eğitimi sonrası beklenen örnek addır.
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
-weights: "checkpoints/best_loss_TileClassifier_resnet50_12ch_attention.pth"
+weights: "checkpoints/epoch_017_TileClassifier_resnet50_12ch_attention.pth"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir
@@ -672,8 +672,8 @@ yolo_device: null
 # DİKKAT: Çok büyük karo GPU belleğini aşabilir (Out of Memory hatası)
 # ÖNERİ: 1024 iyi bir başlangıç noktasıdır
 # CLASSIFICATION PRESET:
-#   Daha yerel ama hâlâ bağlam taşıyan aday taraması için 384 önerilir.
-tile: 384
+#   Eğitimle birebir tutarlılık için tile=256 kullanın.
+tile: 256
 
 # overlap: Karolar arası bindirme miktarı (piksel)
 # - Komşu karolar arasında örtüşen bölge boyutu
@@ -688,8 +688,8 @@ tile: 384
 #   - Büyük overlap (512+): En iyi kalite ama çok yavaş
 # ÖNERİ: Tile boyutunun 1/4'ü kadar overlap kullanın (örn: tile=1024, overlap=256)
 # CLASSIFICATION PRESET:
-#   tile=384 için overlap=128 dengeli başlangıçtır.
-overlap: 128
+#   Eğitimle birebir tutarlılık için overlap=64 kullanın.
+overlap: 64
 
 # feather: Karo kenarlarında kosinüs yumuşatma (feathering)
 # - true: Karoların kenarlarına doğru tahminleri yumuşak geçiş ile karıştırır
@@ -928,6 +928,12 @@ cache_derivatives_mode: "auto"
 # - Büyük değer: daha az blok, daha hızlı (daha çok RAM)
 # - Küçük değer: daha az RAM, daha çok blok (daha yavaş)
 deriv_cache_chunk: 2048
+
+# deriv_cache_workers: Raster-cache üretiminde paralel worker sayısı
+# - 1: seri işleme
+# - 2-4: genelde daha hızlı (disk hızına ve RAM'e bağlı)
+# - Çok yüksek değerler: I/O ve bellek maliyeti nedeniyle verimsiz olabilir
+deriv_cache_workers: 8
 
 # deriv_cache_halo: Blok sınır artefaktlarını önlemek için halo (piksel)
 # - null: otomatik (rvt_radii / tpi_radii / gaussian_lrm_sigma'dan hesaplanır)

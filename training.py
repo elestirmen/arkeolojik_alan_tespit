@@ -7,7 +7,7 @@ Bu script, egitim_verisi_olusturma.py ile oluşturulan 12 kanallı tile'ları
 kullanarak U-Net modelini eğitir.
 
 Özellikler:
-    - 12 kanallı girdi desteği (RGB + RVT türevleri + Curvature + TPI)
+    - 12 kanallı girdi desteği (RGB + DSM + DTM + RVT türevleri + nDSM + TPI)
     - CBAM Attention modülü (opsiyonel)
     - Mixed precision training (AMP)
     - Erken durdurma (Early stopping)
@@ -128,6 +128,20 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 LOGGER = logging.getLogger("training")
+MODEL_CHANNEL_NAMES: Tuple[str, ...] = (
+    "R",
+    "G",
+    "B",
+    "DSM",
+    "DTM",
+    "SVF",
+    "Pos_Openness",
+    "Neg_Openness",
+    "LRM",
+    "Slope",
+    "nDSM",
+    "TPI",
+)
 
 # ==================== CONFIG ====================
 # IDE uzerinden dogrudan "Run" ettiginizde bu degerler kullanilir.
@@ -187,7 +201,7 @@ CONFIG: dict[str, object] = {
     #            ve bu orana gore otomatik pos_weight secilir
     # - manual : pos_weight degeri dogrudan kullanilir
     # Not: Yalnizca bce/combined icin etkilidir.
-    "balance_mode": None,             #"auto",
+    "balance_mode": "auto",
 
     # pos_weight:
     # Manual modda BCE pozitif sinif agirligi.
@@ -266,7 +280,7 @@ CONFIG: dict[str, object] = {
     # 1.0: val hedefi train-secilen kadar
     # 0.5: val hedefi train-secilenin yarisi
     # Not: hedef, val toplamindan buyuk olamaz.c
-    "val_keep_ratio": 0.5,
+    "val_keep_ratio": 1.0,
 
     # val_sample_seed:
     # Val alt-ornekleme rastgelelik tohumu.
@@ -276,7 +290,7 @@ CONFIG: dict[str, object] = {
     # tile_classification modunda bir tile'in pozitif sayilmasi icin gereken
     # minimum pozitif piksel orani. 0.0 => maskede en az bir pozitif piksel
     # varsa tile pozitiftir.
-    "tile_label_min_positive_ratio": 0.0,
+    "tile_label_min_positive_ratio": 0.02,
 }
 # ===============================================
 
@@ -663,6 +677,7 @@ class TrainingConfig:
     arch: str = "Unet"
     encoder: str = "resnet34"
     in_channels: int = 12
+    channel_names: Tuple[str, ...] = field(default_factory=lambda: MODEL_CHANNEL_NAMES)
     enable_attention: bool = True
     attention_reduction: int = 4
     
@@ -1590,6 +1605,7 @@ def train(config: TrainingConfig) -> Path:
                 "arch": model_arch_name,
                 "encoder": config.encoder,
                 "in_channels": config.in_channels,
+                "channel_names": list(config.channel_names),
                 "task_type": config.task_type,
                 "tile_label_min_positive_ratio": config.tile_label_min_positive_ratio,
                 "enable_attention": config.enable_attention,
@@ -1915,11 +1931,15 @@ def main():
     
     # Metadata'dan kanal sayısını oku
     metadata_path = data_dir / "metadata.json"
+    channel_names = MODEL_CHANNEL_NAMES
     if metadata_path.exists():
         with open(metadata_path) as f:
             metadata = json.load(f)
         in_channels = metadata.get("num_channels", 12)
         LOGGER.info(f"Metadata'dan kanal sayısı okundu: {in_channels}")
+        raw_channel_names = metadata.get("channel_names")
+        if isinstance(raw_channel_names, list) and raw_channel_names:
+            channel_names = tuple(str(x) for x in raw_channel_names)
     else:
         in_channels = 12
         LOGGER.warning(f"Metadata bulunamadı, varsayılan kanal sayısı kullanılıyor: {in_channels}")
@@ -2094,6 +2114,7 @@ def main():
         arch=args.arch,
         encoder=args.encoder,
         in_channels=in_channels,
+        channel_names=channel_names,
         enable_attention=not args.no_attention,
         epochs=args.epochs,
         batch_size=args.batch_size,
