@@ -5141,6 +5141,69 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str], config: Pipeline
     return Path("ciktilar") / session_folder / out_name
 
 
+def _normalize_param_value(value: Any) -> Any:
+    """Convert values into JSON/text-friendly primitives."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.device):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_param_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _normalize_param_value(v) for k, v in value.items()}
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def write_run_params_txt(
+    *,
+    out_prefix: Path,
+    config: PipelineDefaults,
+    argv_list: Sequence[str],
+    cli_overrides: Iterable[str],
+    input_path: Path,
+    bands: Sequence[int],
+    device: torch.device,
+) -> Optional[Path]:
+    """Write effective run parameters into the session output folder as a txt file."""
+    try:
+        base_prefix = _output_base_path(out_prefix)
+        session_dir = base_prefix.parent
+        session_dir.mkdir(parents=True, exist_ok=True)
+        txt_path = session_dir / "run_params.txt"
+
+        lines: List[str] = []
+        lines.append("# Archaeo Detect Run Parameters")
+        lines.append(f"created_at: {datetime.now().isoformat(timespec='seconds')}")
+        lines.append(f"session_run_id: {SESSION_RUN_ID}")
+        lines.append(f"input_path: {input_path}")
+        lines.append(f"output_session_dir: {session_dir}")
+        lines.append(f"output_base_prefix: {base_prefix}")
+        lines.append(f"device: {device}")
+        lines.append(f"bands_parsed: {list(int(v) for v in bands)}")
+        lines.append(f"dl_task_resolved: {str(config.dl_task).strip().lower()}")
+        lines.append(f"cli_overrides: {json.dumps(sorted(set(cli_overrides)), ensure_ascii=False)}")
+        lines.append(f"argv: {json.dumps(list(argv_list), ensure_ascii=False)}")
+        lines.append("")
+        lines.append("[config_effective]")
+
+        for f in fields(PipelineDefaults):
+            name = f.name
+            value = getattr(config, name)
+            normalized = _normalize_param_value(value)
+            lines.append(f"{name}: {json.dumps(normalized, ensure_ascii=False)}")
+
+        txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        LOGGER.info("Çalışma parametreleri kaydedildi: %s", txt_path)
+        return txt_path
+    except Exception as exc:
+        LOGGER.warning("Çalışma parametreleri txt dosyasına yazılamadı: %s", exc)
+        return None
+
+
 def build_filename_with_params(
     base_name: str,
     encoder: Optional[str] = None,
@@ -6806,6 +6869,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     LOGGER.info("Kullanılan cihaz: %s", device)
     if config.half and device.type != "cuda":
         LOGGER.warning("--half istendi ama CUDA kullanılamıyor; float32 ile çalışılacak.")
+
+    # Oturum klasörüne etkin parametreleri yaz.
+    write_run_params_txt(
+        out_prefix=out_prefix,
+        config=config,
+        argv_list=argv_list,
+        cli_overrides=cli_overrides,
+        input_path=input_path,
+        bands=bands,
+        device=device,
+    )
 
     # Cache yönetimi - RVT türevlerini bir kez hesaplayıp tekrar kullan
     precomputed_deriv: Optional[PrecomputedDerivatives] = None

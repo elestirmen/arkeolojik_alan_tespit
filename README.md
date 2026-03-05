@@ -647,6 +647,14 @@ ciktilar/<session_folder>/<out_name>*
 `<timestamp>_<input>_<methods>_t<tile>o<overlap>_m-<model>`
 (example model tokens: `m-<checkpoint>`, `m-zs`, `m-<encoder>`).
 
+Each session folder also includes:
+
+```
+run_params.txt
+```
+
+This file contains all effective run parameters (final config values, parsed bands, CLI args, and device).
+
 ### 📊 Raster Outputs (GeoTIFF)
 
 #### 1️⃣ Deep Learning Outputs

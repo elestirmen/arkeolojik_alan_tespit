@@ -557,6 +557,14 @@ ciktilar/<oturum_klasoru>/<cikti_adi>*
 `<zaman>_<girdi>_<yontemler>_t<tile>o<overlap>_m-<model>`
 (örnek model belirteçleri: `m-<checkpoint>`, `m-zs`, `m-<encoder>`).
 
+Her oturum klasöründe ayrıca şunlar bulunur:
+
+```
+run_params.txt
+```
+
+Bu dosya, etkin parametrelerin tamamını içerir (nihai config değerleri, parse edilen bantlar, CLI argümanları ve cihaz).
+
 ### 📊 Raster Çıktılar (GeoTIFF)
 
 #### 1️⃣ Derin Öğrenme Çıktıları
