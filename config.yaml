@@ -13,6 +13,9 @@
 #      Örnek: python archaeo_detect.py --th 0.7 --tile 512
 #
 # NOT: Tüm dosya yolları proje kök dizinine göre görecelidir.
+# YENI NOT: YAML icindeki goreli yollar bu config dosyasinin bulundugu klasore
+# gore cozulur. CLI'dan verilen yollar ise calistiginiz working directory'ye
+# gore cozulur.
 # Proje dizini: C:\d_surucusu\arkeolojik_alan_tespit\archaeo_detect_base
 # ============================================================================
 
@@ -73,6 +76,9 @@ bands: "1,2,3,4,5"
 # CLASSIFICATION PRESET:
 #   Bu dosya şu an tile-level classification odaklı preset'e ayarlı.
 #   Eğitilmiş bir TileClassifier checkpoint'i kullanmanız beklenir.
+# IDE-FIRST TRAINED PROFILE:
+# - Ana kullanim yolu IDE uzerinden bu config ile calistirmadir.
+# - training.py basarili egitim sonunda aktif modeli checkpoints/active/ altina yayimlar.
 enable_deep_learning: true
 
 # enable_classic: Klasik görüntü işleme yöntemleri (RVT, Hessian, Morfoloji)
@@ -185,7 +191,13 @@ encoders: "none"
 # CLASSIFICATION PRESET:
 #   Aşağıdaki yol tile-level classification eğitimi sonrası beklenen örnek addır.
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
-weights: "checkpoints/best_loss_TileClassifier_resnet50_12ch_attention.pth"
+# IDE-FIRST TRAINED PROFILE:
+# - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
+weights: "checkpoints/active/model.pth"
+
+# training_metadata: Egitim metadata dosyasi (.json)
+# - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
+training_metadata: "checkpoints/active/training_metadata.json"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir
@@ -219,6 +231,9 @@ zero_shot_imagenet: false
 #         * classic ve fusion istersen acik kalabilir
 #         * weights zorunlu olur
 # - false: Mevcut normal davranis (multi/zero-shot fallback mumkun)
+# trained_model_only icin:
+# - weights ve training_metadata zorunludur
+# - tile/overlap/bands training metadata'dan otomatik alinip kilitlenir
 trained_model_only: true
 
 # save_band_importance: Derin öğrenme çıkarımı sırasında band önem raporu yaz
@@ -683,6 +698,8 @@ yolo_device: null
 # ÖNERİ: 1024 iyi bir başlangıç noktasıdır
 # CLASSIFICATION PRESET:
 #   Eğitimle birebir tutarlılık için tile=256 kullanın.
+# trained_model_only: true iken gercek tile degeri training_metadata.json
+# icindeki tile_size alanindan alinir. Bu satir belge amaclidir.
 tile: 256
 
 # overlap: Karolar arası bindirme miktarı (piksel)
@@ -698,8 +715,10 @@ tile: 256
 #   - Büyük overlap (512+): En iyi kalite ama çok yavaş
 # ÖNERİ: Tile boyutunun 1/4'ü kadar overlap kullanın (örn: tile=1024, overlap=256)
 # CLASSIFICATION PRESET:
-#   Eğitimle birebir tutarlılık için overlap=128 kullanın.
-overlap: 128
+# overlap config'ten elle artirilmaz. trained_model_only: true iken gercek
+# deger training_metadata.json icindeki overlap alanindan alinir.
+# Farkli overlap kullanmak istiyorsaniz modeli o overlap ile yeniden egitin.
+overlap: 64
 
 # feather: Karo kenarlarında kosinüs yumuşatma (feathering)
 # - true: Karoların kenarlarına doğru tahminleri yumuşak geçiş ile karıştırır

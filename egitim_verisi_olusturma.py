@@ -46,6 +46,8 @@ from rasterio import Affine
 from rasterio.windows import Window
 from tqdm import tqdm
 
+from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
+
 # Mevcut projedeki fonksiyonları import et
 try:
     from archaeo_detect import (
@@ -173,7 +175,7 @@ CONFIG: dict[str, object] = {
     # append:
     # True: mevcut output icine yeni tile ekler (silmeden).
     # False: once eski tile dosyalarini temizler, sonra yeniden uretir.
-    "append": True,
+    "append": False,
 }
 # ===============================================
 
@@ -182,11 +184,11 @@ def _validate_tile_generation_params(
     tile_size: int,
     overlap: int,
     min_positive_ratio: float,
-    tile_label_min_positive_ratio: float,
     max_nodata_ratio: float,
     train_ratio: float,
     save_format: str,
     split_mode: str,
+    tile_label_min_positive_ratio: float = 0.0,
     train_negative_keep_ratio: float = 1.0,
     train_negative_max: Optional[int] = None,
     num_workers: int = 1,
@@ -1321,6 +1323,7 @@ def create_training_tiles(
 
     # Metadata kaydet
     metadata = {
+        "schema_version": METADATA_SCHEMA_VERSION,
         "created_at": datetime.now().isoformat(),
         "input_file": str(input_tif),
         "mask_file": str(mask_tif),
@@ -1339,11 +1342,8 @@ def create_training_tiles(
         "tile_labels_file": str(tile_labels_csv_path),
         "tile_presence_grid_file": str(tile_presence_grid_path),
         "tile_presence_grid_rgb_file": str(tile_presence_grid_rgb_path),
-        "num_channels": 12,
-        "channel_names": [
-            "R", "G", "B", "DSM", "DTM", "SVF",
-            "Pos_Openness", "Neg_Openness", "LRM", "Slope", "nDSM", "TPI"
-        ],
+        "num_channels": len(MODEL_CHANNEL_NAMES),
+        "channel_names": list(MODEL_CHANNEL_NAMES),
         "stats": stats,
     }
     

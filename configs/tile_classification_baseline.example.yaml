@@ -1,0 +1,18 @@
+# Baseline example without a trained checkpoint.
+input: "on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif"
+
+enable_deep_learning: true
+enable_classic: false
+enable_fusion: false
+enable_yolo: false
+
+dl_task: "tile_classification"
+encoders: "none"
+trained_model_only: false
+zero_shot_imagenet: true
+weights: null
+training_metadata: null
+
+tile: 256
+overlap: 64
+bands: "1,2,3,4,5"

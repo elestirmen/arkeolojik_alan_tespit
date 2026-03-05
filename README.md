@@ -87,6 +87,33 @@ This system can detect the following archaeological features:
 
 ## 🚀 Quick Start
 
+### Update: IDE-First Trained Workflow
+
+The main `config.yaml` is the daily IDE profile and assumes `trained_model_only: true`.
+After a successful `training.py` run, the active inference artifacts are published to:
+
+- `checkpoints/active/model.pth`
+- `checkpoints/active/training_metadata.json`
+
+Recommended flow:
+
+```bash
+python egitim_verisi_olusturma.py \
+  --input kesif_alani.tif \
+  --mask ground_truth.tif \
+  --output training_data
+
+python training.py --data training_data --task tile_classification --epochs 50
+
+python archaeo_detect.py
+```
+
+Notes:
+
+- `tile`, `overlap`, and `bands` are locked from `training_metadata.json` in trained-only mode.
+- Do not manually increase `overlap` in `config.yaml`; retrain with a different overlap if needed.
+- If you do not have a trained model yet, use `configs/tile_classification_baseline.example.yaml`.
+
 ### Run in 5 Minutes!
 
 ```bash
@@ -117,18 +144,19 @@ python egitim_verisi_olusturma.py \
   --mask ground_truth.tif \
   --output training_data
 
-# Or use interactive mode (no arguments needed):
-python egitim_verisi_olusturma.py
-# Follow the prompts to enter file paths
-
+# The script is non-interactive; provide paths explicitly
+python egitim_verisi_olusturma.py \
+  --input kesif_alani.tif \
+  --mask ground_truth.tif \
+  --output training_data
 # Step 2: Train the model
-python training.py --data training_data --epochs 50
+python training.py --data training_data --task tile_classification --epochs 50
 
 # Step 3: Use your trained model
-python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
+python archaeo_detect.py
 ```
 
-**💡 Tip:** The training data generation script (`egitim_verisi_olusturma.py`) supports interactive mode. If you run it without arguments, it will guide you through the process step-by-step.
+**Tip:** `egitim_verisi_olusturma.py` is non-interactive. Provide `--input`, `--mask`, and `--output` explicitly.
 
 ---
 
@@ -1392,7 +1420,7 @@ A:
 A: The project includes dedicated training scripts! See the [Model Training Guide](#-model-training-guide) section below for step-by-step instructions using `egitim_verisi_olusturma.py` and `training.py`.
 
 **Q: Can I use the training scripts interactively?**  
-A: Yes! `egitim_verisi_olusturma.py` supports interactive mode. Just run it without arguments: `python egitim_verisi_olusturma.py` and it will prompt you for inputs.
+A: No. `egitim_verisi_olusturma.py` is non-interactive; provide `--input`, `--mask`, and `--output` explicitly.
 
 **Q: What if I don't have ground truth masks?**  
 A: You can still use the system with zero-shot ImageNet weights (`zero_shot_imagenet: true`) or classical methods only. However, for best results, train a custom model with your own labeled data.
@@ -1426,10 +1454,10 @@ For experienced users, here's the minimal workflow:
 python egitim_verisi_olusturma.py --input data.tif --mask mask.tif --output training_data
 
 # 3. Train the model
-python training.py --data training_data --epochs 50
+python training.py --data training_data --task tile_classification --epochs 50
 
 # 4. Use your trained model
-python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth --input new_area.tif
+python archaeo_detect.py --input new_area.tif
 ```
 
 ---
@@ -1730,13 +1758,15 @@ python egitim_verisi_olusturma.py \
   --output training_data
 ```
 
-#### Interactive Mode
+#### IDE / CLI Mode
 
-Run without arguments for guided input:
+The script is non-interactive. Use explicit arguments:
 
 ```bash
-python egitim_verisi_olusturma.py
-# Prompts: Input file → Mask file → Output dir → Tile size
+python egitim_verisi_olusturma.py \
+  --input kesif_alani.tif \
+  --mask ground_truth.tif \
+  --output training_data
 ```
 
 #### What Happens Inside
@@ -1791,7 +1821,7 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 | `--mask` | Required | Binary mask GeoTIFF (0/1 values) |
 | `--output` | `training_data` | Output directory |
 | `--tile-size` | `256` | Tile dimensions in pixels |
-| `--overlap` | `128` | Overlap between tiles |
+| `--overlap` | `128` | Overlap used during training; inference later reuses this from metadata |
 | `--train-ratio` | `0.8` | 80% train, 20% validation |
 | `--train-negative-keep-ratio` | `1.0` | Keep ratio of fully-negative train tiles (`0`=drop all, `1`=keep all) |
 | `--train-negative-max` | `None` | Optional upper cap for kept negative train tiles |
@@ -1802,8 +1832,8 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 
 | Scenario | Command |
 |----------|---------|
-| **Standard** | `--tile-size 256 --overlap 128` |
-| **Large structures** | `--tile-size 512 --overlap 128` |
+| **Standard** | `--tile-size 256 --overlap 64` |
+| **Large structures** | `--tile-size 512 --overlap 64` |
 | **Imbalanced data** (<5% archaeological) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
 | **Quick test** | `--tile-size 256 --train-ratio 0.9` |
 
@@ -1835,6 +1865,7 @@ python training.py --data training_data
 ```
 
 This uses sensible defaults: U-Net + ResNet34 + 50 epochs + CBAM attention + mixed precision.
+By default it also publishes the latest successful run to `checkpoints/active/` for IDE inference.
 
 #### Full Command with Options
 
@@ -1895,7 +1926,8 @@ python training.py \
 
 ```
 checkpoints/
-├── best_Unet_resnet34_12ch_attention.pth   ← Use this for inference
+├── active/model.pth                         ← IDE inference profile uses this
+├── active/training_metadata.json           ← tile/overlap/bands lock source
 └── training_history.json                    ← Training metrics
 ```
 
@@ -1927,17 +1959,26 @@ Early stopping: Best model at epoch 15 (Val IoU: 0.79)
 
 ```bash
 python archaeo_detect.py \
-  --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
+  --weights checkpoints/active/model.pth \
+  --training-metadata checkpoints/active/training_metadata.json \
   --input new_area.tif \
   --th 0.6
 ```
 
 #### Via config.yaml
 
+For the IDE-first trained profile:
+
+- keep `trained_model_only: true`
+- keep `weights: "checkpoints/active/model.pth"`
+- keep `training_metadata: "checkpoints/active/training_metadata.json"`
+- treat `tile`, `overlap`, and `bands` as metadata-locked values during inference
+
 ```yaml
-weights: "checkpoints/best_Unet_resnet34_12ch_attention.pth"
+weights: "checkpoints/active/model.pth"
+training_metadata: "checkpoints/active/training_metadata.json"
 zero_shot_imagenet: false
-encoder: "resnet34"
+trained_model_only: true
 ```
 
 Then simply run:
@@ -2035,7 +2076,8 @@ python training.py \
 
 # 3. Run inference on new area
 python archaeo_detect.py \
-  --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
+  --weights checkpoints/active/model.pth \
+  --training-metadata checkpoints/active/training_metadata.json \
   --input new_area.tif \
   --th 0.6 \
   --enable-fusion
@@ -2067,10 +2109,10 @@ The project includes two dedicated scripts for training custom models:
 python egitim_verisi_olusturma.py --input area.tif --mask mask.tif --output training_data
 
 # 2. Train model
-python training.py --data training_data --epochs 50
+python training.py --data training_data --task tile_classification --epochs 50
 
 # 3. Use trained model
-python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
+python archaeo_detect.py
 ```
 
 **Key Features:**
@@ -2177,7 +2219,8 @@ archaeo_detect_base/
 │   │   └── masks/
 │   └── metadata.json               # Dataset metadata
 ├── checkpoints/                    # Trained model weights
-│   ├── best_Unet_resnet34_12ch_attention.pth
+│   ├── active/model.pth
+│   ├── active/training_metadata.json
 │   └── training_history.json
 ├── cache/                          # RVT derivatives cache
 │   └── *.derivatives.npz

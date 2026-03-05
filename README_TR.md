@@ -86,6 +86,33 @@ Bu sistem aşağıdaki arkeolojik özellikleri tespit edebilir:
 
 ## 🚀 Hızlı Başlangıç
 
+### Guncel Not: IDE-First Trained Workflow
+
+Ana `config.yaml`, `trained_model_only: true` odakli gunluk IDE profili olarak kullanilir.
+`training.py` basarili oldugunda aktif inference artefact'larini su konumlara yayimlar:
+
+- `checkpoints/active/model.pth`
+- `checkpoints/active/training_metadata.json`
+
+Onerilen akis:
+
+```bash
+python egitim_verisi_olusturma.py \
+  --input kesif_alani.tif \
+  --mask ground_truth.tif \
+  --output training_data
+
+python training.py --data training_data --task tile_classification --epochs 50
+
+python archaeo_detect.py
+```
+
+Notlar:
+
+- `tile`, `overlap` ve `bands` trained-only modda `training_metadata.json` dosyasindan kilitlenir.
+- `config.yaml` icinde `overlap` degerini elle artirmayin; farkli overlap icin modeli yeniden egitin.
+- Egitilmis modeliniz yoksa `configs/tile_classification_baseline.example.yaml` kullanin.
+
 ### 5 Dakikada Çalıştırın!
 
 ```bash
@@ -105,29 +132,15 @@ python archaeo_detect.py
 
 🎉 **Tebrikler!** Sistem başladı. Sonuçlar `ciktilar/` altında oluşturulacak.
 
-### 🎓 Kendi Modelinizi Eğitme (İsteğe Bağlı)
+### Baseline / Modelsiz Smoke Test
 
-Etiketli verileriniz (ground truth maskeleri) varsa, özel bir model eğitebilirsiniz:
+Egitilmis modeliniz yoksa ana `config.yaml` yerine baseline ornek config kullanin:
 
 ```bash
-# Adım 1: GeoTIFF + ground truth maskesinden eğitim verisi oluşturun
-python egitim_verisi_olusturma.py \
-  --input kesif_alani.tif \
-  --mask ground_truth.tif \
-  --output training_data
-
-# Veya interaktif modu kullanın (argüman gerekmez):
-python egitim_verisi_olusturma.py
-# Dosya yollarını girmek için yönergeleri izleyin
-
-# Adım 2: Modeli eğitin
-python training.py --data training_data --epochs 50
-
-# Adım 3: Eğitilmiş modelinizi kullanın
-python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
+python archaeo_detect.py --config configs/tile_classification_baseline.example.yaml
 ```
 
-**💡 İpucu:** Eğitim verisi oluşturma betiği (`egitim_verisi_olusturma.py`) interaktif modu destekler. Argüman olmadan çalıştırırsanız, adım adım size rehberlik eder.
+**Not:** Egitim verisi uretmek icin `egitim_verisi_olusturma.py` betigi interaktif degildir; `--input`, `--mask` ve `--output` parametrelerini acikca verin.
 
 ---
 
@@ -1302,7 +1315,7 @@ C:
 C: Proje özel eğitim betikleri içerir! `egitim_verisi_olusturma.py` ve `training.py` kullanarak adım adım talimatlar için aşağıdaki [Model Eğitimi Kılavuzu](#-model-eğitimi-kılavuzu) bölümüne bakın.
 
 **S: Eğitim betiklerini interaktif olarak kullanabilir miyim?**  
-C: Evet! `egitim_verisi_olusturma.py` interaktif modu destekler. Argüman olmadan çalıştırın: `python egitim_verisi_olusturma.py` ve size girişler için yönergeler verir.
+C: Hayir. `egitim_verisi_olusturma.py` interaktif degildir; `--input`, `--mask` ve `--output` parametrelerini acikca verin.
 
 **S: Ground truth maskelerim yoksa ne olur?**  
 C: Yine de sıfır atış ImageNet ağırlıklarıyla (`zero_shot_imagenet: true`) veya sadece klasik yöntemlerle sistemi kullanabilirsiniz. Ancak, en iyi sonuçlar için kendi etiketli verilerinizle özel bir model eğitin.
@@ -1336,10 +1349,10 @@ Deneyimli kullanıcılar için minimal iş akışı:
 python egitim_verisi_olusturma.py --input veri.tif --mask maske.tif --output training_data
 
 # 3. Modeli eğitin
-python training.py --data training_data --epochs 50
+python training.py --data training_data --task tile_classification --epochs 50
 
 # 4. Eğitilmiş modeli kullanın
-python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth --input yeni_alan.tif
+python archaeo_detect.py --input yeni_alan.tif
 ```
 
 ---
@@ -1702,7 +1715,7 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 | `--mask` | Gerekli | İkili maske GeoTIFF (0/1 değerleri) |
 | `--output` | `training_data` | Çıktı dizini |
 | `--tile-size` | `256` | Piksel cinsinden karo boyutu |
-| `--overlap` | `128` | Karolar arası örtüşme |
+| `--overlap` | `128` | Egitimde kullanilan overlap; inference bunu metadata'dan tekrar kullanir |
 | `--train-ratio` | `0.8` | %80 eğitim, %20 doğrulama |
 | `--train-negative-keep-ratio` | `1.0` | Tamamen negatif eğitim karolarını tutma oranı (`0`=hepsini at, `1`=hepsini tut) |
 | `--train-negative-max` | `None` | Tutulacak negatif eğitim karo sayısı için opsiyonel üst sınır |
@@ -1713,8 +1726,8 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 
 | Senaryo | Komut |
 |---------|-------|
-| **Standart** | `--tile-size 256 --overlap 128` |
-| **Büyük yapılar** | `--tile-size 512 --overlap 128` |
+| **Standart** | `--tile-size 256 --overlap 64` |
+| **Büyük yapılar** | `--tile-size 512 --overlap 64` |
 | **Dengesiz veri** (<%5 arkeolojik) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
 | **Hızlı test** | `--tile-size 256 --train-ratio 0.9` |
 
@@ -1806,8 +1819,9 @@ python training.py \
 
 ```
 checkpoints/
-├── best_Unet_resnet34_12ch_attention.pth   ← Çıkarım için bunu kullanın
-└── training_history.json                    ← Eğitim metrikleri
+├── active/model.pth                         ← IDE profili bunu kullanir
+├── active/training_metadata.json           ← tile/overlap/bands kilit kaynagi
+└── training_history.json                   ← Eğitim metrikleri
 ```
 
 `checkpoints/` altında `channel_importance_history.json` da üretilir; epoch bazlı bant önem sıralarını içerir.
@@ -1838,7 +1852,8 @@ Erken durdurma: En iyi model 15. epoch'ta (Val IoU: 0.79)
 
 ```bash
 python archaeo_detect.py \
-  --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
+  --weights checkpoints/active/model.pth \
+  --training-metadata checkpoints/active/training_metadata.json \
   --input yeni_alan.tif \
   --th 0.6
 ```
@@ -1846,9 +1861,10 @@ python archaeo_detect.py \
 #### config.yaml Üzerinden
 
 ```yaml
-weights: "checkpoints/best_Unet_resnet34_12ch_attention.pth"
+weights: "checkpoints/active/model.pth"
+training_metadata: "checkpoints/active/training_metadata.json"
 zero_shot_imagenet: false
-encoder: "resnet34"
+trained_model_only: true
 ```
 
 Sonra sadece çalıştırın:
@@ -1946,7 +1962,8 @@ python training.py \
 
 # 3. Yeni alanda çıkarım yap
 python archaeo_detect.py \
-  --weights checkpoints/best_Unet_resnet34_12ch_attention.pth \
+  --weights checkpoints/active/model.pth \
+  --training-metadata checkpoints/active/training_metadata.json \
   --input yeni_alan.tif \
   --th 0.6 \
   --enable-fusion
@@ -1978,10 +1995,10 @@ Proje, özel modeller eğitmek için iki özel betik içerir:
 python egitim_verisi_olusturma.py --input alan.tif --mask maske.tif --output training_data
 
 # 2. Model eğit
-python training.py --data training_data --epochs 50
+python training.py --data training_data --task tile_classification --epochs 50
 
 # 3. Eğitilmiş modeli kullan
-python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention.pth
+python archaeo_detect.py
 ```
 
 **Temel Özellikler:**
@@ -2089,7 +2106,8 @@ archaeo_detect_base/
 │   │   └── masks/
 │   └── metadata.json               # Veri kümesi metadatası
 ├── checkpoints/                    # Eğitilmiş model ağırlıkları
-│   ├── best_Unet_resnet34_12ch_attention.pth
+│   ├── active/model.pth
+│   ├── active/training_metadata.json
 │   └── training_history.json
 ├── cache/                          # RVT türevleri önbelleği
 │   └── *.derivatives.npz

@@ -8,6 +8,7 @@ Testleri çalıştırmak için: pytest tests/ -v
 import argparse
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from archaeo_detect import (
     PipelineDefaults,
+    apply_trained_only_metadata_locks,
     build_config_from_args,
     export_candidate_locations_table,
     percentile_clip,
@@ -38,6 +40,7 @@ from archaeo_detect import (
     compute_fused_probability,
     AttentionWrapper,
     load_weights,
+    validate_checkpoint_metadata_consistency,
 )
 
 
@@ -143,6 +146,15 @@ class TestPipelineDefaultsValidation:
         """trained_model_only etkinse weights zorunlu olmali."""
         with pytest.raises(ValueError, match=r"trained_model_only.*weights"):
             PipelineDefaults(trained_model_only=True, weights=None)
+
+    def test_trained_model_only_requires_training_metadata(self):
+        """trained_model_only etkinse training_metadata zorunlu olmali."""
+        with pytest.raises(ValueError, match=r"trained_model_only.*training_metadata"):
+            PipelineDefaults(
+                trained_model_only=True,
+                weights="checkpoints/dummy.pth",
+                training_metadata=None,
+            )
 
     def test_trained_model_only_requires_deep_learning(self):
         """trained_model_only etkinse deep learning acik olmali."""
@@ -592,6 +604,110 @@ class TestConfigOverride:
         assert config.cache_derivatives is False
         assert config.yolo_conf == pytest.approx(defaults.yolo_conf)
 
+    def test_yaml_relative_paths_resolve_from_config_directory(self, tmp_path: Path):
+        """YAML'deki goreli path'ler config dizinine gore cozulmeli."""
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir()
+        yaml_path = cfg_dir / "config.yaml"
+        yaml_path.write_text(
+            "\n".join(
+                [
+                    'input: "data/input.tif"',
+                    'weights: "models/model.pth"',
+                    'training_metadata: "meta/training_metadata.json"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = build_config_from_args(argparse.Namespace(config=str(yaml_path)))
+
+        assert Path(config.input) == cfg_dir / "data" / "input.tif"
+        assert Path(config.weights) == cfg_dir / "models" / "model.pth"
+        assert Path(config.training_metadata) == cfg_dir / "meta" / "training_metadata.json"
+
+    def test_cli_relative_paths_resolve_from_cwd(self, tmp_path: Path, monkeypatch):
+        """CLI override edilen goreli path'ler working directory'ye gore cozulmeli."""
+        cfg_dir = tmp_path / "cfg"
+        cfg_dir.mkdir()
+        yaml_path = cfg_dir / "config.yaml"
+        yaml_path.write_text('input: "yaml/input.tif"\n', encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        args = argparse.Namespace(config=str(yaml_path), input="cli/input.tif")
+        config = build_config_from_args(args, cli_overrides={"input"})
+
+        assert Path(config.input) == tmp_path / "cli" / "input.tif"
+
+
+class TestTrainedOnlyMetadataLocks:
+    def _make_trained_config(self, **kwargs):
+        base = dict(
+            trained_model_only=True,
+            weights="checkpoints/dummy.pth",
+            training_metadata="checkpoints/active/training_metadata.json",
+            tile=512,
+            overlap=128,
+            bands="9,8,7,6,5",
+        )
+        base.update(kwargs)
+        return PipelineDefaults(**base)
+
+    def _make_metadata(self, **kwargs):
+        metadata = {
+            "schema_version": 2,
+            "tile_size": 256,
+            "overlap": 64,
+            "bands": "1,2,3,4,5",
+            "channel_names": [
+                "R",
+                "G",
+                "B",
+                "DSM",
+                "DTM",
+                "SVF",
+                "Pos_Openness",
+                "Neg_Openness",
+                "LRM",
+                "Slope",
+                "nDSM",
+                "TPI",
+            ],
+        }
+        metadata.update(kwargs)
+        return metadata
+
+    def test_apply_trained_only_metadata_locks_uses_training_values(self):
+        config = self._make_trained_config()
+
+        apply_trained_only_metadata_locks(
+            config=config,
+            metadata=self._make_metadata(),
+            cli_overrides=set(),
+        )
+
+        assert config.tile == 256
+        assert config.overlap == 64
+        assert config.bands == "1,2,3,4,5"
+
+    def test_apply_trained_only_metadata_locks_rejects_cli_overlap_mismatch(self):
+        config = self._make_trained_config(overlap=128)
+
+        with pytest.raises(ValueError, match=r"--overlap=128"):
+            apply_trained_only_metadata_locks(
+                config=config,
+                metadata=self._make_metadata(overlap=64),
+                cli_overrides={"overlap"},
+            )
+
+    def test_validate_checkpoint_metadata_consistency_rejects_task_mismatch(self):
+        with pytest.raises(ValueError, match=r"task_type"):
+            validate_checkpoint_metadata_consistency(
+                checkpoint_hints={"task_type": "segmentation"},
+                metadata=self._make_metadata(task_type="tile_classification"),
+            )
+
 
 # ============================================================================
 # Candidate Location Table Tests
@@ -619,7 +735,7 @@ class TestCandidateLocationTable:
         assert row["gps_lon"] == pytest.approx(0.00449, abs=0.001)
         assert row["google_maps_url"].startswith("https://maps.google.com/?q=")
 
-    def test_export_candidate_table_falls_back_to_csv_without_openpyxl(self, tmp_path, monkeypatch):
+    def test_export_candidate_table_falls_back_to_builtin_xlsx_without_openpyxl(self, tmp_path, monkeypatch):
         from shapely.geometry import Polygon
 
         polygon = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
@@ -641,8 +757,10 @@ class TestCandidateLocationTable:
         )
 
         assert out_path is not None
-        assert out_path.suffix == ".csv"
+        assert out_path.suffix == ".xlsx"
         assert out_path.exists()
+        with zipfile.ZipFile(out_path, "r") as workbook_zip:
+            assert "xl/workbook.xml" in workbook_zip.namelist()
 
     def test_export_candidate_table_xlsx_contains_clickable_google_maps_link(self, tmp_path):
         import archaeo_detect as module

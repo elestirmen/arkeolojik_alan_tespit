@@ -34,6 +34,7 @@ import argparse
 import csv
 import json
 import logging
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -47,6 +48,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
 from tqdm import tqdm
+
+from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
+from archeo_shared.modeling import AttentionWrapper, CBAM, ChannelAttention, SpatialAttention
 
 # Segmentation Models PyTorch
 smp = None
@@ -65,63 +69,6 @@ def _require_smp():
         smp = _smp
     return smp
 
-# Mevcut projedeki attention modüllerini import et
-try:
-    from archaeo_detect import (
-        ChannelAttention,
-        SpatialAttention,
-        CBAM,
-        AttentionWrapper,
-    )
-except ImportError:
-    print("UYARI: archaeo_detect.py'den attention modülleri import edilemedi.")
-    print("Attention modülleri bu dosyada tanımlanacak.")
-    
-    # Fallback tanımlamalar
-    class ChannelAttention(nn.Module):
-        def __init__(self, in_channels: int, reduction: int = 4):
-            super().__init__()
-            self.avg_pool = nn.AdaptiveAvgPool2d(1)
-            self.max_pool = nn.AdaptiveMaxPool2d(1)
-            reduced = max(in_channels // reduction, 1)
-            self.fc = nn.Sequential(
-                nn.Conv2d(in_channels, reduced, 1, bias=False),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(reduced, in_channels, 1, bias=False)
-            )
-        def forward(self, x):
-            avg_out = self.fc(self.avg_pool(x))
-            max_out = self.fc(self.max_pool(x))
-            return x * torch.sigmoid(avg_out + max_out)
-    
-    class SpatialAttention(nn.Module):
-        def __init__(self, kernel_size: int = 7):
-            super().__init__()
-            self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
-        def forward(self, x):
-            avg_out = torch.mean(x, dim=1, keepdim=True)
-            max_out, _ = torch.max(x, dim=1, keepdim=True)
-            return x * torch.sigmoid(self.conv(torch.cat([avg_out, max_out], dim=1)))
-    
-    class CBAM(nn.Module):
-        def __init__(self, in_channels: int, reduction: int = 4, kernel_size: int = 7):
-            super().__init__()
-            self.channel_attention = ChannelAttention(in_channels, reduction)
-            self.spatial_attention = SpatialAttention(kernel_size)
-        def forward(self, x):
-            x = self.channel_attention(x)
-            x = self.spatial_attention(x)
-            return x
-    
-    class AttentionWrapper(nn.Module):
-        def __init__(self, base_model, in_channels: int, reduction: int = 4):
-            super().__init__()
-            self.input_attention = CBAM(in_channels, reduction=reduction)
-            self.base_model = base_model
-        def forward(self, x):
-            x = self.input_attention(x)
-            return self.base_model(x)
-
 # Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -129,20 +76,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 LOGGER = logging.getLogger("training")
-MODEL_CHANNEL_NAMES: Tuple[str, ...] = (
-    "R",
-    "G",
-    "B",
-    "DSM",
-    "DTM",
-    "SVF",
-    "Pos_Openness",
-    "Neg_Openness",
-    "LRM",
-    "Slope",
-    "nDSM",
-    "TPI",
-)
 
 # ==================== CONFIG ====================
 # IDE uzerinden dogrudan "Run" ettiginizde bu degerler kullanilir.
@@ -253,6 +186,14 @@ CONFIG: dict[str, object] = {
     # output:
     # Checkpoint cikti dizini.
     "output": "checkpoints",
+
+    # publish_active:
+    # True ise egitim sonunda aktif IDE modeli sabit bir klasore kopyalanir.
+    "publish_active": True,
+
+    # active_dir:
+    # IDE/inference tarafinin okuyacagi aktif model klasoru.
+    "active_dir": "checkpoints/active",
 
     # save_every_epoch:
     # True ise her epoch sonunda ek checkpoint kaydeder.
@@ -988,6 +929,73 @@ class TrainingConfig:
     output_dir: Path = field(default_factory=lambda: Path("checkpoints"))
     save_every_epoch: bool = True
     epoch_dir: str = "epochs"
+    publish_active: bool = True
+    active_dir: Path = field(default_factory=lambda: Path("checkpoints") / "active")
+    source_metadata_path: Optional[Path] = None
+    source_metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+def _build_training_metadata_payload(config: TrainingConfig) -> Dict[str, Any]:
+    """Merge dataset metadata with the training config used for the checkpoint."""
+    payload = dict(config.source_metadata)
+    payload.update(
+        {
+            "schema_version": METADATA_SCHEMA_VERSION,
+            "task_type": str(config.task_type).strip().lower(),
+            "arch": _resolved_model_arch_name(config),
+            "encoder": str(config.encoder),
+            "in_channels": int(config.in_channels),
+            "channel_names": list(config.channel_names),
+            "data_dir": str(config.data_dir),
+        }
+    )
+    return payload
+
+
+def _publish_active_artifacts(
+    *, config: TrainingConfig, best_model_path: Path
+) -> Dict[str, Path]:
+    """Publish the latest trained model and metadata for IDE-first inference."""
+    active_dir = Path(config.active_dir)
+    active_dir.mkdir(parents=True, exist_ok=True)
+
+    model_target = active_dir / "model.pth"
+    shutil.copy2(best_model_path, model_target)
+
+    metadata_target = active_dir / "training_metadata.json"
+    metadata_payload = _build_training_metadata_payload(config)
+    metadata_target.write_text(
+        json.dumps(metadata_payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    manifest_target = active_dir / "published_from.json"
+    manifest = {
+        "published_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "source_checkpoint": str(best_model_path),
+        "source_training_metadata": (
+            str(config.source_metadata_path) if config.source_metadata_path else None
+        ),
+        "task_type": str(config.task_type).strip().lower(),
+        "arch": _resolved_model_arch_name(config),
+        "encoder": str(config.encoder),
+        "in_channels": int(config.in_channels),
+        "channel_names": list(config.channel_names),
+        "tile_size": metadata_payload.get("tile_size"),
+        "overlap": metadata_payload.get("overlap"),
+        "bands": metadata_payload.get("bands"),
+        "data_dir": str(config.data_dir),
+    }
+    manifest_target.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    return {
+        "model": model_target,
+        "training_metadata": metadata_target,
+        "manifest": manifest_target,
+    }
 
 
 def _detect_split_file_format(images_dir: Path) -> Optional[str]:
@@ -1955,11 +1963,17 @@ def train(config: TrainingConfig) -> Path:
             "lr": current_lr,
             "train_channel_importance": train_channel_importance,
             "config": {
+                "schema_version": METADATA_SCHEMA_VERSION,
                 "arch": model_arch_name,
                 "encoder": config.encoder,
                 "in_channels": config.in_channels,
                 "channel_names": list(config.channel_names),
                 "task_type": config.task_type,
+                "tile_size": config.source_metadata.get("tile_size"),
+                "overlap": config.source_metadata.get("overlap"),
+                "bands": config.source_metadata.get("bands"),
+                "input_file": config.source_metadata.get("input_file"),
+                "mask_file": config.source_metadata.get("mask_file"),
                 "tile_label_min_positive_ratio": config.tile_label_min_positive_ratio,
                 "enable_attention": config.enable_attention,
                 "attention_reduction": config.attention_reduction,
@@ -2050,6 +2064,12 @@ def train(config: TrainingConfig) -> Path:
             best_model_path = best_loss_model_path
         else:
             raise RuntimeError("Hiç checkpoint kaydedilmedi; eğitim çıktıları oluşturulamadı.")
+
+    if config.publish_active:
+        published = _publish_active_artifacts(config=config, best_model_path=best_model_path)
+        LOGGER.info("Aktif model yayinlandi: %s", published["model"])
+        LOGGER.info("Aktif training metadata: %s", published["training_metadata"])
+        LOGGER.info("Aktif publish manifesti: %s", published["manifest"])
 
     return best_model_path
 
@@ -2223,6 +2243,18 @@ def main():
         help="Checkpoint dizini",
     )
     parser.add_argument(
+        "--publish-active",
+        action=argparse.BooleanOptionalAction,
+        default=bool(CONFIG["publish_active"]),
+        help="Egitim sonunda aktif IDE modelini sabit klasore kopyala.",
+    )
+    parser.add_argument(
+        "--active-dir",
+        type=str,
+        default=str(CONFIG["active_dir"]),
+        help="Aktif model ve training metadata yayin klasoru.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=int(CONFIG["seed"]),
@@ -2322,12 +2354,15 @@ def main():
     # Metadata'dan kanal sayısını oku
     metadata_path = data_dir / "metadata.json"
     channel_names = MODEL_CHANNEL_NAMES
+    source_metadata: Dict[str, Any] = {}
+    source_metadata_path: Optional[Path] = None
     if metadata_path.exists():
-        with open(metadata_path) as f:
-            metadata = json.load(f)
-        in_channels = metadata.get("num_channels", 12)
+        with open(metadata_path, encoding="utf-8") as f:
+            source_metadata = json.load(f)
+        source_metadata_path = metadata_path
+        in_channels = source_metadata.get("num_channels", 12)
         LOGGER.info(f"Metadata'dan kanal sayısı okundu: {in_channels}")
-        raw_channel_names = metadata.get("channel_names")
+        raw_channel_names = source_metadata.get("channel_names")
         if isinstance(raw_channel_names, list) and raw_channel_names:
             channel_names = tuple(str(x) for x in raw_channel_names)
     else:
@@ -2543,6 +2578,10 @@ def main():
         output_dir=Path(args.output),
         save_every_epoch=bool(CONFIG["save_every_epoch"]),
         epoch_dir=str(CONFIG["epoch_dir"]),
+        publish_active=bool(args.publish_active),
+        active_dir=Path(args.active_dir),
+        source_metadata_path=source_metadata_path,
+        source_metadata=source_metadata,
     )
     
     # Eğitimi başlat
@@ -2562,6 +2601,10 @@ def main():
             print(f"  python archaeo_detect.py --weights {best_model} --dl-task tile_classification")
         else:
             print(f"  python archaeo_detect.py --weights {best_model}")
+        if config.publish_active:
+            print("\nIDE trained-only profili icin aktif artefact'lar guncellendi:")
+            print(f"  weights: \"{Path(config.active_dir) / 'model.pth'}\"")
+            print(f"  training_metadata: \"{Path(config.active_dir) / 'training_metadata.json'}\"")
         print("=" * 60)
         
     except KeyboardInterrupt:

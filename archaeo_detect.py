@@ -62,6 +62,13 @@ from scipy.ndimage import (
 import torch
 from tqdm import tqdm
 
+from archeo_shared.channels import (
+    LOCKED_TRAINED_ONLY_FIELDS,
+    METADATA_SCHEMA_VERSION,
+    MODEL_CHANNEL_NAMES,
+    expected_channel_names,
+)
+
 try:
     import segmentation_models_pytorch as smp
 except ImportError:
@@ -117,27 +124,12 @@ except ImportError:
     YOLO = None  # YOLO11 support is optional
 
 LOGGER = logging.getLogger("archaeo_detect")
-
 T = TypeVar("T")
 
 SESSION_RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 _WARN_ONCE_KEYS: set[str] = set()
 _DERIV_CACHE_THREAD_LOCAL = threading.local()
-MODEL_CHANNEL_NAMES: Tuple[str, ...] = (
-    "R",
-    "G",
-    "B",
-    "DSM",
-    "DTM",
-    "SVF",
-    "Pos_Openness",
-    "Neg_Openness",
-    "LRM",
-    "Slope",
-    "nDSM",
-    "TPI",
-)
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -159,6 +151,29 @@ _KNOWN_OUTPUT_SUFFIXES = {
     ".shp",
     ".vrt",
 }
+
+_CONFIG_PATH_FIELDS = {
+    "input",
+    "out_prefix",
+    "weights",
+    "weights_template",
+    "training_metadata",
+    "yolo_weights",
+    "cache_dir",
+}
+
+
+def _normalize_config_path_value(raw: Any, base_dir: Path) -> Any:
+    """Resolve config path-like values relative to the chosen base directory."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return raw
+    path = Path(text)
+    if not path.is_absolute():
+        path = base_dir / path
+    return str(path.resolve(strict=False))
 
 
 def _output_base_path(path: Path) -> Path:
@@ -459,6 +474,12 @@ class PipelineDefaults:
     weights: Optional[str] = field(
         default=None,
         metadata={"help": "Eğitilmiş model ağırlıkları (.pth dosyası); None ise zero-shot modu kullanılır"},
+    )
+    training_metadata: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Egitim metadata dosyasi (.json). trained_model_only modunda tile/overlap/bands buradan kilitlenir."
+        },
     )
     weights_template: Optional[str] = field(
         default=None,
@@ -833,6 +854,8 @@ class PipelineDefaults:
                 errors.append("trained_model_only icin enable_deep_learning=true olmalidir.")
             if not self.weights:
                 errors.append("trained_model_only icin weights zorunludur.")
+            if not self.training_metadata:
+                errors.append("trained_model_only icin training_metadata zorunludur.")
 
         if errors:
             error_msg = "Konfigürasyon doğrulama hataları:\n" + "\n".join(f"  - {e}" for e in errors)
@@ -903,10 +926,14 @@ def build_config_from_args(
     """Komut satırı argümanlarından ve opsiyonel YAML config'den PipelineDefaults oluştur."""
     # Önce YAML config'i yükle (varsa)
     base_config = {}
+    yaml_supplied_fields: set[str] = set()
+    config_dir: Optional[Path] = None
     if hasattr(args, 'config') and args.config:
         yaml_path = Path(args.config)
         try:
             base_config = load_config_from_yaml(yaml_path)
+            yaml_supplied_fields = {str(k) for k in base_config.keys()}
+            config_dir = yaml_path.resolve(strict=False).parent
             LOGGER.info(f"Config dosyası yüklendi: {yaml_path}")
         except Exception as e:
             LOGGER.warning(f"Config dosyası yüklenemedi ({yaml_path}): {e}")
@@ -936,6 +963,19 @@ def build_config_from_args(
             if name not in values or not hasattr(args, name):
                 continue
             values[name] = getattr(args, name)
+
+    cwd = Path.cwd()
+    cli_override_names = set(cli_overrides or ())
+    for name in _CONFIG_PATH_FIELDS:
+        if name not in values:
+            continue
+        if name in cli_override_names:
+            base_dir = cwd
+        elif name in yaml_supplied_fields and config_dir is not None:
+            base_dir = config_dir
+        else:
+            base_dir = cwd
+        values[name] = _normalize_config_path_value(values[name], base_dir)
     
     return PipelineDefaults(**values)
 
@@ -2195,6 +2235,38 @@ def safe_torch_load(weights_path: Path, map_location: Any) -> Any:
         return torch.load(weights_path, map_location=map_location, weights_only=False)
 
 
+def _extract_checkpoint_state_dict(state_obj: Any) -> Optional[Dict[str, Any]]:
+    """Extract the tensor state dict from raw torch.load output."""
+    if not isinstance(state_obj, dict):
+        return None
+    for key in ("state_dict", "model_state_dict"):
+        maybe_state = state_obj.get(key)
+        if isinstance(maybe_state, dict):
+            return maybe_state
+    if any(isinstance(v, torch.Tensor) for v in state_obj.values()):
+        return state_obj
+    return None
+
+
+def _infer_checkpoint_task_type_from_state_dict(state_dict: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Infer checkpoint task type from state-dict keys when metadata is missing."""
+    if not state_dict:
+        return None
+    keys = tuple(str(key) for key in state_dict.keys())
+    has_segmentation_head = any("segmentation_head" in key for key in keys)
+    has_classifier = any(
+        key.endswith("classifier.weight")
+        or key.endswith("classifier.bias")
+        or ".classifier." in key
+        for key in keys
+    )
+    if has_segmentation_head and not has_classifier:
+        return "segmentation"
+    if has_classifier and not has_segmentation_head:
+        return "tile_classification"
+    return None
+
+
 def get_checkpoint_model_hints(weights_path: Path) -> Dict[str, Any]:
     """Extract optional model metadata from a checkpoint."""
     if not weights_path.exists():
@@ -2208,13 +2280,30 @@ def get_checkpoint_model_hints(weights_path: Path) -> Dict[str, Any]:
     if not isinstance(state_obj, dict):
         return {}
     cfg = state_obj.get("config")
-    if not isinstance(cfg, dict):
-        return {}
 
     hints: Dict[str, Any] = {}
-    for key in ("arch", "encoder", "in_channels", "enable_attention", "attention_reduction", "task_type", "channel_names"):
-        if key in cfg:
-            hints[key] = cfg[key]
+    if isinstance(cfg, dict):
+        for key in (
+            "arch",
+            "encoder",
+            "in_channels",
+            "enable_attention",
+            "attention_reduction",
+            "task_type",
+            "channel_names",
+            "bands",
+            "tile_size",
+            "overlap",
+            "input_file",
+            "mask_file",
+            "schema_version",
+        ):
+            if key in cfg:
+                hints[key] = cfg[key]
+    state_dict = _extract_checkpoint_state_dict(state_obj)
+    inferred_task = _infer_checkpoint_task_type_from_state_dict(state_dict)
+    if inferred_task and "task_type" not in hints:
+        hints["task_type"] = inferred_task
     return hints
 
 
@@ -2230,16 +2319,146 @@ def load_training_metadata_hints(metadata_path: Path) -> Dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _canonical_bands_string(value: Any) -> str:
+    return ",".join(part.strip() for part in str(value).split(",") if part.strip())
+
+
+def _metadata_channel_names(metadata: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
+    raw_channel_names = metadata.get("channel_names")
+    if isinstance(raw_channel_names, list) and raw_channel_names:
+        return tuple(str(x) for x in raw_channel_names)
+    return None
+
+
+def apply_trained_only_metadata_locks(
+    *,
+    config: PipelineDefaults,
+    metadata: Dict[str, Any],
+    cli_overrides: Iterable[str],
+) -> None:
+    """Lock trained-only runtime parameters to metadata values."""
+    if not config.trained_model_only:
+        return
+    if not metadata:
+        raise ValueError(
+            "trained_model_only active but training metadata could not be loaded."
+        )
+
+    schema_version = metadata.get("schema_version")
+    if schema_version not in (None, "") and int(schema_version) < METADATA_SCHEMA_VERSION:
+        raise ValueError(
+            f"training metadata schema_version={schema_version} eski; "
+            f"trained_model_only icin >= {METADATA_SCHEMA_VERSION} beklenir."
+        )
+
+    locked_sources = {
+        "tile": metadata.get("tile_size"),
+        "overlap": metadata.get("overlap"),
+        "bands": metadata.get("bands"),
+    }
+    for field_name in LOCKED_TRAINED_ONLY_FIELDS:
+        source_value = locked_sources[field_name]
+        if source_value in (None, ""):
+            raise ValueError(
+                f"trained_model_only icin training metadata '{field_name}' bilgisini icermelidir."
+            )
+        current_value = getattr(config, field_name)
+        if field_name in cli_overrides:
+            current_text = (
+                _canonical_bands_string(current_value)
+                if field_name == "bands"
+                else str(int(current_value))
+            )
+            source_text = (
+                _canonical_bands_string(source_value)
+                if field_name == "bands"
+                else str(int(source_value))
+            )
+            if current_text != source_text:
+                raise ValueError(
+                    f"trained_model_only icin --{field_name}={current_text} kullanilamaz; "
+                    f"training metadata {field_name}={source_text} bekliyor."
+                )
+        if field_name == "bands":
+            setattr(config, field_name, _canonical_bands_string(source_value))
+        else:
+            setattr(config, field_name, int(source_value))
+
+    meta_channels = _metadata_channel_names(metadata)
+    if meta_channels is not None and meta_channels != expected_channel_names(len(meta_channels)):
+        raise ValueError(
+            "training metadata channel_names guncel kanal semasi ile uyusmuyor; "
+            "legacy/curvature tabanli metadata trained_model_only modunda desteklenmiyor."
+        )
+
+    LOGGER.info(
+        "trained_model_only active: tile/overlap/bands values locked to training metadata"
+    )
+    LOGGER.info(
+        "Effective tile/overlap/bands: tile=%d overlap=%d bands=%s",
+        int(config.tile),
+        int(config.overlap),
+        str(config.bands),
+    )
+
+
+def validate_checkpoint_metadata_consistency(
+    *, checkpoint_hints: Dict[str, Any], metadata: Dict[str, Any]
+) -> None:
+    """Fail closed when checkpoint hints and metadata disagree on critical fields."""
+    if not checkpoint_hints or not metadata:
+        return
+
+    checks = (
+        ("task_type", "task_type"),
+        ("arch", "arch"),
+        ("encoder", "encoder"),
+        ("in_channels", "in_channels"),
+        ("bands", "bands"),
+        ("tile_size", "tile_size"),
+        ("overlap", "overlap"),
+        ("schema_version", "schema_version"),
+    )
+    for ck_key, meta_key in checks:
+        ck_val = checkpoint_hints.get(ck_key)
+        meta_val = metadata.get(meta_key)
+        if ck_val in (None, "") or meta_val in (None, ""):
+            continue
+        if ck_key in {"task_type", "arch", "encoder"}:
+            left = str(ck_val).strip().lower()
+            right = str(meta_val).strip().lower()
+        elif ck_key == "bands":
+            left = _canonical_bands_string(ck_val)
+            right = _canonical_bands_string(meta_val)
+        else:
+            left = int(ck_val)
+            right = int(meta_val)
+        if left != right:
+            raise ValueError(
+                f"Checkpoint {ck_key}={ck_val} ile training metadata {meta_key}={meta_val} uyusmuyor."
+            )
+
+    ck_channels = checkpoint_hints.get("channel_names")
+    meta_channels = _metadata_channel_names(metadata)
+    if isinstance(ck_channels, list):
+        ck_channel_tuple = tuple(str(x) for x in ck_channels)
+    elif isinstance(ck_channels, tuple):
+        ck_channel_tuple = tuple(str(x) for x in ck_channels)
+    else:
+        ck_channel_tuple = None
+    if ck_channel_tuple is not None and meta_channels is not None and ck_channel_tuple != meta_channels:
+        raise ValueError(
+            "Checkpoint channel_names ile training metadata channel_names uyusmuyor."
+        )
+
+
 def warn_if_training_inference_mismatch(
     *,
     metadata: Dict[str, Any],
     input_path: Path,
-    bands: Sequence[int],
-    tile: int,
-    overlap: int,
     dl_task: str,
 ) -> None:
-    """Emit warnings when inference settings differ from training-data metadata."""
+    """Emit soft warnings for non-fatal training/inference differences."""
     if not metadata or str(dl_task).strip().lower() != "tile_classification":
         return
 
@@ -2250,41 +2469,6 @@ def warn_if_training_inference_mismatch(
             meta_input_name,
             input_path.name,
         )
-
-    meta_bands = str(metadata.get("bands", "")).strip()
-    bands_csv = ",".join(str(int(v)) for v in bands)
-    if meta_bands and meta_bands != bands_csv:
-        LOGGER.warning(
-            "Training metadata bands '%s' ile inference bands '%s' farkli.",
-            meta_bands,
-            bands_csv,
-        )
-
-    meta_tile = metadata.get("tile_size")
-    if meta_tile is not None and int(meta_tile) != int(tile):
-        LOGGER.warning(
-            "Training metadata tile_size=%s, inference tile=%s. Tile-classification icin ayni olmasi onerilir.",
-            meta_tile,
-            tile,
-        )
-
-    meta_overlap = metadata.get("overlap")
-    if meta_overlap is not None and int(meta_overlap) != int(overlap):
-        LOGGER.warning(
-            "Training metadata overlap=%s, inference overlap=%s. Tile-classification icin ayni olmasi onerilir.",
-            meta_overlap,
-            overlap,
-        )
-
-    meta_channel_names = metadata.get("channel_names")
-    if isinstance(meta_channel_names, list):
-        meta_channels = tuple(str(x) for x in meta_channel_names)
-        if meta_channels != MODEL_CHANNEL_NAMES:
-            LOGGER.warning(
-                "Training metadata channel_names mevcut DL semasiyla farkli. training=%s current=%s",
-                list(meta_channels),
-                list(MODEL_CHANNEL_NAMES),
-            )
 
 
 def load_weights(
@@ -6542,6 +6726,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("weights"),
     )
     parser.add_argument(
+        "--training-metadata",
+        default=default_for("training_metadata"),
+        dest="training_metadata",
+        help=cli_help("training_metadata"),
+    )
+    parser.add_argument(
         "--bands",
         default=default_for("bands"),
         help=cli_help("bands"),
@@ -6903,6 +7093,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             parser.error("--trained-model-only requires --enable-deep-learning.")
         if not config.weights:
             parser.error("--trained-model-only requires --weights.")
+        if not config.training_metadata:
+            parser.error("--trained-model-only requires --training-metadata.")
         if config.enable_yolo:
             LOGGER.info("trained_model_only active: disabling YOLO branch.")
             config.enable_yolo = False
@@ -6931,11 +7123,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             if hint_encoder_raw:
                 hint_encoder, _ = normalize_encoder(hint_encoder_raw)
                 if hint_encoder != config.encoder:
-                    if "encoder" in cli_overrides:
-                        LOGGER.warning(
-                            "Checkpoint encoder '%s' ile --encoder '%s' farkli; explicit CLI degeri korunuyor.",
-                            hint_encoder,
-                            config.encoder,
+                    if config.trained_model_only and "encoder" in cli_overrides:
+                        parser.error(
+                            f"trained_model_only checkpoint encoder '{hint_encoder}' bekliyor; "
+                            f"CLI encoder '{config.encoder}' kullanilamaz."
                         )
                     else:
                         LOGGER.info(
@@ -6948,11 +7139,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
             hint_arch = str(checkpoint_hints.get("arch", "")).strip()
             if hint_arch and hint_arch != config.arch:
-                if "arch" in cli_overrides:
-                    LOGGER.warning(
-                        "Checkpoint arch '%s' ile --arch '%s' farkli; explicit CLI degeri korunuyor.",
-                        hint_arch,
-                        config.arch,
+                if config.trained_model_only and "arch" in cli_overrides:
+                    parser.error(
+                        f"trained_model_only checkpoint arch '{hint_arch}' bekliyor; "
+                        f"CLI arch '{config.arch}' kullanilamaz."
                     )
                 else:
                     LOGGER.info(
@@ -6965,11 +7155,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
             hint_task = str(checkpoint_hints.get("task_type", "")).strip().lower()
             if hint_task and hint_task != str(config.dl_task).strip().lower():
-                if "dl_task" in cli_overrides:
-                    LOGGER.warning(
-                        "Checkpoint task '%s' ile --dl-task '%s' farkli; explicit CLI degeri korunuyor.",
-                        hint_task,
-                        config.dl_task,
+                if config.trained_model_only:
+                    parser.error(
+                        f"trained_model_only checkpoint task '{hint_task}' ancak config/CLI dl_task "
+                        f"'{config.dl_task}'. Yanlis checkpoint kullaniliyor."
                     )
                 else:
                     LOGGER.info(
@@ -7003,16 +7192,37 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if not weights_path.exists():
             parser.error(f"Weights file not found: {weights_path}")
 
+    training_metadata_path: Optional[Path] = None
+    training_metadata: Dict[str, Any] = {}
+    if config.training_metadata:
+        training_metadata_path = Path(config.training_metadata)
+        training_metadata = load_training_metadata_hints(training_metadata_path)
+        if config.trained_model_only and not training_metadata:
+            parser.error(
+                f"Training metadata could not be loaded: {training_metadata_path}. "
+                "Once training.py finishes, make sure checkpoints/active/training_metadata.json exists."
+            )
+
+    if config.trained_model_only:
+        try:
+            apply_trained_only_metadata_locks(
+                config=config,
+                metadata=training_metadata,
+                cli_overrides=cli_overrides,
+            )
+            validate_checkpoint_metadata_consistency(
+                checkpoint_hints=checkpoint_hints,
+                metadata=training_metadata,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
     dl_task = str(config.dl_task).strip().lower()
 
     bands = parse_band_indexes(config.bands)
-    training_metadata = load_training_metadata_hints(Path("training_data") / "metadata.json")
     warn_if_training_inference_mismatch(
         metadata=training_metadata,
         input_path=input_path,
-        bands=bands,
-        tile=int(config.tile),
-        overlap=int(config.overlap),
         dl_task=dl_task,
     )
     out_prefix = resolve_out_prefix(input_path, config.out_prefix, config)
