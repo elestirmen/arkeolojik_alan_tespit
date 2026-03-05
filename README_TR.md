@@ -163,7 +163,7 @@ python -m venv .venv310
 source .venv310/bin/activate
 ```
 
-**Not:** Proje `.venv310` dizini içerir. Proje klasörünü taşırsanız, `.venv310/Scripts/activate.bat` ve `.venv310/Scripts/activate` dosyalarındaki sanal ortam yollarını güncellediğinizden emin olun.
+**Not:** `.venv310` opsiyoneldir. Conda (`archeo`) kullanıyorsanız `.venv310` oluşturmanız gerekmez ve varsa silebilirsiniz.
 
 #### 3️⃣ Gerekli Paketleri Yükleme
 

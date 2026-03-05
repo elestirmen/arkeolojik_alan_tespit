@@ -164,7 +164,7 @@ python -m venv .venv310
 source .venv310/bin/activate
 ```
 
-**Note:** The project includes a `.venv310` directory. If you move the project folder, make sure to update the virtual environment paths in `.venv310/Scripts/activate.bat` and `.venv310/Scripts/activate`.
+**Note:** `.venv310` is optional. If you use Conda (e.g., `archeo`), you can skip/remove `.venv310`.
 
 #### 3️⃣ Install Required Packages
 
