@@ -17,7 +17,7 @@ arkeolojik_alan_tespit/
 ### 1. archaeo_detect_base
 **12 Kanallı Derin Öğrenme Yöntemi**
 
-- **Girdi**: RGB + SVF + Openness + LRM + Slope + nDSM + Curvature + TPI (12 kanal)
+- **Girdi**: RGB + DSM + DTM + SVF + Openness + LRM + Slope + nDSM + TPI (12 kanal)
 - **Model**: U-Net, DeepLabV3+ (Segmentation Models PyTorch)
 - **Encoder**: ResNet, EfficientNet, DenseNet, vb.
 - **Özellikler**: 
@@ -87,7 +87,7 @@ python adaf_inference.py
 
 | Özellik | Base | Enki | ADAF |
 |---------|------|------|------|
-| **Girdi Kanalları** | 12 (RGB + RVT + Curvature + TPI) | Değişken | ALS tabanlı |
+| **Girdi Kanalları** | 12 (RGB + DSM/DTM + RVT + nDSM + TPI) | Değişken | ALS tabanlı |
 | **Framework** | PyTorch | TensorFlow/Keras | PyTorch (AiTLAS) |
 | **Eğitim Verisi** | Genel | Tell verileri | İrlanda ALS |
 | **Tespit Türleri** | Genel arkeolojik | Tell, yerleşim | Barrows, Ringforts, Enclosures |

@@ -49,7 +49,7 @@ This project combines **deep learning** and **classical image processing** metho
 - ✅ **Ensemble Learning**: Combines results from multiple encoders for more reliable detection
 - ✅ **Multi-Scale Analysis**: Detects structures of different sizes
 - ✅ **🆕 Labeled Object Detection**: Automatic labeling of 80 different object classes (trees, buildings, vehicles, etc.) with YOLO11
-- ✅ **🆕 12-Channel Input**: Advanced topographic features including Curvature and TPI for enhanced detection
+- ✅ **🆕 12-Channel Input**: RGB + DSM + DTM + RVT derivatives + nDSM + TPI for enhanced detection
 - ✅ **🆕 CBAM Attention**: Channel and spatial attention mechanism for dynamic feature weighting
 
 ### 🔧 Technical Features
@@ -104,7 +104,7 @@ pip install -r requirements.txt
 python archaeo_detect.py
 ```
 
-🎉 **Congratulations!** The system has started. Results will be created in the current directory.
+🎉 **Congratulations!** The system has started. Results will be created under `ciktilar/`.
 
 ### 🎓 Training Your Own Model (Optional)
 
@@ -538,7 +538,7 @@ python archaeo_detect.py --help
 | `--input` | Input GeoTIFF file | `--input area.tif` |
 | `--th` | DL threshold (0-1) | `--th 0.7` |
 | `--tile` | Tile size (pixels) | `--tile 1024` |
-| `--overlap` | Overlap amount | `--overlap 256` |
+| `--overlap` | Overlap amount | `--overlap 128` |
 | `--encoder` | Single encoder selection | `--encoder resnet34` |
 | `--encoders` | Multi-encoder mode | `--encoders all` |
 | `--alpha` | Fusion weight | `--alpha 0.6` |
@@ -636,6 +636,16 @@ gdal_edit.py -a_srs EPSG:32635 output.tif
 ## 📂 Output Files
 
 When the system runs, the following files are created:
+
+All outputs are written under:
+
+```
+ciktilar/<session_folder>/<out_name>*
+```
+
+`<session_folder>` uses a compact format:
+`<timestamp>_<input>_<methods>_t<tile>o<overlap>_m-<model>`
+(example model tokens: `m-<checkpoint>`, `m-zs`, `m-<encoder>`).
 
 ### 📊 Raster Outputs (GeoTIFF)
 
@@ -796,10 +806,11 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
 
 2. **12-Channel Tensor Creation** (Updated!)
    - 3 x RGB
-   - 1 x nDSM (DSM - DTM)
+   - 1 x DSM (raw)
+   - 1 x DTM (raw)
    - 5 x RVT derivatives (SVF, Pos/Neg Openness, LRM, Slope)
-   - 2 x Curvature (Plan + Profile) - NEW!
-   - 1 x TPI (Topographic Position Index) - NEW!
+   - 1 x nDSM (DSM - DTM)
+   - 1 x TPI (Topographic Position Index)
 
 3. **Normalization**
    - Global or local percentile-based
@@ -1355,7 +1366,7 @@ A: Yes, satellite imagery and LiDAR data are supported. Important thing is that 
 ### 🔧 Technical Questions
 
 **Q: How many bands are required?**  
-A: Minimum 3 bands (RGB). Optimum 5 bands (RGB + DSM + DTM). **12 channels** are automatically created with RVT derivatives, Curvature, and TPI calculations.
+A: Minimum 3 bands (RGB). Optimum 5 bands (RGB + DSM + DTM). **12 channels** are automatically created with raw DSM/DTM + RVT derivatives + nDSM + TPI.
 
 **Q: How much space do cache files take?**  
 A: Typically 10-50 MB. Depends on input file size. Can be larger (several GB) for high-resolution data.
@@ -1741,7 +1752,7 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
          ▼                              │
 ┌──────────────────┐                    │
 │ Calculate:       │                    │
-│ - Curvatures     │                    │
+│ - DSM/DTM (raw)  │                    │
 │ - TPI            │                    │
 │ - nDSM           │                    │
 └────────┬─────────┘                    │
@@ -1770,7 +1781,7 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 | `--mask` | Required | Binary mask GeoTIFF (0/1 values) |
 | `--output` | `training_data` | Output directory |
 | `--tile-size` | `256` | Tile dimensions in pixels |
-| `--overlap` | `64` | Overlap between tiles |
+| `--overlap` | `128` | Overlap between tiles |
 | `--train-ratio` | `0.8` | 80% train, 20% validation |
 | `--train-negative-keep-ratio` | `1.0` | Keep ratio of fully-negative train tiles (`0`=drop all, `1`=keep all) |
 | `--train-negative-max` | `None` | Optional upper cap for kept negative train tiles |
@@ -1781,7 +1792,7 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 
 | Scenario | Command |
 |----------|---------|
-| **Standard** | `--tile-size 256 --overlap 64` |
+| **Standard** | `--tile-size 256 --overlap 128` |
 | **Large structures** | `--tile-size 512 --overlap 128` |
 | **Imbalanced data** (<5% archaeological) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
 | **Quick test** | `--tile-size 256 --train-ratio 0.9` |
@@ -1791,14 +1802,14 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 | # | Channel | What it detects |
 |---|---------|-----------------|
 | 0-2 | RGB | Color/texture anomalies |
-| 3 | SVF | Tumuli, mounds (horizon visibility) |
-| 4 | Positive Openness | Raised structures |
-| 5 | Negative Openness | Ditches, depressions |
-| 6 | LRM | Local topographic anomalies |
-| 7 | Slope | Terraces, walls |
-| 8 | nDSM | Surface height above ground |
-| 9 | Plan Curvature | Ridges vs valleys |
-| 10 | Profile Curvature | Terraces, steps |
+| 3 | DSM | Surface elevation context |
+| 4 | DTM | Ground elevation context |
+| 5 | SVF | Tumuli, mounds (horizon visibility) |
+| 6 | Positive Openness | Raised structures |
+| 7 | Negative Openness | Ditches, depressions |
+| 8 | LRM | Local topographic anomalies |
+| 9 | Slope | Terraces, walls |
+| 10 | nDSM | Surface height above ground |
 | 11 | TPI | Relative elevation (mounds/depressions) |
 
 ---
@@ -2051,7 +2062,7 @@ python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention
 ```
 
 **Key Features:**
-- ✅ 12-channel input (RGB + RVT + Curvature + TPI)
+- ✅ 12-channel input (RGB + DSM + DTM + RVT + nDSM + TPI)
 - ✅ CBAM Attention (channel + spatial)
 - ✅ Multiple loss functions (BCE, Dice, Combined, Focal)
 - ✅ Mixed precision training
@@ -2180,7 +2191,7 @@ archaeo_detect.py
 │   │   ├── LRM (Local Relief Model)
 │   │   └── Slope
 │   ├── Advanced features
-│   │   ├── Curvature calculation (Plan + Profile)
+│   │   ├── Raw DSM/DTM channel inclusion
 │   │   ├── TPI calculation (multi-scale)
 │   │   └── nDSM calculation (DSM - DTM)
 │   └── Normalization (global/local percentile)
@@ -2225,7 +2236,7 @@ egitim_verisi_olusturma.py
 │   └── CRS validation
 ├── Feature Extraction
 │   ├── RVT derivatives (SVF, Openness, LRM, Slope)
-│   ├── Curvature (Plan, Profile)
+│   ├── Raw DSM/DTM channels
 │   ├── TPI (multi-scale)
 │   └── nDSM calculation
 ├── Tile Generation
@@ -2284,18 +2295,18 @@ training.py
 | Channel | Feature | Description | Archaeological Use |
 |---------|---------|-------------|-------------------|
 | 0-2 | RGB | Red, Green, Blue | Color/texture anomalies |
-| 3 | SVF | Sky-View Factor | Tumuli, mounds |
-| 4 | Pos. Openness | Positive Openness | Raised structures |
-| 5 | Neg. Openness | Negative Openness | Ditches, depressions |
-| 6 | LRM | Local Relief Model | Local topographic anomalies |
-| 7 | Slope | Terrain slope | Terraces, walls |
-| 8 | nDSM | Normalized DSM | Surface height |
-| 9 | Plan Curvature | Horizontal curvature | Ridge/ditch separation |
-| 10 | Profile Curvature | Vertical curvature | Terraces, steps |
+| 3 | DSM | Digital Surface Model | Surface context |
+| 4 | DTM | Digital Terrain Model | Ground context |
+| 5 | SVF | Sky-View Factor | Tumuli, mounds |
+| 6 | Pos. Openness | Positive Openness | Raised structures |
+| 7 | Neg. Openness | Negative Openness | Ditches, depressions |
+| 8 | LRM | Local Relief Model | Local topographic anomalies |
+| 9 | Slope | Terrain slope | Terraces, walls |
+| 10 | nDSM | Normalized DSM | Surface height |
 | 11 | TPI | Topographic Position Index | Mounds/depressions |
 
 **CBAM Attention:**
-- **Channel Attention**: Dynamically weights feature channels (e.g., SVF and TPI for tumuli, Curvature for ditches)
+- **Channel Attention**: Dynamically weights feature channels (e.g., SVF/TPI for tumuli, Openness/LRM for ditches)
 - **Spatial Attention**: Focuses on important regions (structure boundaries, centers)
 - **Benefits**: Improves detection accuracy, reduces false positives, adapts to different structure types
 
@@ -2325,19 +2336,11 @@ H = [∂²f/∂x²    ∂²f/∂x∂y]
 
 Ridge/valley detection via eigenvalue analysis.
 
-#### Curvature Calculation
+#### Elevation Context (DSM / DTM / nDSM)
 
-**Plan Curvature (Horizontal):**
-- Measures curvature along contour lines
-- Positive values: Ridges, mounds (convex)
-- Negative values: Valleys, ditches (concave)
-- Formula: `Kh = -[(fxx * q) - (2 * fxy * fx * fy) + (fyy * p)] / [(p + q)^1.5]`
-
-**Profile Curvature (Vertical):**
-- Measures curvature along slope direction
-- Positive values: Convex surfaces (accelerating flow)
-- Negative values: Concave surfaces (decelerating flow)
-- Useful for detecting terraces and steps
+- **DSM** preserves surface-level height cues (vegetation, structures, terrain).
+- **DTM** provides ground-only relief context.
+- **nDSM = DSM - DTM** emphasizes above-ground height anomalies and supports tall-object masking.
 
 #### TPI (Topographic Position Index)
 

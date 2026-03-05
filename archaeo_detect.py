@@ -5083,60 +5083,46 @@ def write_fused_probability_rasters_from_paths(
 
 
 def build_session_folder_name(input_path: Path, config: PipelineDefaults) -> str:
-    """Build a descriptive, timestamped output subfolder name."""
-    stem = _safe_token(input_path.stem.strip()) or "input"
-    parts: List[str] = [SESSION_RUN_ID, stem]
+    """Build a compact, timestamped output subfolder name."""
 
-    method_tokens: List[str] = []
+    def _short_token(text: Optional[str], max_len: int) -> str:
+        token = _safe_token(str(text or "").strip())
+        if not token:
+            return "na"
+        return token[:max_len].rstrip("_-") or "na"
+
+    stem_short = _short_token(input_path.stem, 20)
+
+    method_flags: List[str] = []
     if config.enable_deep_learning:
-        dl_token = "dl"
-        if config.arch:
-            dl_token += f"-{_safe_token(config.arch)}"
-        if (config.encoders or "").strip().lower() in ("", "none") and config.encoder:
-            dl_token += f"-{_safe_token(config.encoder)}"
-        method_tokens.append(dl_token)
+        method_flags.append("dl")
     if config.enable_classic:
-        classic_token = "classic"
-        modes = (config.classic_modes or "").strip().lower()
-        if modes:
-            classic_token += f"-{_safe_token(modes)}"
-        method_tokens.append(classic_token)
+        method_flags.append("cl")
     if config.enable_yolo:
-        yolo_token = "yolo"
-        if config.yolo_conf is not None:
-            yolo_token += f"-conf{_fmt_float(config.yolo_conf)}"
-        method_tokens.append(yolo_token)
+        method_flags.append("yo")
     if config.enable_fusion:
-        method_tokens.append("fusion")
-    if method_tokens:
-        parts.append("+".join(method_tokens))
+        method_flags.append("fu")
+    method_summary = "+".join(method_flags) if method_flags else "run"
 
-    param_tokens: List[str] = []
-    if config.enable_deep_learning and config.th is not None:
-        param_tokens.append(f"th{_fmt_float(config.th)}")
-    if config.enable_classic:
-        if config.classic_th is None:
-            param_tokens.append("otsu")
-        else:
-            param_tokens.append(f"cth{_fmt_float(config.classic_th)}")
-    if config.tile:
-        param_tokens.append(f"tile{int(config.tile)}")
-    if config.overlap:
-        param_tokens.append(f"ov{int(config.overlap)}")
-    if config.min_area is not None:
-        param_tokens.append(f"min{_fmt_float(float(config.min_area), decimals=0)}")
+    tile_part = f"t{int(config.tile)}" if config.tile else ""
+    overlap_part = f"o{int(config.overlap)}" if config.overlap else ""
+    tile_overlap = f"{tile_part}{overlap_part}" if (tile_part or overlap_part) else ""
+
+    model_part = ""
     if config.enable_deep_learning:
         if config.weights:
-            param_tokens.append(f"model-{_safe_token(Path(config.weights).stem)}")
+            model_part = f"m-{_short_token(Path(config.weights).stem, 18)}"
         elif config.zero_shot_imagenet:
-            param_tokens.append("model-zeroshot")
+            model_part = "m-zs"
         elif config.encoder:
-            param_tokens.append(f"model-{_safe_token(config.encoder)}")
+            model_part = f"m-{_short_token(config.encoder, 12)}"
 
-    if param_tokens:
-        parts.append("_".join(param_tokens))
-
-    return "_".join(filter(None, parts))
+    parts: List[str] = [SESSION_RUN_ID, stem_short, method_summary]
+    if tile_overlap:
+        parts.append(tile_overlap)
+    if model_part:
+        parts.append(model_part)
+    return "_".join(parts)
 
 
 def resolve_out_prefix(input_path: Path, prefix: Optional[str], config: PipelineDefaults) -> Path:

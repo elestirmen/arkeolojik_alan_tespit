@@ -75,12 +75,15 @@ CONFIG: dict[str, object] = {
     # input:
     # Cok bantli raster dosyasinin yolu.
     # Beklenen icerik: RGB + DSM + DTM (hangi bant hangi role gidecek, bands ile belirlenir).
-    "input": "on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif",
+    #"input": "on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif",
+    "input": "on_veri/karlik_dag_rgb_dtm_dsm_5band.tif",
 
     # mask:
     # Ground-truth maske dosyasinin yolu.
     # 0 disindaki tum degerler pozitif sinif olarak ele alinir (otomatik 0/1'e cevrilir).
-    "mask": "on_veri/karlik_vadi_rgb_ground_truth.tif",
+    #"mask": "on_veri/karlik_vadi_rgb_ground_truth.tif",
+    "mask": "on_veri/karlik_dag_rgb_ground_truth.tif",
+
 
     # output:
     # Cikti kok dizini.

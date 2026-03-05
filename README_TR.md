@@ -48,7 +48,7 @@ Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (t
 - ✅ **Topluluk Öğrenme**: Daha güvenilir tespit için birden fazla kodlayıcının sonuçlarını birleştirir
 - ✅ **Çok Ölçekli Analiz**: Farklı boyutlardaki yapıları tespit eder
 - ✅ **🆕 Etiketli Nesne Tespiti**: YOLO11 ile 80 farklı nesne sınıfının otomatik etiketlenmesi (ağaçlar, binalar, araçlar vb.)
-- ✅ **🆕 12 Kanallı Giriş**: Gelişmiş tespit için Eğrilik ve TPI dahil ileri düzey topografik özellikler
+- ✅ **🆕 12 Kanallı Giriş**: Gelişmiş tespit için RGB + DSM + DTM + RVT türevleri + nDSM + TPI
 - ✅ **🆕 CBAM Dikkat**: Dinamik özellik ağırlıklandırma için kanal ve uzamsal dikkat mekanizması
 
 ### 🔧 Teknik Özellikler
@@ -103,7 +103,7 @@ pip install -r requirements.txt
 python archaeo_detect.py
 ```
 
-🎉 **Tebrikler!** Sistem başladı. Sonuçlar mevcut dizinde oluşturulacak.
+🎉 **Tebrikler!** Sistem başladı. Sonuçlar `ciktilar/` altında oluşturulacak.
 
 ### 🎓 Kendi Modelinizi Eğitme (İsteğe Bağlı)
 
@@ -448,7 +448,7 @@ python archaeo_detect.py --help
 | `--input` | Giriş GeoTIFF dosyası | `--input alan.tif` |
 | `--th` | DL eşiği (0-1) | `--th 0.7` |
 | `--tile` | Karo boyutu (piksel) | `--tile 1024` |
-| `--overlap` | Örtüşme miktarı | `--overlap 256` |
+| `--overlap` | Örtüşme miktarı | `--overlap 128` |
 | `--encoder` | Tek kodlayıcı seçimi | `--encoder resnet34` |
 | `--encoders` | Çoklu kodlayıcı modu | `--encoders all` |
 | `--alpha` | Füzyon ağırlığı | `--alpha 0.6` |
@@ -546,6 +546,16 @@ gdal_edit.py -a_srs EPSG:32635 cikis.tif
 ## 📂 Çıktı Dosyaları
 
 Sistem çalıştığında aşağıdaki dosyalar oluşturulur:
+
+Tüm çıktılar aşağıdaki köke yazılır:
+
+```
+ciktilar/<oturum_klasoru>/<cikti_adi>*
+```
+
+`<oturum_klasoru>` kısa bir format kullanır:
+`<zaman>_<girdi>_<yontemler>_t<tile>o<overlap>_m-<model>`
+(örnek model belirteçleri: `m-<checkpoint>`, `m-zs`, `m-<encoder>`).
 
 ### 📊 Raster Çıktılar (GeoTIFF)
 
@@ -706,10 +716,11 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
 
 2. **12 Kanallı Tensör Oluşturma** (Güncellenmiş!)
    - 3 x RGB
-   - 1 x nDSM (DSM - DTM)
+   - 1 x DSM (ham)
+   - 1 x DTM (ham)
    - 5 x RVT türevleri (SVF, Poz/Neg Açıklık, LRM, Eğim)
-   - 2 x Eğrilik (Plan + Profil) - YENİ!
-   - 1 x TPI (Topografik Konum İndeksi) - YENİ!
+   - 1 x nDSM (DSM - DTM)
+   - 1 x TPI (Topografik Konum İndeksi)
 
 3. **Normalizasyon**
    - Global veya yerel yüzdelik tabanlı
@@ -1265,7 +1276,7 @@ C: Evet, uydu görüntüleri ve LiDAR verileri desteklenir. Önemli olan çok ba
 ### 🔧 Teknik Sorular
 
 **S: Kaç bant gerekli?**  
-C: Minimum 3 bant (RGB). Optimum 5 bant (RGB + DSM + DTM). **12 kanal** RVT türevleri, Eğrilik ve TPI hesaplamalarıyla otomatik olarak oluşturulur.
+C: Minimum 3 bant (RGB). Optimum 5 bant (RGB + DSM + DTM). **12 kanal** ham DSM/DTM + RVT türevleri + nDSM + TPI ile otomatik oluşturulur.
 
 **S: Önbellek dosyaları ne kadar yer kaplar?**  
 C: Tipik olarak 10-50 MB. Giriş dosya boyutuna bağlıdır. Yüksek çözünürlüklü veriler için daha büyük (birkaç GB) olabilir.
@@ -1652,7 +1663,7 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
          ▼                              │
 ┌──────────────────┐                    │
 │ Hesapla:         │                    │
-│ - Eğrilikler     │                    │
+│ - DSM/DTM (ham)  │                    │
 │ - TPI            │                    │
 │ - nDSM           │                    │
 └────────┬─────────┘                    │
@@ -1681,7 +1692,7 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 | `--mask` | Gerekli | İkili maske GeoTIFF (0/1 değerleri) |
 | `--output` | `training_data` | Çıktı dizini |
 | `--tile-size` | `256` | Piksel cinsinden karo boyutu |
-| `--overlap` | `64` | Karolar arası örtüşme |
+| `--overlap` | `128` | Karolar arası örtüşme |
 | `--train-ratio` | `0.8` | %80 eğitim, %20 doğrulama |
 | `--train-negative-keep-ratio` | `1.0` | Tamamen negatif eğitim karolarını tutma oranı (`0`=hepsini at, `1`=hepsini tut) |
 | `--train-negative-max` | `None` | Tutulacak negatif eğitim karo sayısı için opsiyonel üst sınır |
@@ -1692,7 +1703,7 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 
 | Senaryo | Komut |
 |---------|-------|
-| **Standart** | `--tile-size 256 --overlap 64` |
+| **Standart** | `--tile-size 256 --overlap 128` |
 | **Büyük yapılar** | `--tile-size 512 --overlap 128` |
 | **Dengesiz veri** (<%5 arkeolojik) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
 | **Hızlı test** | `--tile-size 256 --train-ratio 0.9` |
@@ -1702,14 +1713,14 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 | # | Kanal | Ne Tespit Eder |
 |---|-------|----------------|
 | 0-2 | RGB | Renk/doku anomalileri |
-| 3 | SVF | Tümülüsler, höyükler (ufuk görünürlüğü) |
-| 4 | Pozitif Açıklık | Yükseltilmiş yapılar |
-| 5 | Negatif Açıklık | Hendekler, çöküntüler |
-| 6 | LRM | Yerel topografik anomaliler |
-| 7 | Eğim | Teraslar, duvarlar |
-| 8 | nDSM | Zemin üstü yüzey yüksekliği |
-| 9 | Plan Eğriliği | Sırt ve vadiler |
-| 10 | Profil Eğriliği | Teraslar, basamaklar |
+| 3 | DSM | Yüzey yükseklik bağlamı |
+| 4 | DTM | Zemin yükseklik bağlamı |
+| 5 | SVF | Tümülüsler, höyükler (ufuk görünürlüğü) |
+| 6 | Pozitif Açıklık | Yükseltilmiş yapılar |
+| 7 | Negatif Açıklık | Hendekler, çöküntüler |
+| 8 | LRM | Yerel topografik anomaliler |
+| 9 | Eğim | Teraslar, duvarlar |
+| 10 | nDSM | Zemin üstü yüzey yüksekliği |
 | 11 | TPI | Göreceli yükseklik (höyükler/çöküntüler) |
 
 ---
@@ -1962,7 +1973,7 @@ python archaeo_detect.py --weights checkpoints/best_Unet_resnet34_12ch_attention
 ```
 
 **Temel Özellikler:**
-- ✅ 12 kanallı giriş (RGB + RVT + Eğrilik + TPI)
+- ✅ 12 kanallı giriş (RGB + DSM + DTM + RVT + nDSM + TPI)
 - ✅ CBAM Dikkat (kanal + uzamsal)
 - ✅ Birden fazla kayıp fonksiyonu (BCE, Dice, Birleşik, Focal)
 - ✅ Karma hassasiyet eğitimi
