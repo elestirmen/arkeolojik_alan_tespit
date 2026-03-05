@@ -221,6 +221,16 @@ zero_shot_imagenet: false
 # - false: Mevcut normal davranis (multi/zero-shot fallback mumkun)
 trained_model_only: true
 
+# save_band_importance: Derin öğrenme çıkarımı sırasında band önem raporu yaz
+# - true: ciktilar/<oturum>/ altında *_band_importance.txt/json üretir
+# - false: rapor üretimini kapatır
+save_band_importance: true
+
+# band_importance_max_tiles: Band önem analizinde örneklenen maksimum tile sayısı
+# - 0: kapalı
+# - 1-8: genelde yeterli ve hızlı
+band_importance_max_tiles: 4
+
 # th: Derin öğrenme olasılık eşiği
 # - Olasılık haritasını (0-1 arası) ikili maskeye (0 veya 1) çevirmek için
 # - Değer aralığı: 0.0 - 1.0

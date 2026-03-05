@@ -565,6 +565,8 @@ run_params.txt
 
 Bu dosya, etkin parametrelerin tamamını içerir (nihai config değerleri, parse edilen bantlar, CLI argümanları ve cihaz).
 
+Etkinse (`save_band_importance: true`), DL koşuları ayrıca `*_band_importance.txt` ve `*_band_importance.json` dosyalarını üretir.
+
 ### 📊 Raster Çıktılar (GeoTIFF)
 
 #### 1️⃣ Derin Öğrenme Çıktıları
@@ -1807,6 +1809,8 @@ checkpoints/
 ├── best_Unet_resnet34_12ch_attention.pth   ← Çıkarım için bunu kullanın
 └── training_history.json                    ← Eğitim metrikleri
 ```
+
+`checkpoints/` altında `channel_importance_history.json` da üretilir; epoch bazlı bant önem sıralarını içerir.
 
 #### Eğitimi İzleme
 

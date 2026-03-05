@@ -541,6 +541,15 @@ class PipelineDefaults:
         metadata={"help": "Attention modülü için kanal azaltma oranı (4=1/4 oranında sıkıştırma)"},
     )
     
+    save_band_importance: bool = field(
+        default=True,
+        metadata={"help": "DL inference sirasinda band onem raporu (txt/json) kaydet."},
+    )
+    band_importance_max_tiles: int = field(
+        default=4,
+        metadata={"help": "Band onem analizi icin kullanilacak maksimum tile sayisi. 0 ise kapali."},
+    )
+
     # ===== YOLO11 MODEL AYARLARI =====
     yolo_weights: Optional[str] = field(
         default=None,
@@ -735,6 +744,10 @@ class PipelineDefaults:
         if self.yolo_tile is not None and self.yolo_tile <= 0:
             errors.append(f"yolo_tile pozitif olmalı, verilen: {self.yolo_tile}")
         
+        if self.band_importance_max_tiles < 0:
+            errors.append(
+                f"band_importance_max_tiles negatif olamaz, verilen: {self.band_importance_max_tiles}"
+            )
         if self.norm_sample_tiles <= 0:
             errors.append(f"norm_sample_tiles pozitif olmalı, verilen: {self.norm_sample_tiles}")
         
@@ -2474,6 +2487,8 @@ class InferenceOutputs:
     mask: Optional[np.ndarray]
     transform: Affine
     crs: Optional[RasterioCRS]
+    band_importance_txt: Optional[Path] = None
+    band_importance_json: Optional[Path] = None
 
 
 @dataclass
@@ -2519,6 +2534,121 @@ class YoloOutputs:
     threshold: float
 
 
+def _resolve_importance_channel_names(
+    channel_names: Optional[Sequence[str]],
+    in_channels: int,
+) -> List[str]:
+    names = [str(name) for name in (channel_names or ())]
+    if len(names) < in_channels:
+        names.extend(f"ch_{idx+1}" for idx in range(len(names), in_channels))
+    return names[:in_channels]
+
+
+def _find_first_channel_attention_module(model: torch.nn.Module) -> Optional[ChannelAttention]:
+    for module in model.modules():
+        if isinstance(module, ChannelAttention):
+            return module
+    return None
+
+
+def _estimate_attention_channel_scores(
+    attention_module: ChannelAttention,
+    tensor: torch.Tensor,
+) -> Optional[np.ndarray]:
+    if tensor.ndim != 4:
+        return None
+    with torch.no_grad():
+        avg_out = attention_module.fc(attention_module.avg_pool(tensor))
+        max_out = attention_module.fc(attention_module.max_pool(tensor))
+        attention = torch.sigmoid(avg_out + max_out)
+        scores = attention.detach().float().mean(dim=(0, 2, 3)).cpu().numpy()
+    return scores
+
+
+def _estimate_gradient_channel_scores(
+    model: torch.nn.Module,
+    tensor: torch.Tensor,
+    task_key: str,
+) -> Tuple[torch.Tensor, Optional[np.ndarray]]:
+    tensor_grad = tensor.detach().clone().requires_grad_(True)
+    with torch.enable_grad():
+        logits = model(tensor_grad)
+        target = logits.view(-1).mean() if task_key == "tile_classification" else logits.mean()
+        model.zero_grad(set_to_none=True)
+        target.backward()
+        grad = tensor_grad.grad
+        model.zero_grad(set_to_none=True)
+    if grad is None:
+        return logits.detach(), None
+    with torch.no_grad():
+        scores = (
+            grad.detach().float().abs() * tensor_grad.detach().float().abs()
+        ).mean(dim=(0, 2, 3)).cpu().numpy()
+    return logits.detach(), scores
+
+
+def _build_band_importance_summary(
+    *,
+    scores_sum: Optional[np.ndarray],
+    sample_count: int,
+    mode: str,
+    channel_names: Sequence[str],
+) -> Optional[Dict[str, Any]]:
+    if scores_sum is None or sample_count <= 0:
+        return None
+    avg_scores = np.asarray(scores_sum, dtype=np.float64) / float(sample_count)
+    if mode == "gradient":
+        denom = float(np.sum(avg_scores))
+        if denom > 0:
+            avg_scores = avg_scores / denom
+
+    names = _resolve_importance_channel_names(channel_names, int(avg_scores.shape[0]))
+    ranking = sorted(
+        [{"channel": name, "score": float(score)} for name, score in zip(names, avg_scores)],
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+    top_item = ranking[0] if ranking else {"channel": "n/a", "score": 0.0}
+    return {
+        "mode": mode,
+        "samples": int(sample_count),
+        "scores": {item["channel"]: float(item["score"]) for item in ranking},
+        "ranking": ranking,
+        "top_channel": str(top_item["channel"]),
+        "top_score": float(top_item["score"]),
+    }
+
+
+def _write_band_importance_report(
+    *,
+    out_dir: Path,
+    filename_stem: str,
+    summary: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Path], Optional[Path]]:
+    if summary is None:
+        return None, None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    txt_path = out_dir / f"{filename_stem}_band_importance.txt"
+    json_path = out_dir / f"{filename_stem}_band_importance.json"
+
+    lines = [
+        "# Band Importance Report",
+        f"mode: {summary.get('mode', 'n/a')}",
+        f"samples: {summary.get('samples', 0)}",
+        f"top_channel: {summary.get('top_channel', 'n/a')}",
+        f"top_score: {float(summary.get('top_score', 0.0)):.6f}",
+        "",
+        "[ranking]",
+    ]
+    for idx, item in enumerate(summary.get("ranking", []), start=1):
+        lines.append(
+            f"{idx:02d}. {item.get('channel', 'n/a')}: {float(item.get('score', 0.0)):.6f}"
+        )
+    txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return txt_path, json_path
+
+
 def infer_tiled(
     model: torch.nn.Module,
     input_path: Path,
@@ -2549,6 +2679,9 @@ def infer_tiled(
     tpi_radii: Tuple[int, ...] = (5, 15, 30),
     arch: Optional[str] = None,
     weight_type: Optional[str] = None,
+    channel_names: Optional[Sequence[str]] = None,
+    save_band_importance: bool = False,
+    band_importance_max_tiles: int = 0,
 ) -> InferenceOutputs:
     """
     Run tiled inference and save outputs.
@@ -2577,6 +2710,25 @@ def infer_tiled(
 
     prob_map_out: Optional[np.ndarray] = None
     mask_out: Optional[np.ndarray] = None
+    band_importance_txt_path: Optional[Path] = None
+    band_importance_json_path: Optional[Path] = None
+    band_importance_sum: Optional[np.ndarray] = None
+    band_importance_samples = 0
+    max_importance_tiles = max(0, int(band_importance_max_tiles))
+    band_importance_enabled = bool(save_band_importance) and max_importance_tiles > 0
+    band_importance_mode = "disabled"
+    attention_module: Optional[ChannelAttention] = None
+    if band_importance_enabled:
+        attention_module = _find_first_channel_attention_module(model)
+        if attention_module is not None:
+            band_importance_mode = "attention"
+        else:
+            band_importance_mode = "gradient"
+        LOGGER.info(
+            "Band onem analizi aktif (mode=%s, max_tiles=%d).",
+            band_importance_mode,
+            max_importance_tiles,
+        )
 
     with ExitStack() as stack:
         src = stack.enter_context(rasterio.open(input_path))
@@ -3030,13 +3182,32 @@ def infer_tiled(
                 )
 
             tensor = torch.from_numpy(normed).unsqueeze(0).to(device)
-            with torch.no_grad(), autocast_ctx:
-                logits = model(tensor)
-                if task_key == "tile_classification":
-                    tile_prob_scalar = float(torch.sigmoid(logits).view(-1)[0].item())
-                    probs = np.full((tile, tile), tile_prob_scalar, dtype=np.float32)
-                else:
-                    probs = torch.sigmoid(logits).cpu().numpy()[0, 0]
+            collect_band_importance = (
+                band_importance_enabled
+                and band_importance_samples < max_importance_tiles
+                and np.any(valid_mask)
+            )
+
+            scores: Optional[np.ndarray] = None
+            if collect_band_importance and band_importance_mode == "gradient":
+                logits, scores = _estimate_gradient_channel_scores(model, tensor, task_key)
+            else:
+                if collect_band_importance and band_importance_mode == "attention" and attention_module is not None:
+                    scores = _estimate_attention_channel_scores(attention_module, tensor)
+                with torch.no_grad(), autocast_ctx:
+                    logits = model(tensor)
+
+            if task_key == "tile_classification":
+                tile_prob_scalar = float(torch.sigmoid(logits).view(-1)[0].item())
+                probs = np.full((tile, tile), tile_prob_scalar, dtype=np.float32)
+            else:
+                probs = torch.sigmoid(logits).cpu().numpy()[0, 0]
+
+            if collect_band_importance and scores is not None:
+                if band_importance_sum is None:
+                    band_importance_sum = np.zeros_like(scores, dtype=np.float64)
+                band_importance_sum += scores.astype(np.float64)
+                band_importance_samples += 1
 
             row_slice = slice(row, row + win_height)
             col_slice = slice(col, col + win_width)
@@ -3108,6 +3279,24 @@ def infer_tiled(
             tile=tile,
             min_area=min_area,
         )
+
+        if band_importance_enabled:
+            summary = _build_band_importance_summary(
+                scores_sum=band_importance_sum,
+                sample_count=band_importance_samples,
+                mode=band_importance_mode,
+                channel_names=_resolve_importance_channel_names(
+                    channel_names,
+                    int(band_importance_sum.shape[0]) if band_importance_sum is not None else 0,
+                ),
+            )
+            band_importance_txt_path, band_importance_json_path = _write_band_importance_report(
+                out_dir=base_prefix.parent,
+                filename_stem=filename,
+                summary=summary,
+            )
+            if band_importance_txt_path is not None:
+                LOGGER.info("Band onem raporu yazildi: %s", band_importance_txt_path)
         
         prob_path = base_prefix.parent / f"{filename}_prob.tif"
         mask_path = base_prefix.parent / f"{filename}_mask.tif"
@@ -3142,6 +3331,8 @@ def infer_tiled(
         mask=mask_out,
         transform=transform,
         crs=crs,
+        band_importance_txt=band_importance_txt_path,
+        band_importance_json=band_importance_json_path,
     )
 
 
@@ -6550,6 +6741,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("trained_model_only", "(force single trained checkpoint path; disable zero-shot/multi fallbacks)."),
     )
     parser.add_argument(
+        "--save-band-importance",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("save_band_importance"),
+        dest="save_band_importance",
+        help=cli_help("save_band_importance"),
+    )
+    parser.add_argument(
+        "--band-importance-max-tiles",
+        type=int,
+        default=default_for("band_importance_max_tiles"),
+        dest="band_importance_max_tiles",
+        help=cli_help("band_importance_max_tiles"),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -7075,6 +7280,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 enable_curvature=config.enable_curvature,
                 enable_tpi=config.enable_tpi
             )
+            run_channel_names: Tuple[str, ...] = tuple(MODEL_CHANNEL_NAMES[:num_channels])
+            if per_weights is not None:
+                per_hints = get_checkpoint_model_hints(per_weights)
+                hinted_names = per_hints.get("channel_names")
+                if isinstance(hinted_names, list) and len(hinted_names) == num_channels:
+                    run_channel_names = tuple(str(v) for v in hinted_names)
             
             if dl_task == "tile_classification":
                 if per_weights is not None:
@@ -7181,9 +7392,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 tpi_radii=config.tpi_radii,
                 arch="TileClassifier" if dl_task == "tile_classification" else config.arch,
                 weight_type=wt,
+                channel_names=run_channel_names,
+                save_band_importance=config.save_band_importance,
+                band_importance_max_tiles=config.band_importance_max_tiles,
             )
             LOGGER.info("[%s] ✓ Olasılık haritası: %s", suffix, outputs.prob_path)
             LOGGER.info("[%s] ✓ İkili maske: %s", suffix, outputs.mask_path)
+
+            if outputs.band_importance_txt is not None:
+                LOGGER.info("[%s] Band onem raporu: %s", suffix, outputs.band_importance_txt)
 
             # Store last encoder label for fusion filenames
             fusion_encoder_label = suffix
@@ -7371,6 +7588,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     else:
         model = None
 
+    single_channel_names: Tuple[str, ...] = tuple(MODEL_CHANNEL_NAMES[:num_channels])
+    hinted_single_names = checkpoint_hints.get("channel_names")
+    if isinstance(hinted_single_names, list) and len(hinted_single_names) == num_channels:
+        single_channel_names = tuple(str(v) for v in hinted_single_names)
+
     if bands[3] <= 0:
         LOGGER.warning(
             "DSM band not provided; nDSM channel will be zero and tall-object masking will be disabled."
@@ -7412,7 +7634,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             tpi_radii=config.tpi_radii,
             arch="TileClassifier" if dl_task == "tile_classification" else config.arch,
             weight_type=single_wt,
+            channel_names=single_channel_names,
+            save_band_importance=config.save_band_importance,
+            band_importance_max_tiles=config.band_importance_max_tiles,
         )
+        if outputs.band_importance_txt is not None:
+            LOGGER.info("Band onem raporu: %s", outputs.band_importance_txt)
+
         # Record encoder for fusion filenames (single-encoder path)
         fusion_encoder_label = config.encoder
 

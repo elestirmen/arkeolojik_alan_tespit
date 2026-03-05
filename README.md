@@ -654,6 +654,8 @@ run_params.txt
 ```
 
 This file contains all effective run parameters (final config values, parsed bands, CLI args, and device).
+If enabled (`save_band_importance: true`), DL runs also write
+`*_band_importance.txt` and `*_band_importance.json`.
 
 ### 📊 Raster Outputs (GeoTIFF)
 
@@ -1896,6 +1898,8 @@ checkpoints/
 ├── best_Unet_resnet34_12ch_attention.pth   ← Use this for inference
 └── training_history.json                    ← Training metrics
 ```
+
+`channel_importance_history.json` is also generated in `checkpoints/` and stores per-epoch band importance rankings.
 
 #### Monitoring Training
 

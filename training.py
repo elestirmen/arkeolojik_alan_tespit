@@ -38,7 +38,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -229,6 +229,15 @@ CONFIG: dict[str, object] = {
     "val_threshold_min": 0.1,
     "val_threshold_max": 0.9,
     "val_threshold_step": 0.05,
+
+    # monitor_channel_importance:
+    # Egitim sirasinda kanal (band) onemini olc ve raporla.
+    "monitor_channel_importance": True,
+
+    # channel_importance_max_batches:
+    # Gradient fallback modunda kac batch uzerinden ortalama alinacagi.
+    # 0: tum batch'ler.
+    "channel_importance_max_batches": 12,
 
     # workers:
     # DataLoader worker sayisi.
@@ -661,6 +670,153 @@ def _build_threshold_sweep(
     return tuple(sorted(values))
 
 
+def _resolve_channel_names(channel_names: Sequence[str], in_channels: int) -> List[str]:
+    """Return a fixed-length, human-readable channel name list."""
+    names = [str(name) for name in channel_names]
+    if len(names) < in_channels:
+        names.extend(f"ch_{idx+1}" for idx in range(len(names), in_channels))
+    return names[:in_channels]
+
+
+def _find_first_channel_attention_module(model: nn.Module) -> Optional[ChannelAttention]:
+    """Find first ChannelAttention module in model tree."""
+    for module in model.modules():
+        if isinstance(module, ChannelAttention):
+            return module
+    return None
+
+
+class ChannelImportanceTracker:
+    """
+    Track per-channel importance during training.
+
+    Priority:
+    1) CBAM ChannelAttention output (if present)
+    2) Gradient*input fallback
+    """
+
+    def __init__(
+        self,
+        *,
+        model: nn.Module,
+        in_channels: int,
+        channel_names: Sequence[str],
+        enabled: bool,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.in_channels = int(in_channels)
+        self.channel_names = _resolve_channel_names(channel_names, self.in_channels)
+        self.mode = "disabled"
+        self._hook_handle: Optional[torch.utils.hooks.RemovableHandle] = None
+        self._sum = np.zeros(self.in_channels, dtype=np.float64)
+        self._count = 0
+
+        if not self.enabled:
+            return
+
+        channel_attention = _find_first_channel_attention_module(model)
+        if channel_attention is not None:
+            self.mode = "attention"
+            self._hook_handle = channel_attention.register_forward_hook(self._forward_hook)
+            LOGGER.info("Band onemi monitoru: CBAM ChannelAttention modu aktif.")
+        else:
+            self.mode = "gradient"
+            LOGGER.info("Band onemi monitoru: CBAM bulunamadi, gradient fallback aktif.")
+
+    def close(self) -> None:
+        if self._hook_handle is not None:
+            self._hook_handle.remove()
+            self._hook_handle = None
+
+    def reset(self) -> None:
+        self._sum.fill(0.0)
+        self._count = 0
+
+    def is_gradient_mode(self) -> bool:
+        return self.enabled and self.mode == "gradient"
+
+    def _forward_hook(
+        self,
+        module: nn.Module,
+        inputs: Tuple[torch.Tensor, ...],
+        outputs: torch.Tensor,
+    ) -> None:
+        if not self.enabled or self.mode != "attention":
+            return
+        if not inputs:
+            return
+        x = inputs[0]
+        if not isinstance(x, torch.Tensor) or x.ndim != 4:
+            return
+        if not (
+            hasattr(module, "avg_pool")
+            and hasattr(module, "max_pool")
+            and hasattr(module, "fc")
+        ):
+            return
+
+        with torch.no_grad():
+            avg_out = module.fc(module.avg_pool(x))
+            max_out = module.fc(module.max_pool(x))
+            attention = torch.sigmoid(avg_out + max_out)
+            scores = (
+                attention.detach().float().mean(dim=(0, 2, 3)).cpu().numpy()
+            )
+        self._accumulate(scores)
+
+    def accumulate_gradient(self, images: torch.Tensor, scale: float = 1.0) -> None:
+        if not self.enabled or self.mode != "gradient":
+            return
+        grad = images.grad
+        if grad is None:
+            return
+        with torch.no_grad():
+            scores = (
+                grad.detach().float().abs() * images.detach().float().abs()
+            ).mean(dim=(0, 2, 3)).cpu().numpy()
+        if np.isfinite(scale) and scale > 0:
+            scores = scores / float(scale)
+        self._accumulate(scores)
+
+    def _accumulate(self, scores: np.ndarray) -> None:
+        if scores.ndim != 1:
+            return
+        if scores.shape[0] != self.in_channels:
+            min_len = min(scores.shape[0], self.in_channels)
+            self._sum[:min_len] += scores[:min_len].astype(np.float64)
+        else:
+            self._sum += scores.astype(np.float64)
+        self._count += 1
+
+    def summarize(self) -> Optional[Dict[str, Any]]:
+        if not self.enabled or self._count <= 0:
+            return None
+
+        avg_scores = (self._sum / float(self._count)).astype(np.float64)
+        if self.mode == "gradient":
+            denom = float(np.sum(avg_scores))
+            if denom > 0:
+                avg_scores = avg_scores / denom
+
+        ranking = sorted(
+            [
+                {"channel": name, "score": float(score)}
+                for name, score in zip(self.channel_names, avg_scores)
+            ],
+            key=lambda x: x["score"],
+            reverse=True,
+        )
+        top = ranking[0] if ranking else {"channel": "n/a", "score": 0.0}
+        return {
+            "mode": self.mode,
+            "samples": int(self._count),
+            "scores": {item["channel"]: float(item["score"]) for item in ranking},
+            "ranking": ranking,
+            "top_channel": str(top["channel"]),
+            "top_score": float(top["score"]),
+        }
+
+
 # ==============================================================================
 # EĞİTİM FONKSİYONLARI
 # ==============================================================================
@@ -705,6 +861,10 @@ class TrainingConfig:
     val_threshold_min: float = 0.1
     val_threshold_max: float = 0.9
     val_threshold_step: float = 0.05
+
+    # Band importance monitoring
+    monitor_channel_importance: bool = True
+    channel_importance_max_batches: int = 12
     
     # Diğer
     num_workers: int = 4
@@ -1116,19 +1276,34 @@ def train_one_epoch(
     scaler: Optional[torch.cuda.amp.GradScaler],
     use_amp: bool,
     metric_threshold: float,
-) -> Tuple[float, Dict[str, float]]:
+    channel_importance_tracker: Optional[ChannelImportanceTracker] = None,
+    channel_importance_max_batches: int = 0,
+) -> Tuple[float, Dict[str, float], Optional[Dict[str, Any]]]:
     """Bir epoch eğitim yapar."""
     
     model.train()
     total_loss = 0.0
     totals = {"tp": 0.0, "fp": 0.0, "fn": 0.0, "tn": 0.0}
+    if channel_importance_tracker is not None:
+        channel_importance_tracker.reset()
     
     pbar = tqdm(train_loader, desc="Eğitim", leave=False)
-    for images, masks in pbar:
+    for batch_idx, (images, masks) in enumerate(pbar):
         images = images.to(device)
         masks = masks.to(device)
+        capture_grad_importance = (
+            channel_importance_tracker is not None
+            and channel_importance_tracker.is_gradient_mode()
+            and (
+                int(channel_importance_max_batches) <= 0
+                or batch_idx < int(channel_importance_max_batches)
+            )
+        )
+        if capture_grad_importance:
+            images.requires_grad_(True)
         
         optimizer.zero_grad()
+        grad_scale = 1.0
         
         # Mixed precision
         with torch.cuda.amp.autocast(enabled=use_amp):
@@ -1136,12 +1311,16 @@ def train_one_epoch(
             loss = criterion(outputs, masks)
         
         if use_amp and scaler is not None:
+            grad_scale = float(scaler.get_scale())
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
             optimizer.step()
+
+        if capture_grad_importance and channel_importance_tracker is not None:
+            channel_importance_tracker.accumulate_gradient(images, scale=grad_scale)
         
         total_loss += loss.item()
         
@@ -1167,8 +1346,13 @@ def train_one_epoch(
         fn=totals["fn"],
         tn=totals["tn"],
     )
+    importance_summary = (
+        channel_importance_tracker.summarize()
+        if channel_importance_tracker is not None
+        else None
+    )
     
-    return avg_loss, avg_metrics
+    return avg_loss, avg_metrics, importance_summary
 
 
 @torch.no_grad()
@@ -1409,6 +1593,12 @@ def train(config: TrainingConfig) -> Path:
     # Model
     model = create_model(config)
     model = model.to(device)
+    channel_importance_tracker = ChannelImportanceTracker(
+        model=model,
+        in_channels=config.in_channels,
+        channel_names=config.channel_names,
+        enabled=bool(config.monitor_channel_importance),
+    )
     
     # Parametre sayısı
     total_params = sum(p.numel() for p in model.parameters())
@@ -1449,6 +1639,7 @@ def train(config: TrainingConfig) -> Path:
         "val_iou_best": [],
         "val_iou_best_threshold": [],
         "lr": [],
+        "channel_importance_train": [],
     }
     sweep_thresholds = _build_threshold_sweep(
         metric_threshold=config.metric_threshold,
@@ -1485,6 +1676,17 @@ def train(config: TrainingConfig) -> Path:
     LOGGER.info(f"Epochs: {config.epochs}")
     LOGGER.info(f"Batch size: {config.batch_size}")
     LOGGER.info(f"Learning rate: {config.lr}")
+    if config.monitor_channel_importance:
+        if channel_importance_tracker.mode == "attention":
+            LOGGER.info("Band onemi takibi: aktif (mode=attention, train tum batch'ler).")
+        elif channel_importance_tracker.mode == "gradient":
+            max_batches = int(config.channel_importance_max_batches)
+            max_batches_info = "tum batch'ler" if max_batches <= 0 else f"ilk {max_batches} batch"
+            LOGGER.info("Band onemi takibi: aktif (mode=gradient, %s).", max_batches_info)
+        else:
+            LOGGER.info("Band onemi takibi: devre disi (uygun modul bulunamadi).")
+    else:
+        LOGGER.info("Band onemi takibi: kapali.")
     LOGGER.info(
         "Metric threshold: %.2f | Val sweep: %s",
         config.metric_threshold,
@@ -1510,7 +1712,7 @@ def train(config: TrainingConfig) -> Path:
         epoch_start = time.time()
         
         # Eğitim
-        train_loss, train_metrics = train_one_epoch(
+        train_loss, train_metrics, train_channel_importance = train_one_epoch(
             model,
             train_loader,
             criterion,
@@ -1519,6 +1721,8 @@ def train(config: TrainingConfig) -> Path:
             scaler,
             config.use_amp,
             config.metric_threshold,
+            channel_importance_tracker=channel_importance_tracker,
+            channel_importance_max_batches=int(config.channel_importance_max_batches),
         )
         
         # Doğrulama
@@ -1555,6 +1759,7 @@ def train(config: TrainingConfig) -> Path:
         history["val_iou_best"].append(val_iou_selection)
         history["val_iou_best_threshold"].append(val_iou_selection_threshold)
         history["lr"].append(current_lr)
+        history["channel_importance_train"].append(train_channel_importance)
         
         # Log
         epoch_time = time.time() - epoch_start
@@ -1578,6 +1783,19 @@ def train(config: TrainingConfig) -> Path:
                 f"Süre: {epoch_time:.1f}s"
             )
         
+        if train_channel_importance is not None:
+            top_items = list(train_channel_importance.get("ranking", []))[:3]
+            top_text = ", ".join(
+                f"{item.get('channel')}={float(item.get('score', 0.0)):.4f}"
+                for item in top_items
+            )
+            LOGGER.info(
+                "Train band onemi (%s, n=%d): %s",
+                str(train_channel_importance.get("mode", "n/a")),
+                int(train_channel_importance.get("samples", 0)),
+                top_text if top_text else "yeterli veri yok",
+            )
+
         # En iyi model kontrolü
         val_iou = float(val_iou_selection)
         loss_improved = val_loss < best_val_loss - config.min_delta
@@ -1601,6 +1819,7 @@ def train(config: TrainingConfig) -> Path:
             "val_iou_threshold": float(config.metric_threshold),
             "val_iou_selection_threshold": val_iou_selection_threshold,
             "lr": current_lr,
+            "train_channel_importance": train_channel_importance,
             "config": {
                 "arch": model_arch_name,
                 "encoder": config.encoder,
@@ -1622,6 +1841,8 @@ def train(config: TrainingConfig) -> Path:
                 "val_threshold_min": config.val_threshold_min,
                 "val_threshold_max": config.val_threshold_max,
                 "val_threshold_step": config.val_threshold_step,
+                "monitor_channel_importance": config.monitor_channel_importance,
+                "channel_importance_max_batches": config.channel_importance_max_batches,
             },
         }
         if val_sweep is not None:
@@ -1659,11 +1880,17 @@ def train(config: TrainingConfig) -> Path:
                 break
     
     total_time = time.time() - start_time
+    channel_importance_tracker.close()
     
     # Eğitim geçmişini kaydet
     history_path = config.output_dir / "training_history.json"
     with open(history_path, "w") as f:
         json.dump(history, f, indent=2)
+    channel_history_path: Optional[Path] = None
+    if config.monitor_channel_importance:
+        channel_history_path = config.output_dir / "channel_importance_history.json"
+        with open(channel_history_path, "w") as f:
+            json.dump(history["channel_importance_train"], f, indent=2)
     
     # Sonuç raporu
     LOGGER.info("\n" + "=" * 60)
@@ -1676,6 +1903,8 @@ def train(config: TrainingConfig) -> Path:
     LOGGER.info(f"En iyi IoU modeli: {best_iou_model_path}")
     LOGGER.info(f"Varsayılan en iyi model: {best_model_path}")
     LOGGER.info(f"Eğitim geçmişi: {history_path}")
+    if channel_history_path is not None:
+        LOGGER.info("Band onemi gecmisi: %s", channel_history_path)
     if epoch_checkpoint_dir is not None:
         LOGGER.info(f"Epoch modelleri: {epoch_checkpoint_dir}")
     LOGGER.info("=" * 60)
@@ -1913,6 +2142,24 @@ def main():
             "minimum pozitif piksel orani. 0.0 ise herhangi bir pozitif piksel yeterlidir."
         ),
     )
+    parser.add_argument(
+        "--monitor-channel-importance",
+        action=argparse.BooleanOptionalAction,
+        default=bool(CONFIG["monitor_channel_importance"]),
+        help=(
+            "Egitim sirasinda kanal (band) onemini olc ve raporla. "
+            "CBAM varsa attention skorlarini, yoksa gradient fallback kullanir."
+        ),
+    )
+    parser.add_argument(
+        "--channel-importance-max-batches",
+        type=int,
+        default=int(CONFIG["channel_importance_max_batches"]),
+        help=(
+            "Gradient fallback modunda train'de kac batch uzerinden ortalama alinacagi. "
+            "0 ise tum batch'ler kullanilir."
+        ),
+    )
 
     args = parser.parse_args()
     
@@ -2054,6 +2301,10 @@ def main():
         print("HATA: --val-sample-seed negatif olamaz.")
         sys.exit(1)
 
+    if args.channel_importance_max_batches < 0:
+        print("HATA: --channel-importance-max-batches negatif olamaz.")
+        sys.exit(1)
+
     resolved_pos_weight = 1.0
     if args.balance_mode == "manual":
         resolved_pos_weight = float(args.pos_weight)
@@ -2128,6 +2379,8 @@ def main():
         val_threshold_min=float(args.val_threshold_min),
         val_threshold_max=float(args.val_threshold_max),
         val_threshold_step=float(args.val_threshold_step),
+        monitor_channel_importance=bool(args.monitor_channel_importance),
+        channel_importance_max_batches=int(args.channel_importance_max_batches),
         num_workers=args.workers,
         use_amp=not args.no_amp,
         seed=args.seed,
