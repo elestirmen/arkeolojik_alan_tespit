@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy import ndimage
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -300,6 +301,11 @@ CONFIG: dict[str, object] = {
     # minimum pozitif piksel orani. 0.0 => maskede en az bir pozitif piksel
     # varsa tile pozitiftir.
     "tile_label_min_positive_ratio": 0.02,
+
+    # deterministic_rotate_step_deg:
+    # Train augment icin deterministik donme aci adimi.
+    # 0.0: kapali, 30.0: [0,30,...,330] olacak sekilde 12x gorunum.
+    "deterministic_rotate_step_deg": 30.0,
 }
 # ===============================================
 
@@ -355,6 +361,7 @@ class ArchaeologyDataset(Dataset):
         file_format: str = "npz",
         task_type: str = "segmentation",
         tile_label_min_positive_ratio: float = 0.0,
+        deterministic_rotate_step_deg: float = 0.0,
     ):
         """
         Args:
@@ -369,9 +376,32 @@ class ArchaeologyDataset(Dataset):
         self.file_format = file_format
         self.task_type = str(task_type).strip().lower()
         self.tile_label_min_positive_ratio = float(tile_label_min_positive_ratio)
+        self.deterministic_rotate_step_deg = float(deterministic_rotate_step_deg)
+        if not 0.0 <= self.deterministic_rotate_step_deg < 360.0:
+            raise ValueError(
+                "deterministic_rotate_step_deg 0-360 araliginda olmali "
+                f"(360 haric), verilen: {deterministic_rotate_step_deg}"
+            )
         if self.task_type not in {"segmentation", "tile_classification"}:
             raise ValueError(f"Desteklenmeyen task_type: {task_type}")
         self.tile_labels: Optional[List[float]] = None
+        self._use_deterministic_rotation = bool(
+            self.augment and self.deterministic_rotate_step_deg > 0.0
+        )
+        self._rotation_angles: Tuple[float, ...] = (
+            self._build_rotation_angles(self.deterministic_rotate_step_deg)
+            if self._use_deterministic_rotation
+            else (0.0,)
+        )
+        self._augmentation_multiplier = max(1, len(self._rotation_angles))
+        if self._use_deterministic_rotation:
+            rotation_count = 360.0 / self.deterministic_rotate_step_deg
+            if not np.isclose(rotation_count, round(rotation_count), atol=1e-6):
+                LOGGER.warning(
+                    "Deterministik rotasyon adimi 360'i tam bolmuyor (step=%.4f). "
+                    "Aci listesi 360'tan once sonlanacak.",
+                    self.deterministic_rotate_step_deg,
+                )
         
         # Dosyaları listele
         pattern = f"*.{file_format}"
@@ -415,13 +445,46 @@ class ArchaeologyDataset(Dataset):
                     self.data_dir.parent / "tile_labels.csv",
                 )
 
-        LOGGER.info(f"Dataset yüklendi: {len(self.image_files)} örnek ({data_dir})")
+        base_count = len(self.image_files)
+        total_count = len(self)
+        if self._use_deterministic_rotation and self._augmentation_multiplier > 1:
+            LOGGER.info(
+                "Dataset yuklendi: %d temel ornek, %d aci ile %d ornek (%s)",
+                base_count,
+                self._augmentation_multiplier,
+                total_count,
+                data_dir,
+            )
+        else:
+            LOGGER.info("Dataset yuklendi: %d ornek (%s)", total_count, data_dir)
     
     def __len__(self) -> int:
-        return len(self.image_files)
+        return len(self.image_files) * self._augmentation_multiplier
+
+    @staticmethod
+    def _build_rotation_angles(step_deg: float) -> Tuple[float, ...]:
+        if step_deg <= 0.0:
+            return (0.0,)
+        angles = np.arange(0.0, 360.0, step_deg, dtype=np.float32)
+        if angles.size == 0:
+            return (0.0,)
+        return tuple(float(angle) for angle in angles.tolist())
+
+    def _resolve_sample_index(self, idx: int) -> Tuple[int, float]:
+        total_samples = len(self)
+        if idx < 0 or idx >= total_samples:
+            raise IndexError(f"Dataset index out of range: {idx}")
+
+        if self._augmentation_multiplier <= 1:
+            return idx, 0.0
+
+        base_idx = idx // self._augmentation_multiplier
+        angle_idx = idx % self._augmentation_multiplier
+        return base_idx, self._rotation_angles[angle_idx]
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        img_path = self.image_files[idx]
+        base_idx, rotation_angle = self._resolve_sample_index(idx)
+        img_path = self.image_files[base_idx]
         mask_path = self.masks_dir / img_path.name
 
         if not mask_path.exists():
@@ -437,11 +500,14 @@ class ArchaeologyDataset(Dataset):
 
         if self.task_type == "tile_classification":
             if self.augment:
-                image = self._augment_image(image)
+                if self._use_deterministic_rotation:
+                    image = self._apply_rotation_image(image, rotation_angle)
+                else:
+                    image = self._augment_image(image)
             image = torch.from_numpy(image.copy()).float()
             if self.tile_labels is None:
                 raise RuntimeError("tile_labels hazir degil")
-            label = np.array([self.tile_labels[idx]], dtype=np.float32)
+            label = np.array([self.tile_labels[base_idx]], dtype=np.float32)
             label = torch.from_numpy(label).float()
             return image, label
 
@@ -454,13 +520,55 @@ class ArchaeologyDataset(Dataset):
         
         # Veri artırma
         if self.augment:
-            image, mask = self._augment(image, mask)
+            if self._use_deterministic_rotation:
+                image, mask = self._apply_rotation_pair(image, mask, rotation_angle)
+            else:
+                image, mask = self._augment(image, mask)
         
         # Tensor'a çevir
         image = torch.from_numpy(image.copy()).float()
         mask = torch.from_numpy(mask.copy()).unsqueeze(0).float()
         
         return image, mask
+
+    def _apply_rotation_image(self, image: np.ndarray, angle_deg: float) -> np.ndarray:
+        """Rotate CHW image with fixed output shape."""
+        if abs(float(angle_deg)) < 1e-8:
+            return image
+
+        rotated = ndimage.rotate(
+            image,
+            angle=float(angle_deg),
+            axes=(1, 2),
+            reshape=False,
+            order=1,
+            mode="constant",
+            cval=0.0,
+            prefilter=False,
+        )
+        return np.asarray(rotated, dtype=np.float32)
+
+    def _apply_rotation_pair(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        angle_deg: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Rotate image+mask pair (bilinear image / nearest-neighbor mask)."""
+        if abs(float(angle_deg)) < 1e-8:
+            return image, mask
+
+        rotated_image = self._apply_rotation_image(image, angle_deg)
+        rotated_mask = ndimage.rotate(
+            mask,
+            angle=float(angle_deg),
+            reshape=False,
+            order=0,
+            mode="constant",
+            cval=0.0,
+            prefilter=False,
+        )
+        return rotated_image, _mask_to_binary(rotated_mask)
 
     def _augment_image(self, image: np.ndarray) -> np.ndarray:
         """Tile-level classification icin yalnizca goruntu augmentasyonu."""
@@ -874,6 +982,7 @@ class TrainingConfig:
     train_neg_sample_seed: int = 42
     val_keep_ratio: float = 1.0
     val_sample_seed: int = 42
+    deterministic_rotate_step_deg: float = 0.0
     
     # Çıktı
     output_dir: Path = field(default_factory=lambda: Path("checkpoints"))
@@ -1032,15 +1141,27 @@ def _select_train_indices_by_neg_pos_ratio(
     positive_indices: List[int] = []
     negative_indices: List[int] = []
 
-    for idx, img_path in enumerate(train_dataset.image_files):
-        if train_dataset.task_type == "tile_classification" and train_dataset.tile_labels is not None:
-            is_positive = float(train_dataset.tile_labels[idx]) > 0.5
+    base_positive_cache: Dict[int, bool] = {}
+    for idx in range(len(train_dataset)):
+        base_idx, _ = train_dataset._resolve_sample_index(idx)
+        cached_positive = base_positive_cache.get(base_idx)
+        if cached_positive is not None:
+            is_positive = cached_positive
         else:
-            mask_path = train_dataset.masks_dir / img_path.name
-            if not mask_path.exists():
-                raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
-            mask = _load_mask_array(mask_path, train_dataset.file_format)
-            is_positive = np.any(mask > 0)
+            if (
+                train_dataset.task_type == "tile_classification"
+                and train_dataset.tile_labels is not None
+            ):
+                is_positive = float(train_dataset.tile_labels[base_idx]) > 0.5
+            else:
+                img_path = train_dataset.image_files[base_idx]
+                mask_path = train_dataset.masks_dir / img_path.name
+                if not mask_path.exists():
+                    raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
+                mask = _load_mask_array(mask_path, train_dataset.file_format)
+                is_positive = np.any(mask > 0)
+            base_positive_cache[base_idx] = bool(is_positive)
+
         if is_positive:
             positive_indices.append(idx)
         else:
@@ -1470,6 +1591,11 @@ def train(config: TrainingConfig) -> Path:
         )
     if int(config.val_sample_seed) < 0:
         raise ValueError(f"val_sample_seed negatif olamaz, verilen: {config.val_sample_seed}")
+    if not 0.0 <= float(config.deterministic_rotate_step_deg) < 360.0:
+        raise ValueError(
+            "deterministic_rotate_step_deg 0-360 araliginda olmali "
+            f"(360 haric), verilen: {config.deterministic_rotate_step_deg}"
+        )
     
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1494,6 +1620,7 @@ def train(config: TrainingConfig) -> Path:
         file_format=file_format,
         task_type=config.task_type,
         tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
+        deterministic_rotate_step_deg=float(config.deterministic_rotate_step_deg),
     )
     val_dataset = ArchaeologyDataset(
         config.data_dir / "val",
@@ -1501,7 +1628,14 @@ def train(config: TrainingConfig) -> Path:
         file_format=file_format,
         task_type=config.task_type,
         tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
+        deterministic_rotate_step_deg=0.0,
     )
+    if train_dataset._use_deterministic_rotation:
+        LOGGER.info(
+            "Deterministik train rotasyonu aktif: adim=%.2f°, carpim=%dx",
+            float(config.deterministic_rotate_step_deg),
+            int(train_dataset._augmentation_multiplier),
+        )
     
     train_loader_dataset: Dataset = train_dataset
     train_sampling_stats: Optional[Dict[str, int]] = None
@@ -2143,6 +2277,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--deterministic-rotate-step-deg",
+        type=float,
+        default=float(CONFIG["deterministic_rotate_step_deg"]),
+        help=(
+            "Train augment icin sabit donme aci adimi (derece). "
+            "0: kapali, 30: 0..330 arasi 12 farkli aci."
+        ),
+    )
+    parser.add_argument(
         "--monitor-channel-importance",
         action=argparse.BooleanOptionalAction,
         default=bool(CONFIG["monitor_channel_importance"]),
@@ -2193,6 +2336,10 @@ def main():
 
     if not 0.0 <= float(args.tile_label_min_positive_ratio) <= 1.0:
         print("HATA: --tile-label-min-positive-ratio 0 ile 1 arasında olmalı.")
+        sys.exit(1)
+
+    if not 0.0 <= float(args.deterministic_rotate_step_deg) < 360.0:
+        print("HATA: --deterministic-rotate-step-deg 0 ile 360 arasinda olmali (360 haric).")
         sys.exit(1)
 
     if args.task == "tile_classification" and args.loss in {"dice", "combined"}:
@@ -2392,6 +2539,7 @@ def main():
         train_neg_sample_seed=int(args.train_neg_sample_seed),
         val_keep_ratio=float(args.val_keep_ratio),
         val_sample_seed=int(args.val_sample_seed),
+        deterministic_rotate_step_deg=float(args.deterministic_rotate_step_deg),
         output_dir=Path(args.output),
         save_every_epoch=bool(CONFIG["save_every_epoch"]),
         epoch_dir=str(CONFIG["epoch_dir"]),
@@ -2427,3 +2575,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

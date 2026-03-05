@@ -185,7 +185,7 @@ encoders: "none"
 # CLASSIFICATION PRESET:
 #   Aşağıdaki yol tile-level classification eğitimi sonrası beklenen örnek addır.
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
-weights: "checkpoints/best_iou_TileClassifier_resnet50_12ch_attention.pth"
+weights: "checkpoints/best_loss_TileClassifier_resnet50_12ch_attention.pth"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir
