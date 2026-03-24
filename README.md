@@ -3,9 +3,19 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+Turkish documentation: [`README_TR.md`](README_TR.md).
+
 > **Advanced AI system for automatic detection of archaeological structures from LiDAR and multi-band satellite imagery**
 
 This project combines **deep learning** and **classical image processing** methods to detect archaeological traces (tumuli, ditches, mounds, wall remains, etc.) from multi-band GeoTIFF data (RGB, DSM, DTM).
+
+### Current default workflow (repository `config.yaml`)
+
+The checked-in profile targets **tile-level classification** (`dl_task: tile_classification`) with a **single trained checkpoint** (`trained_model_only: true`). In that mode:
+
+- Use **`weights`** (your `.pth` file) and **`training_metadata`** (JSON from training).
+- **`tile`**, **`overlap`**, and **`bands`** are taken from `training_metadata.json` during inference—do not “fix” mismatches by editing overlap in YAML; retrain with the desired overlap if needed.
+- After a successful `training.py` run, the best weights are published to `checkpoints/active/model.pth` and metadata to `checkpoints/active/training_metadata.json` (you may point `weights` to another file in `checkpoints/active/` if you prefer).
 
 ---
 
@@ -87,76 +97,44 @@ This system can detect the following archaeological features:
 
 ## 🚀 Quick Start
 
-### Update: IDE-First Trained Workflow
-
-The main `config.yaml` is the daily IDE profile and assumes `trained_model_only: true`.
-After a successful `training.py` run, the active inference artifacts are published to:
-
-- `checkpoints/active/model.pth`
-- `checkpoints/active/training_metadata.json`
-
-Recommended flow:
+### End-to-end: labels → tiles → train → detect
 
 ```bash
-python egitim_verisi_olusturma.py \
-  --input kesif_alani.tif \
-  --mask ground_truth.tif \
-  --output training_data
-
-python training.py --data training_data --task tile_classification --epochs 50
-
-python archaeo_detect.py
-```
-
-Notes:
-
-- `tile`, `overlap`, and `bands` are locked from `training_metadata.json` in trained-only mode.
-- Do not manually increase `overlap` in `config.yaml`; retrain with a different overlap if needed.
-- If you do not have a trained model yet, use `configs/tile_classification_baseline.example.yaml`.
-
-### Run in 5 Minutes!
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/your-username/archaeological-site-detection.git
-cd archaeological-site-detection
-
-# 2. Install required packages
 pip install -r requirements.txt
 
-# 3. Prepare your data (a GeoTIFF named kesif_alani.tif)
-# Should contain RGB, DSM, DTM bands in a single file
-
-# 4. Run it!
-python archaeo_detect.py
-```
-
-🎉 **Congratulations!** The system has started. Results will be created under `ciktilar/`.
-
-### 🎓 Training Your Own Model (Optional)
-
-If you have labeled data (ground truth masks), you can train a custom model:
-
-```bash
-# Step 1: Create training data from GeoTIFF + ground truth mask
+# 1) Build 12-channel tiles (CLI), or set paths in CONFIG inside egitim_verisi_olusturma.py and run from the IDE
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
   --output training_data
 
-# The script is non-interactive; provide paths explicitly
-python egitim_verisi_olusturma.py \
-  --input kesif_alani.tif \
-  --mask ground_truth.tif \
-  --output training_data
-# Step 2: Train the model
+# 2) Train (tile classification is the default in training.py CONFIG / repo profile)
 python training.py --data training_data --task tile_classification --epochs 50
 
-# Step 3: Use your trained model
+# 3) Inference (uses config.yaml; publishes to checkpoints/active/ are described in training output)
 python archaeo_detect.py
 ```
 
-**Tip:** `egitim_verisi_olusturma.py` is non-interactive. Provide `--input`, `--mask`, and `--output` explicitly.
+Artifacts after training:
+
+- `checkpoints/active/model.pth` — best checkpoint copied for inference
+- `checkpoints/active/training_metadata.json` — **source of truth** for `tile` / `overlap` / `bands` when `trained_model_only: true`
+
+**Important:** With `trained_model_only: true`, do not raise `overlap` only in YAML to “match” training—metadata locks those fields. Change overlap in data prep + retrain if you need a different overlap.
+
+**Without a trained model yet:** use zero-shot / classical paths (see [Usage](#-usage)) or start from `configs/tile_classification_baseline.example.yaml` if provided.
+
+### Run detection only (dependencies already installed)
+
+```bash
+python archaeo_detect.py
+```
+
+Uses `config.yaml` (paths to input raster, methods, thresholds). Outputs go under `ciktilar/<session>/`.
+
+### IDE / no CLI for data prep
+
+`egitim_verisi_olusturma.py` includes a `CONFIG` dict (default `input`, `mask`, `output`, `tile_size`, `overlap`, `bands`, …). If you run the script without `--input` / `--mask`, it **requires** those keys to be set in `CONFIG`—there is no interactive file dialog for paths.
 
 ---
 
@@ -580,21 +558,26 @@ python archaeo_detect.py --help
 
 ### config.yaml File
 
-System behavior is controlled by the `config.yaml` file. This file is **richly documented** with detailed explanations.
+System behavior is controlled by the `config.yaml` file. This file is **richly documented** (including Turkish inline comments) with detailed explanations.
+
+**Path resolution:** Relative paths inside YAML are resolved **relative to the directory containing `config.yaml`**, not necessarily the process working directory. Paths you pass on the CLI are resolved relative to the **current working directory**.
 
 #### Main Sections:
 
 1. **Input/Output**: File paths and band selection
-2. **Method Selection**: Which methods to use
-3. **Deep Learning**: Model architecture and encoder settings
-4. **Classical Methods**: RVT, Hessian, Morphology parameters
-5. **Fusion**: Hybrid combination settings
-6. **Tile Processing**: Memory and performance optimization
-7. **Normalization**: Data preprocessing
-8. **Masking**: Filtering tall structures
-9. **Vectorization**: GIS output format
-10. **Performance**: Speed and memory optimization
-11. **Cache**: Acceleration system
+2. **Method Selection**: `enable_deep_learning`, `enable_classic`, `enable_yolo`, `enable_fusion`
+3. **DL task**: `dl_task` — `segmentation` (per-pixel) or `tile_classification` (tile score → risk map with overlap blending)
+4. **Trained-only mode**: `trained_model_only` — when `true`, enforces a single checkpoint + metadata (`weights`, `training_metadata`); locks tile/overlap/bands from metadata
+5. **Deep Learning**: Architecture, encoder, weights, `zero_shot_imagenet`, attention / band importance
+6. **Classical Methods**: RVT, Hessian, Morphology parameters
+7. **Fusion**: Hybrid combination settings (`alpha`, …) — requires both DL and classic enabled
+8. **YOLO11** (optional): Separate RGB-only inventory / segmentation path; usually off for the tile-classification preset
+9. **Tile Processing**: Memory and performance optimization (`tile` / `overlap` documented vs metadata-locked)
+10. **Normalization**: Data preprocessing
+11. **Masking**: Filtering tall structures (`mask_talls`, `rgb_only`)
+12. **Vectorization**: GIS output (`vectorize`, `min_area`, `export_candidate_excel`, …)
+13. **Performance**: Device, `half`, `seed`, `verbose`
+14. **Cache**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster cache tuning
 
 #### Quick Configuration Scenarios:
 
@@ -733,6 +716,8 @@ kesif_alani_mask.gpkg                → DL vector polygons
 kesif_alani_classic_mask.gpkg        → Classical vector polygons
 kesif_alani_fused_resnet34_mask.gpkg → Fusion vector polygons
 ```
+
+When `export_candidate_excel: true` in `config.yaml`, companion `*_gps.xlsx` files are written next to the vector outputs (candidate centers / GPS-style tables for field checks).
 
 **GeoPackage Features:**
 - Polygon geometry
@@ -1420,7 +1405,7 @@ A:
 A: The project includes dedicated training scripts! See the [Model Training Guide](#-model-training-guide) section below for step-by-step instructions using `egitim_verisi_olusturma.py` and `training.py`.
 
 **Q: Can I use the training scripts interactively?**  
-A: No. `egitim_verisi_olusturma.py` is non-interactive; provide `--input`, `--mask`, and `--output` explicitly.
+A: There is no file-picker dialog. Either pass `--input`, `--mask`, and `--output` on the CLI, or set those keys (and defaults) in the `CONFIG` dict at the top of `egitim_verisi_olusturma.py` / `training.py` and run from your IDE.
 
 **Q: What if I don't have ground truth masks?**  
 A: You can still use the system with zero-shot ImageNet weights (`zero_shot_imagenet: true`) or classical methods only. However, for best results, train a custom model with your own labeled data.
@@ -1815,18 +1800,29 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 
 #### Key Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--input` | Required | Multi-band GeoTIFF (RGB+DSM+DTM) |
-| `--mask` | Required | Binary mask GeoTIFF (0/1 values) |
-| `--output` | `training_data` | Output directory |
-| `--tile-size` | `256` | Tile dimensions in pixels |
-| `--overlap` | `128` | Overlap used during training; inference later reuses this from metadata |
-| `--train-ratio` | `0.8` | 80% train, 20% validation |
-| `--train-negative-keep-ratio` | `1.0` | Keep ratio of fully-negative train tiles (`0`=drop all, `1`=keep all) |
-| `--train-negative-max` | `None` | Optional upper cap for kept negative train tiles |
-| `--min-positive` | `0.0` | Min positive pixel ratio to include tile |
-| `--bands` | `1,2,3,4,5` | Band order: R,G,B,DSM,DTM |
+Run `python egitim_verisi_olusturma.py --help` for the full list. Common options:
+
+| Parameter | Default (see script `CONFIG`) | Description |
+|-----------|------------------------------|-------------|
+| `--input` / `-i` | _(required via CLI or `CONFIG`)_ | Multi-band GeoTIFF (RGB + DSM + DTM) |
+| `--mask` / `-m` | _(required via CLI or `CONFIG`)_ | Ground-truth mask (values ≠ 0 treated as positive, then binarized) |
+| `--output` / `-o` | `training_data` | Output root (`train/`, `val/`, `metadata.json`, …) |
+| `--tile-size` / `-t` | `256` | Tile size in pixels |
+| `--overlap` | `128` | Sliding-window overlap in pixels (must stay consistent with training/inference metadata) |
+| `--bands` / `-b` | `1,2,3,4,5` | 1-based GeoTIFF band indices: R, G, B, DSM, DTM |
+| `--tpi-radii` | `5,15,30` | Comma-separated TPI radii (pixels), passed to `compute_tpi_multiscale` |
+| `--min-positive` | `0.0` | Minimum fraction of positive pixels in a tile to keep it (0 = allow all-negative tiles subject to negative sampling) |
+| `--tile-label-min-positive-ratio` | _(from `CONFIG`)_ | For tile-level labels: minimum positive ratio for the tile’s class label (0 = any positive pixel) |
+| `--max-nodata` | `0.3` | Maximum allowed NoData fraction per tile |
+| `--train-ratio` | `0.8` | Train fraction |
+| `--train-negative-keep-ratio` | `1.0` | Fraction of all-negative **train** tiles to retain (`0` = drop all, `1` = keep all) |
+| `--train-negative-max` | `None` | Optional cap on kept negative train tiles |
+| `--split-mode` | `spatial` | `spatial` (recommended) or `random` train/val split |
+| `--no-normalize` | off | Skip `robust_norm` on the stacked channels |
+| `--format` | `npz` | `npz` (compressed) or `npy` |
+| `--num-workers` | CPU-based default | Worker processes for tile generation |
+| `--tile-prefix` | `""` | Optional prefix for tile filenames (empty → auto prefix with tile/overlap/bands/timestamp) |
+| `--append` / `--no-append` | clean rebuild | Append tiles without deleting existing outputs vs full regenerate |
 
 #### Recommended Settings by Scenario
 
@@ -1926,12 +1922,16 @@ python training.py \
 
 ```
 checkpoints/
-├── active/model.pth                         ← IDE inference profile uses this
-├── active/training_metadata.json           ← tile/overlap/bands lock source
-└── training_history.json                    ← Training metrics
+├── active/model.pth                         ← copy of best weights for inference (`publish_active` in training.py)
+├── active/training_metadata.json           ← tile / overlap / bands (+ schema) for trained_model_only mode
+├── active/published_from.json              ← manifest pointing at the source checkpoint used for the copy
+├── epochs/                                  ← per-epoch checkpoints when `save_every_epoch` is true (default in CONFIG)
+└── training_history.json                    ← training metrics
 ```
 
-`channel_importance_history.json` is also generated in `checkpoints/` and stores per-epoch band importance rankings.
+You may set `weights` in `config.yaml` to `checkpoints/active/model.pth` **or** to a specific run under `checkpoints/epochs/`; in both cases **`training_metadata.json` must describe the same architecture, channel count, tile size, overlap, and bands** as that run.
+
+`channel_importance_history.json` may also appear under `checkpoints/` and stores per-epoch band importance rankings when enabled.
 
 #### Monitoring Training
 
@@ -2202,14 +2202,17 @@ python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumul
 ### Project Structure
 
 ```
-archaeo_detect_base/
+arkeolojik_alan_tespit/            # project root (example name)
 ├── archaeo_detect.py              # Main detection script
+├── archeo_shared/                 # Shared channel schema & model helpers
+│   └── channels.py                # MODEL_CHANNEL_NAMES, metadata schema version
 ├── egitim_verisi_olusturma.py     # Training data generation
-├── training.py                     # Model training script
-├── evaluation.py                   # Evaluation metrics
-├── config.yaml                     # Configuration file
-├── requirements.txt                # Python dependencies
-├── README.md                       # This documentation
+├── training.py                    # Model training script
+├── evaluation.py                  # Evaluation metrics
+├── config.yaml                    # Configuration file
+├── configs/                       # Example YAML profiles (e.g. tile classification)
+├── requirements.txt               # Python dependencies
+├── README.md                      # This documentation
 ├── training_data/                  # Generated training tiles
 │   ├── train/
 │   │   ├── images/                 # 12-channel image tiles (.npz)
@@ -2345,7 +2348,7 @@ training.py
 
 ### Channel Architecture
 
-**12-Channel Input Structure:**
+**12-Channel Input Structure** (canonical names in `archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`):
 
 | Channel | Feature | Description | Archaeological Use |
 |---------|---------|-------------|-------------------|
@@ -2357,8 +2360,10 @@ training.py
 | 7 | Neg. Openness | Negative Openness | Ditches, depressions |
 | 8 | LRM | Local Relief Model | Local topographic anomalies |
 | 9 | Slope | Terrain slope | Terraces, walls |
-| 10 | nDSM | Normalized DSM | Surface height |
+| 10 | nDSM | Normalized DSM | Surface height above terrain (DSM − DTM) |
 | 11 | TPI | Topographic Position Index | Mounds/depressions |
+
+Training tiles and inference stacks use the same ordering via `stack_channels()` in `archaeo_detect.py`.
 
 **CBAM Attention:**
 - **Channel Attention**: Dynamically weights feature channels (e.g., SVF/TPI for tumuli, Openness/LRM for ditches)
@@ -2491,7 +2496,7 @@ If you use this project in your academic work, please cite:
   title = {Archaeological Site Detection: Deep Learning and Classical Image Processing},
   author = {Ahmet Ertuğrul Arık},
   year = {2025},
-  url = {https://github.com/your-username/archaeological-site-detection}
+  url = {https://github.com/elestirmen/archaeological-site-detection}
 }
 ```
 
@@ -2499,15 +2504,14 @@ If you use this project in your academic work, please cite:
 
 ## 📊 Project Statistics
 
-![GitHub stars](https://img.shields.io/github/stars/your-username/archaeological-site-detection?style=social)
-![GitHub forks](https://img.shields.io/github/forks/your-username/archaeological-site-detection?style=social)
-![GitHub watchers](https://img.shields.io/github/watchers/your-username/archaeological-site-detection?style=social)
+![GitHub stars](https://img.shields.io/github/stars/elestirmen/archaeological-site-detection?style=social)
+![GitHub forks](https://img.shields.io/github/forks/elestirmen/archaeological-site-detection?style=social)
 
 ---
 
 <div align="center">
 
-Developer: [Ahmet Ertuğrul Arık]  
-Last Update: February 2026
+Developer: Ahmet Ertuğrul Arık  
+Last update: March 2026
 
 </div>

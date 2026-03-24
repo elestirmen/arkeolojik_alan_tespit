@@ -3,9 +3,19 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+İngilizce dokümantasyon: [`README.md`](README.md).
+
 > **LiDAR ve çok bantlı uydu görüntülerinden arkeolojik yapıların otomatik tespiti için gelişmiş yapay zeka sistemi**
 
 Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (tümülüs, hendek, höyük, duvar kalıntıları vb.) tespit etmek için **derin öğrenme** ve **klasik görüntü işleme** yöntemlerini birleştirir.
+
+### Depodaki varsayılan iş akışı (`config.yaml`)
+
+Kayıtlı profil **karo düzeyinde sınıflandırma** (`dl_task: tile_classification`) ve **tek eğitilmiş checkpoint** (`trained_model_only: true`) için ayarlıdır. Bu modda:
+
+- **`weights`** (`.pth` dosyası) ve **`training_metadata`** (eğitimden gelen JSON) kullanılır.
+- **`tile`**, **`overlap`** ve **`bands`** çıkarım sırasında `training_metadata.json` içinden kilitlenir; YAML’da yalnızca `overlap` değerini artırarak uyumsuzluğu gidermeyin — farklı overlap için veri üretimini ve eğitimi o overlap ile yeniden yapın.
+- Başarılı bir `training.py` çalışmasından sonra en iyi ağırlıklar `checkpoints/active/model.pth` dosyasına, metadata ise `checkpoints/active/training_metadata.json` dosyasına kopyalanır (`weights` yolunu `checkpoints/active/` altındaki başka bir checkpoint’e de yönlendirebilirsiniz).
 
 ---
 
@@ -86,61 +96,48 @@ Bu sistem aşağıdaki arkeolojik özellikleri tespit edebilir:
 
 ## 🚀 Hızlı Başlangıç
 
-### Guncel Not: IDE-First Trained Workflow
-
-Ana `config.yaml`, `trained_model_only: true` odakli gunluk IDE profili olarak kullanilir.
-`training.py` basarili oldugunda aktif inference artefact'larini su konumlara yayimlar:
-
-- `checkpoints/active/model.pth`
-- `checkpoints/active/training_metadata.json`
-
-Onerilen akis:
+### Uçtan uca: etiket → karo → eğitim → tespit
 
 ```bash
+pip install -r requirements.txt
+
+# 1) 12 kanallı eğitim karoları (CLI), veya egitim_verisi_olusturma.py içindeki CONFIG ile IDE’den çalıştırın
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
   --output training_data
 
+# 2) Eğitim (training.py CONFIG’te varsayılan görev genelde tile_classification)
 python training.py --data training_data --task tile_classification --epochs 50
 
+# 3) Çıkarım (config.yaml; checkpoints/active/ yayını eğitim çıktısında özetlenir)
 python archaeo_detect.py
 ```
 
-Notlar:
+Eğitim sonrası artefact’lar:
 
-- `tile`, `overlap` ve `bands` trained-only modda `training_metadata.json` dosyasindan kilitlenir.
-- `config.yaml` icinde `overlap` degerini elle artirmayin; farkli overlap icin modeli yeniden egitin.
-- Egitilmis modeliniz yoksa `configs/tile_classification_baseline.example.yaml` kullanin.
+- `checkpoints/active/model.pth` — çıkarım için kopyalanan en iyi ağırlıklar
+- `checkpoints/active/training_metadata.json` — `trained_model_only: true` iken **`tile` / `overlap` / `bands` için kaynak**
 
-### 5 Dakikada Çalıştırın!
+**Önemli:** `trained_model_only: true` iken YAML’da yalnızca `overlap` artırarak eğitimle uyumu “sağlamaya” çalışmayın; metadata bu alanları kilitler. Farklı overlap gerekiyorsa veriyi o overlap ile üretin ve modeli yeniden eğitin.
 
-```bash
-# 1. Depoyu klonlayın
-git clone https://github.com/your-username/archaeological-site-detection.git
-cd archaeological-site-detection
-
-# 2. Gerekli paketleri yükleyin
-pip install -r requirements.txt
-
-# 3. Verilerinizi hazırlayın (kesif_alani.tif adında bir GeoTIFF)
-# Tek bir dosyada RGB, DSM, DTM bantları içermelidir
-
-# 4. Çalıştırın!
-python archaeo_detect.py
-```
-
-🎉 **Tebrikler!** Sistem başladı. Sonuçlar `ciktilar/` altında oluşturulacak.
-
-### Baseline / Modelsiz Smoke Test
-
-Egitilmis modeliniz yoksa ana `config.yaml` yerine baseline ornek config kullanin:
+**Henüz eğitilmiş model yoksa:** sıfır atış / klasik yollar için [Kullanım](#-kullanım) bölümüne bakın; ana `config.yaml` yerine örnek profil ile denemek için:
 
 ```bash
 python archaeo_detect.py --config configs/tile_classification_baseline.example.yaml
 ```
 
-**Not:** Egitim verisi uretmek icin `egitim_verisi_olusturma.py` betigi interaktif degildir; `--input`, `--mask` ve `--output` parametrelerini acikca verin.
+### Yalnızca tespit (ortam hazır)
+
+```bash
+python archaeo_detect.py
+```
+
+`config.yaml` içindeki girdi rasterı, yöntemler ve eşikler kullanılır. Sonuçlar `ciktilar/<oturum>/` altına yazılır.
+
+### IDE / CLI ile veri hazırlığı
+
+`egitim_verisi_olusturma.py` dosyasında bir `CONFIG` sözlüğü vardır (varsayılan `input`, `mask`, `output`, `tile_size`, `overlap`, `bands`, …). `--input` / `--mask` vermeden çalıştırıyorsanız bu anahtarların `CONFIG` içinde dolu olması gerekir — girdi için etkileşimli dosya penceresi yoktur.
 
 ---
 
@@ -475,21 +472,26 @@ python archaeo_detect.py --help
 
 ### config.yaml Dosyası
 
-Sistem davranışı `config.yaml` dosyası tarafından kontrol edilir. Bu dosya detaylı açıklamalarla **zengin bir şekilde belgelenmiştir**.
+Sistem davranışı `config.yaml` dosyası tarafından kontrol edilir. Bu dosya detaylı açıklamalarla **zengin bir şekilde belgelenmiştir** (satır içi Türkçe yorumlar dahil).
+
+**Yol çözümlemesi:** YAML içindeki göreli yollar, **`config.yaml` dosyasının bulunduğu dizine** göre çözülür; çalışma dizininize göre değil. Komut satırından verdiğiniz yollar ise **o anki çalışma dizinine** göre çözülür.
 
 #### Ana Bölümler:
 
 1. **Giriş/Çıkış**: Dosya yolları ve bant seçimi
-2. **Yöntem Seçimi**: Hangi yöntemlerin kullanılacağı
-3. **Derin Öğrenme**: Model mimarisi ve kodlayıcı ayarları
-4. **Klasik Yöntemler**: RVT, Hessian, Morfoloji parametreleri
-5. **Füzyon**: Hibrit kombinasyon ayarları
-6. **Karo İşleme**: Bellek ve performans optimizasyonu
-7. **Normalizasyon**: Veri ön işleme
-8. **Maskeleme**: Yüksek yapıları filtreleme
-9. **Vektörleştirme**: CBS çıktı formatı
-10. **Performans**: Hız ve bellek optimizasyonu
-11. **Önbellek**: Hızlandırma sistemi
+2. **Yöntem Seçimi**: `enable_deep_learning`, `enable_classic`, `enable_yolo`, `enable_fusion`
+3. **DL görevi**: `dl_task` — `segmentation` (piksel) veya `tile_classification` (karo skoru → bindirme ile risk haritası)
+4. **Eğitilmiş-tekil mod**: `trained_model_only` — `true` iken tek checkpoint + metadata (`weights`, `training_metadata`); `tile` / `overlap` / `bands` metadata’dan kilitlenir
+5. **Derin öğrenme**: Mimari, encoder, ağırlıklar, `zero_shot_imagenet`, dikkat / bant önem raporu
+6. **Klasik Yöntemler**: RVT, Hessian, Morfoloji parametreleri
+7. **Füzyon**: Hibrit kombinasyon (`alpha`, …) — hem DL hem klasik açık olmalıdır
+8. **YOLO11** (isteğe bağlı): Yalnızca RGB; genelde tile sınıflandırma ön ayarında kapalıdır
+9. **Karo İşleme**: Bellek ve performans; `tile` / `overlap` belge ile metadata kilitlenmesi
+10. **Normalizasyon**: Veri ön işleme
+11. **Maskeleme**: Yüksek yapılar (`mask_talls`, `rgb_only`)
+12. **Vektörleştirme**: CBS çıktısı (`vectorize`, `min_area`, `export_candidate_excel`, …)
+13. **Performans**: Cihaz, `half`, `seed`, `verbose`
+14. **Önbellek**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster önbellek ayarları
 
 #### Hızlı Yapılandırma Senaryoları:
 
@@ -628,6 +630,8 @@ kesif_alani_mask.gpkg                → DL vektör çokgenleri
 kesif_alani_classic_mask.gpkg        → Klasik vektör çokgenleri
 kesif_alani_fused_resnet34_mask.gpkg → Füzyon vektör çokgenleri
 ```
+
+`config.yaml` içinde `export_candidate_excel: true` ise, vektör çıktılarına eşlik eden aday merkezleri / GPS tarzı tablolar `*_gps.xlsx` dosyaları olarak üretilir.
 
 **GeoPackage Özellikleri:**
 - Çokgen geometrisi
@@ -1314,8 +1318,8 @@ C:
 **S: Kendi modelimi nasıl eğitirim?**  
 C: Proje özel eğitim betikleri içerir! `egitim_verisi_olusturma.py` ve `training.py` kullanarak adım adım talimatlar için aşağıdaki [Model Eğitimi Kılavuzu](#-model-eğitimi-kılavuzu) bölümüne bakın.
 
-**S: Eğitim betiklerini interaktif olarak kullanabilir miyim?**  
-C: Hayir. `egitim_verisi_olusturma.py` interaktif degildir; `--input`, `--mask` ve `--output` parametrelerini acikca verin.
+**S: Eğitim betiklerini etkileşimli (dosya seçme penceresiyle) kullanabilir miyim?**  
+C: Hayır. Ya `--input`, `--mask` ve `--output` parametrelerini komut satırından verin ya da `egitim_verisi_olusturma.py` / `training.py` dosyasındaki `CONFIG` sözlüğünde varsayılan yolları tanımlayıp IDE’den çalıştırın.
 
 **S: Ground truth maskelerim yoksa ne olur?**  
 C: Yine de sıfır atış ImageNet ağırlıklarıyla (`zero_shot_imagenet: true`) veya sadece klasik yöntemlerle sistemi kullanabilirsiniz. Ancak, en iyi sonuçlar için kendi etiketli verilerinizle özel bir model eğitin.
@@ -1709,18 +1713,29 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 
 #### Temel Parametreler
 
-| Parametre | Varsayılan | Açıklama |
-|-----------|------------|----------|
-| `--input` | Gerekli | Çok bantlı GeoTIFF (RGB+DSM+DTM) |
-| `--mask` | Gerekli | İkili maske GeoTIFF (0/1 değerleri) |
-| `--output` | `training_data` | Çıktı dizini |
-| `--tile-size` | `256` | Piksel cinsinden karo boyutu |
-| `--overlap` | `128` | Egitimde kullanilan overlap; inference bunu metadata'dan tekrar kullanir |
-| `--train-ratio` | `0.8` | %80 eğitim, %20 doğrulama |
-| `--train-negative-keep-ratio` | `1.0` | Tamamen negatif eğitim karolarını tutma oranı (`0`=hepsini at, `1`=hepsini tut) |
-| `--train-negative-max` | `None` | Tutulacak negatif eğitim karo sayısı için opsiyonel üst sınır |
-| `--min-positive` | `0.0` | Karoyu dahil etmek için min pozitif piksel oranı |
-| `--bands` | `1,2,3,4,5` | Bant sırası: R,G,B,DSM,DTM |
+Tam liste için: `python egitim_verisi_olusturma.py --help`. Sık kullanılanlar:
+
+| Parametre | Varsayılan (betikteki `CONFIG`) | Açıklama |
+|-----------|--------------------------------|----------|
+| `--input` / `-i` | CLI veya `CONFIG` ile zorunlu | Çok bantlı GeoTIFF (RGB + DSM + DTM) |
+| `--mask` / `-m` | CLI veya `CONFIG` ile zorunlu | Ground truth maske (0 dışındaki değerler pozitif sayılıp ikiliye çevrilir) |
+| `--output` / `-o` | `training_data` | Çıktı kökü (`train/`, `val/`, `metadata.json`, …) |
+| `--tile-size` / `-t` | `256` | Karo boyutu (piksel) |
+| `--overlap` | `128` | Kaydırmalı pencere örtüşmesi (eğitim/çıkarımda metadata ile tutarlı kalmalı) |
+| `--bands` / `-b` | `1,2,3,4,5` | 1 tabanlı GeoTIFF bant indeksleri: R, G, B, DSM, DTM |
+| `--tpi-radii` | `5,15,30` | Virgülle ayrılmış TPI yarıçapları (piksel) |
+| `--min-positive` | `0.0` | Karoda minimum pozitif piksel oranı |
+| `--tile-label-min-positive-ratio` | `CONFIG`’ten | Karo sınıfı etiketi için minimum pozitif oran (0 = en az bir pozitif piksel yeter) |
+| `--max-nodata` | `0.3` | Karo başına izin verilen maksimum NoData oranı |
+| `--train-ratio` | `0.8` | Eğitim oranı |
+| `--train-negative-keep-ratio` | `1.0` | Tamamen negatif **eğitim** karolarının tutulacak kesri (`0` = hepsini at, `1` = hepsini tut) |
+| `--train-negative-max` | `None` | Tutulan negatif eğitim karosu için üst sınır |
+| `--split-mode` | `spatial` | `spatial` (önerilir) veya `random` train/val bölmesi |
+| `--no-normalize` | kapalı | `robust_norm` atlanır |
+| `--format` | `npz` | `npz` veya `npy` |
+| `--num-workers` | CPU’ya göre | Paralel işçi sayısı |
+| `--tile-prefix` | `""` | İsteğe bağlı dosya adı öneki (boşsa otomatik önek) |
+| `--append` / `--no-append` | temiz yeniden üret | Mevcut karolara ekleme vs tam yeniden oluşturma |
 
 #### Senaryoya Göre Önerilen Ayarlar
 
@@ -1732,6 +1747,8 @@ Giriş GeoTIFF (5 bant)           Ground Truth Maske
 | **Hızlı test** | `--tile-size 256 --train-ratio 0.9` |
 
 #### Çıktı: 12 Kanal Açıklaması
+
+Kanonik sıra `archeo_shared/channels.py` içindeki `MODEL_CHANNEL_NAMES` ile tanımlıdır; eğitim ve çıkarım `archaeo_detect.py` içindeki `stack_channels()` ile aynı düzeni kullanır.
 
 | # | Kanal | Ne Tespit Eder |
 |---|-------|----------------|
@@ -1819,12 +1836,16 @@ python training.py \
 
 ```
 checkpoints/
-├── active/model.pth                         ← IDE profili bunu kullanir
-├── active/training_metadata.json           ← tile/overlap/bands kilit kaynagi
+├── active/model.pth                         ← en iyi ağırlıkların kopyası (training.py içindeki publish_active)
+├── active/training_metadata.json           ← trained_model_only için tile / overlap / bands (+ şema)
+├── active/published_from.json              ← kopyanın kaynak checkpoint’e işaret eden manifest
+├── epochs/                                  ← save_every_epoch açıksa (CONFIG’te varsayılan genelde açık) epoch checkpoint’leri
 └── training_history.json                   ← Eğitim metrikleri
 ```
 
-`checkpoints/` altında `channel_importance_history.json` da üretilir; epoch bazlı bant önem sıralarını içerir.
+`weights` olarak `checkpoints/active/model.pth` veya `checkpoints/epochs/` altındaki belirli bir çalıştırmayı seçebilirsiniz; her durumda **`training_metadata.json` aynı mimari, kanal sayısı, karo boyutu, overlap ve bantları** tanımlamalıdır.
+
+`channel_importance_history.json` dosyası da (etkinse) `checkpoints/` altında üretilir; epoch bazlı bant önem sıralarını içerir.
 
 #### Eğitimi İzleme
 
@@ -2088,15 +2109,18 @@ python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumul
 ### Proje Yapısı
 
 ```
-archaeo_detect_base/
+arkeolojik_alan_tespit/            # proje kökü (örnek ad)
 ├── archaeo_detect.py              # Ana tespit betiği
+├── archeo_shared/                 # Ortak kanal şeması ve model yardımcıları
+│   └── channels.py                # MODEL_CHANNEL_NAMES, metadata şema sürümü
 ├── egitim_verisi_olusturma.py     # Eğitim verisi oluşturma
-├── training.py                     # Model eğitim betiği
-├── evaluation.py                   # Değerlendirme metrikleri
-├── config.yaml                     # Yapılandırma dosyası
-├── requirements.txt                # Python bağımlılıkları
-├── README.md                       # İngilizce dokümantasyon
-├── README_TR.md                    # Türkçe dokümantasyon (bu dosya)
+├── training.py                    # Model eğitim betiği
+├── evaluation.py                  # Değerlendirme metrikleri
+├── config.yaml                    # Yapılandırma dosyası
+├── configs/                       # Örnek profiller (ör. tile classification)
+├── requirements.txt               # Python bağımlılıkları
+├── README.md                      # İngilizce dokümantasyon
+├── README_TR.md                   # Türkçe dokümantasyon (bu dosya)
 ├── training_data/                  # Oluşturulan eğitim karoları
 │   ├── train/
 │   │   ├── images/                 # 12 kanallı görüntü karoları (.npz)
@@ -2200,7 +2224,7 @@ Bu projeyi akademik çalışmanızda kullanırsanız, lütfen şu şekilde atıf
   title = {Arkeolojik Alan Tespiti: Derin Öğrenme ve Klasik Görüntü İşleme},
   author = {Ahmet Ertuğrul Arık},
   year = {2025},
-  url = {https://github.com/your-username/archaeological-site-detection}
+  url = {https://github.com/elestirmen/archaeological-site-detection}
 }
 ```
 
@@ -2208,15 +2232,14 @@ Bu projeyi akademik çalışmanızda kullanırsanız, lütfen şu şekilde atıf
 
 ## 📊 Proje İstatistikleri
 
-![GitHub stars](https://img.shields.io/github/stars/your-username/archaeological-site-detection?style=social)
-![GitHub forks](https://img.shields.io/github/forks/your-username/archaeological-site-detection?style=social)
-![GitHub watchers](https://img.shields.io/github/watchers/your-username/archaeological-site-detection?style=social)
+![GitHub stars](https://img.shields.io/github/stars/elestirmen/archaeological-site-detection?style=social)
+![GitHub forks](https://img.shields.io/github/forks/elestirmen/archaeological-site-detection?style=social)
 
 ---
 
 <div align="center">
 
-Geliştirici: [Ahmet Ertuğrul Arık]  
-Son Güncelleme: Şubat 2026
+Geliştirici: Ahmet Ertuğrul Arık  
+Son güncelleme: Mart 2026
 
 </div>

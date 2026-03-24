@@ -193,7 +193,7 @@ encoders: "none"
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "checkpoints/active/model.pth"
+weights: "checkpoints/active/epoch_011_TileClassifier_resnet50_12ch_attention.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
