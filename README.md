@@ -5,9 +5,9 @@
 
 Turkish documentation: [`README_TR.md`](README_TR.md).
 
-> **Advanced AI system for automatic detection of archaeological structures from LiDAR and multi-band satellite imagery**
+> **Advanced AI system for automatic detection of archaeological structures from LiDAR and multi-band GeoTIFF rasters. Priority is on derivatives from nadir UAV (drone) imagery—orthophotos plus elevation models (DSM/DTM) and stacked relief features. Multi-band satellite imagery is also usable** when you provide the same kind of stack (e.g. RGB with co-registered DSM/DTM where available) on a single grid; manned aerial or other sensors work under the same rules.
 
-This project combines **deep learning** and **classical image processing** methods to detect archaeological traces (tumuli, ditches, mounds, wall remains, etc.) from multi-band GeoTIFF data (RGB, DSM, DTM).
+This project combines **deep learning** and **classical image processing** methods to detect archaeological traces (tumuli, ditches, mounds, wall remains, etc.) from multi-band GeoTIFF data (RGB, DSM, DTM)—most often from **UAV photogrammetry**, and **also from satellite or other aerial products** when banding and georeferencing match the pipeline.
 
 ### Current default workflow (repository `config.yaml`)
 
@@ -1383,8 +1383,8 @@ A: Yes, but it will be slower. Prefer classical methods or use small tile size.
 **Q: Which method gives the best results?**  
 A: Generally **fusion** (DL + Classical) gives the best results. However, it varies based on your data quality and region.
 
-**Q: Does it work with satellite imagery?**  
-A: Yes, satellite imagery and LiDAR data are supported. Important thing is that it's in multi-band GeoTIFF format.
+**Q: UAV vs satellite—which source is this for?**  
+A: **Priority:** stacks from **UAV (drone) nadir** work (orthomosaic, DSM, DTM, and the derived channels this repo builds). **Satellite imagery is supported too:** if you build or obtain a compatible multi-band GeoTIFF (RGB plus DSM/DTM when your workflow has them, on one aligned grid), you can run the same pipeline. Other sensors and LiDAR-based surfaces work the same way—consistent bands and georeferencing matter more than the platform.
 
 ### 🔧 Technical Questions
 

@@ -5,9 +5,9 @@
 
 İngilizce dokümantasyon: [`README.md`](README.md).
 
-> **LiDAR ve çok bantlı uydu görüntülerinden arkeolojik yapıların otomatik tespiti için gelişmiş yapay zeka sistemi**
+> **LiDAR ve çok bantlı GeoTIFF yığınlarından arkeolojik yapıların otomatik tespiti için gelişmiş yapay zeka sistemi. Öncelik, İHA (insansız hava aracı) nadir görüntülerinden türetilen ürünlerdedir—ortofoto, yüzey modelleri (DSM/DTM) ve yığılmış relief kanalları. Çok bantlı uydu görüntüleri de kullanılabilir:** aynı tür yığını (ör. uygun olduğunda DSM/DTM ile hizalanmış RGB) tek ızgarada GeoTIFF olarak sunduğunuz sürece; diğer hava platformları da aynı koşulla desteklenir.
 
-Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (tümülüs, hendek, höyük, duvar kalıntıları vb.) tespit etmek için **derin öğrenme** ve **klasik görüntü işleme** yöntemlerini birleştirir.
+Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (tümülüs, hendek, höyük, duvar kalıntıları vb.) tespit etmek için **derin öğrenme** ve **klasik görüntü işleme** yöntemlerini birleştirir. Girdiler çoğunlukla **İHA fotogrametrisinden** üretilir; **uydu veya diğer hava ürünleri** de bantlar ve jeoreferans uygun olduğunda aynı hat üzerinden kullanılabilir.
 
 ### Depodaki varsayılan iş akışı (`config.yaml`)
 
@@ -1297,8 +1297,8 @@ C: Evet, ama daha yavaş olacaktır. Klasik yöntemleri tercih edin veya küçü
 **S: Hangi yöntem en iyi sonuçları verir?**  
 C: Genellikle **füzyon** (DL + Klasik) en iyi sonuçları verir. Ancak, veri kalitenize ve bölgenize göre değişir.
 
-**S: Uydu görüntüleriyle çalışır mı?**  
-C: Evet, uydu görüntüleri ve LiDAR verileri desteklenir. Önemli olan çok bantlı GeoTIFF formatında olmasıdır.
+**S: İHA mı uydu mu—bu proje hangi kaynak için?**  
+C: **Öncelik İHA’dadır:** **İHA (drone) nadir** çekimlerinden türetilen yığınlar (ortofoto, DSM, DTM ve bu depoda üretilen türev kanallar) birincil kullanım senaryosudur. **Uydu görüntüleri de kullanılabilir:** çok bantlı, tek ızgarada hizalı GeoTIFF (RGB; mümkünse DSM/DTM) sağladığınızda aynı boru hattı çalışır. Diğer sensörler ve LiDAR tabanlı yüzeyler için de esas, tutarlı bantlar ve jeoreferanstır.
 
 ### 🔧 Teknik Sorular
 
