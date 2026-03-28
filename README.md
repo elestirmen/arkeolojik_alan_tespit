@@ -5,9 +5,9 @@
 
 Turkish documentation: [`README_TR.md`](README_TR.md).
 
-> **Advanced AI system for automatic detection of archaeological structures from LiDAR and multi-band GeoTIFF rasters. Priority is on derivatives from nadir UAV (drone) imagery—orthophotos plus elevation models (DSM/DTM) and stacked relief features. Multi-band satellite imagery is also usable** when you provide the same kind of stack (e.g. RGB with co-registered DSM/DTM where available) on a single grid; manned aerial or other sensors work under the same rules.
+> **Advanced AI system for automatic detection of archaeological structures from multi-band GeoTIFF data. Primarily designed for derivatives built from UAV (drone) nadir imagery—orthophotos, DSM/DTM, and stacked relief channels. Satellite imagery and other aerial/LiDAR sources are also supported when provided in the same multi-band GeoTIFF format.**
 
-This project combines **deep learning** and **classical image processing** methods to detect archaeological traces (tumuli, ditches, mounds, wall remains, etc.) from multi-band GeoTIFF data (RGB, DSM, DTM)—most often from **UAV photogrammetry**, and **also from satellite or other aerial products** when banding and georeferencing match the pipeline.
+This project combines **deep learning** and **classical image processing** methods to detect archaeological traces (tumuli, ditches, mounds, wall remains, etc.) from multi-band GeoTIFF data (RGB, DSM, DTM). Input data is most commonly produced from **UAV photogrammetry**; **satellite imagery or other aerial products** can also be used as long as the band layout and georeferencing are compatible.
 
 ### Current default workflow (repository `config.yaml`)
 
@@ -1383,8 +1383,8 @@ A: Yes, but it will be slower. Prefer classical methods or use small tile size.
 **Q: Which method gives the best results?**  
 A: Generally **fusion** (DL + Classical) gives the best results. However, it varies based on your data quality and region.
 
-**Q: UAV vs satellite—which source is this for?**  
-A: **Priority:** stacks from **UAV (drone) nadir** work (orthomosaic, DSM, DTM, and the derived channels this repo builds). **Satellite imagery is supported too:** if you build or obtain a compatible multi-band GeoTIFF (RGB plus DSM/DTM when your workflow has them, on one aligned grid), you can run the same pipeline. Other sensors and LiDAR-based surfaces work the same way—consistent bands and georeferencing matter more than the platform.
+**Q: UAV vs satellite—which source does this work with?**  
+A: The system is **primarily designed for UAV (drone) nadir imagery** (orthomosaic, DSM, DTM, and the derived channels this repo generates). **Satellite imagery is also supported**—provide a compatible multi-band GeoTIFF (RGB, plus DSM/DTM if available) on an aligned grid and the same pipeline runs. LiDAR-based surfaces and other sensors work the same way. What matters is consistent band structure and georeferencing, not the platform.
 
 ### 🔧 Technical Questions
 

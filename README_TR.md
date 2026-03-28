@@ -5,9 +5,9 @@
 
 İngilizce dokümantasyon: [`README.md`](README.md).
 
-> **LiDAR ve çok bantlı GeoTIFF yığınlarından arkeolojik yapıların otomatik tespiti için gelişmiş yapay zeka sistemi. Öncelik, İHA (insansız hava aracı) nadir görüntülerinden türetilen ürünlerdedir—ortofoto, yüzey modelleri (DSM/DTM) ve yığılmış relief kanalları. Çok bantlı uydu görüntüleri de kullanılabilir:** aynı tür yığını (ör. uygun olduğunda DSM/DTM ile hizalanmış RGB) tek ızgarada GeoTIFF olarak sunduğunuz sürece; diğer hava platformları da aynı koşulla desteklenir.
+> **Çok bantlı GeoTIFF verilerinden arkeolojik yapıların otomatik tespiti için gelişmiş yapay zeka sistemi. Öncelikli olarak İHA (insansız hava aracı) nadir görüntülerinden üretilen türevler üzerinde çalışır—ortofoto, DSM/DTM ve türetilmiş kabartma kanalları. Uydu görüntüleri ve diğer hava/LiDAR kaynakları da aynı çok bantlı GeoTIFF formatında sağlandığında desteklenir.**
 
-Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (tümülüs, hendek, höyük, duvar kalıntıları vb.) tespit etmek için **derin öğrenme** ve **klasik görüntü işleme** yöntemlerini birleştirir. Girdiler çoğunlukla **İHA fotogrametrisinden** üretilir; **uydu veya diğer hava ürünleri** de bantlar ve jeoreferans uygun olduğunda aynı hat üzerinden kullanılabilir.
+Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (tümülüs, hendek, höyük, duvar kalıntıları vb.) tespit etmek için **derin öğrenme** ve **klasik görüntü işleme** yöntemlerini birleştirir. Girdi verileri çoğunlukla **İHA fotogrametrisinden** elde edilir; **uydu görüntüleri veya diğer hava ürünleri** de bant yapısı ve jeoreferans uyumlu olduğu sürece kullanılabilir.
 
 ### Depodaki varsayılan iş akışı (`config.yaml`)
 
@@ -1297,8 +1297,8 @@ C: Evet, ama daha yavaş olacaktır. Klasik yöntemleri tercih edin veya küçü
 **S: Hangi yöntem en iyi sonuçları verir?**  
 C: Genellikle **füzyon** (DL + Klasik) en iyi sonuçları verir. Ancak, veri kalitenize ve bölgenize göre değişir.
 
-**S: İHA mı uydu mu—bu proje hangi kaynak için?**  
-C: **Öncelik İHA’dadır:** **İHA (drone) nadir** çekimlerinden türetilen yığınlar (ortofoto, DSM, DTM ve bu depoda üretilen türev kanallar) birincil kullanım senaryosudur. **Uydu görüntüleri de kullanılabilir:** çok bantlı, tek ızgarada hizalı GeoTIFF (RGB; mümkünse DSM/DTM) sağladığınızda aynı boru hattı çalışır. Diğer sensörler ve LiDAR tabanlı yüzeyler için de esas, tutarlı bantlar ve jeoreferanstır.
+**S: İHA mı uydu mu—hangi kaynakla çalışır?**  
+C: Sistem **öncelikli olarak İHA (drone) nadir görüntüleri** için tasarlanmıştır (ortofoto, DSM, DTM ve bu depoda üretilen türev kanallar). **Uydu görüntüleri de desteklenir**—uyumlu çok bantlı bir GeoTIFF (RGB, varsa DSM/DTM) hizalı bir ızgarada sağlandığında aynı süreç çalışır. LiDAR tabanlı yüzeyler ve diğer sensörler de aynı şekilde kullanılabilir. Önemli olan platform değil, tutarlı bant yapısı ve jeoreferanstır.
 
 ### 🔧 Teknik Sorular
 
