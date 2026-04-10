@@ -186,13 +186,29 @@ class NPZViewerApp:
                 else:
                     axes_flat = axes.flatten()
                 
+                # İsimlerin iyice sadeleşmesi için sadece İngilizce etiketler
+                band_isimleri = {
+                    0: "1: Red",
+                    1: "2: Green",
+                    2: "3: Blue",
+                    3: "4: DSM",
+                    4: "5: DTM",
+                    5: "6: SVF",
+                    6: "7: Pos_Openness",
+                    7: "8: Neg_Openness",
+                    8: "9: LRM",
+                    9: "10: Slope",
+                    10: "11: nDSM",
+                    11: "12: TPI",
+                }
+
                 for i in range(rows * cols):
                     ax = axes_flat[i]
                     if i < num_bands:
                         im = ax.imshow(img[i], cmap='viridis')
-                        ax.set_title(f"Bant {i+1}", fontsize=10)
-                        # Daha temiz görünmesi için renk çubuğunu kaldırdık
-                        # self.fig_bands.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                        b_isim = band_isimleri.get(i, f"Bant {i+1}")
+                        # Kalın fontu kaldırıp boyutu çok daha küçülttük (8)
+                        ax.set_title(b_isim, fontsize=8)
                     ax.axis('off')
                     
             else:
@@ -201,8 +217,9 @@ class NPZViewerApp:
                 ax.set_title(os.path.basename(file_path))
                 ax.axis('off')
                 
-            self.fig_bands.tight_layout()
-            self.fig_rgb.tight_layout()
+            # Grafikler arasına bolca nefes alacak boşluk koyuyoruz (h_pad yatay/dikey boşluk)
+            self.fig_bands.tight_layout(pad=1.5, h_pad=2.5, w_pad=1.0)
+            self.fig_rgb.tight_layout(pad=1.5)
             
             self.canvas_bands.draw()
             self.canvas_rgb.draw()
