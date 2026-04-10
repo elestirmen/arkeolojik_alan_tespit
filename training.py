@@ -288,6 +288,112 @@ def _mask_to_tile_label(
         return 1.0
     return 1.0 if positive_ratio >= threshold else 0.0
 
+
+CLASS_LABEL_NEGATIVE = "Negative"
+CLASS_LABEL_POSITIVE = "Positive"
+CLASS_LABELS: Tuple[str, str] = (
+    CLASS_LABEL_NEGATIVE,
+    CLASS_LABEL_POSITIVE,
+)
+
+
+def _resolve_class_dir(split_dir: Path, label_name: str) -> Path:
+    candidate = split_dir / label_name
+    if candidate.exists():
+        return candidate
+    if not split_dir.exists():
+        return candidate
+    wanted = str(label_name).strip().lower()
+    for child in split_dir.iterdir():
+        if child.is_dir() and child.name.strip().lower() == wanted:
+            return child
+    return candidate
+
+
+def _has_classification_folder_layout(split_dir: Path) -> bool:
+    return any(_resolve_class_dir(split_dir, label).exists() for label in CLASS_LABELS)
+
+
+def _detect_split_layout(
+    split_dir: Path,
+    task_type: Optional[str] = None,
+) -> str:
+    paired = (split_dir / "images").exists() and (split_dir / "masks").exists()
+    class_layout = _has_classification_folder_layout(split_dir)
+
+    if paired and class_layout:
+        raise ValueError(
+            f"Ayni split icinde hem images/masks hem Positive/Negative duzeni bulundu: {split_dir}"
+        )
+    if paired:
+        return "paired"
+    if class_layout:
+        normalized_task = None if task_type is None else str(task_type).strip().lower()
+        if normalized_task == "segmentation":
+            raise ValueError(
+                "Positive/Negative klasor duzeni yalnizca tile_classification icin desteklenir."
+            )
+        return "classification_folders"
+    raise ValueError(
+        "Desteklenen split duzeni bulunamadi. Beklenen yapilardan biri:\n"
+        f"- {split_dir / 'images'} + {split_dir / 'masks'}\n"
+        f"- {_resolve_class_dir(split_dir, CLASS_LABEL_POSITIVE)} / {_resolve_class_dir(split_dir, CLASS_LABEL_NEGATIVE)}"
+    )
+
+
+def _detect_dataset_layout(
+    data_dir: Path,
+    task_type: Optional[str] = None,
+) -> str:
+    train_split = Path(data_dir) / "train"
+    val_split = Path(data_dir) / "val"
+
+    train_layout = _detect_split_layout(train_split, task_type)
+    val_layout = _detect_split_layout(val_split, task_type)
+    if train_layout != val_layout:
+        raise ValueError(
+            "Train ve val splitleri farkli veri duzeni kullaniyor "
+            f"(train={train_layout}, val={val_layout})."
+        )
+    return train_layout
+
+
+def _detect_file_format_in_dirs(directories: Sequence[Path]) -> Optional[str]:
+    found_formats: set[str] = set()
+    checked_dirs: List[Path] = []
+    for directory in directories:
+        checked_dirs.append(directory)
+        has_npz = directory.exists() and any(directory.glob("*.npz"))
+        has_npy = directory.exists() and any(directory.glob("*.npy"))
+        if has_npz and has_npy:
+            raise ValueError(
+                f"Ayni klasorde hem .npz hem .npy bulundu: {directory}. "
+                "Tek bir format kullanin."
+            )
+        if has_npz:
+            found_formats.add("npz")
+        if has_npy:
+            found_formats.add("npy")
+    if len(found_formats) > 1:
+        raise ValueError(
+            "Farkli klasorlerde farkli tile formatlari bulundu: "
+            f"{sorted(found_formats)} | dizinler={checked_dirs}"
+        )
+    if not found_formats:
+        return None
+    return next(iter(found_formats))
+
+
+def _count_positive_tiles_from_class_dirs(
+    split_dir: Path,
+    file_format: str,
+) -> Tuple[int, int]:
+    positive_dir = _resolve_class_dir(split_dir, CLASS_LABEL_POSITIVE)
+    negative_dir = _resolve_class_dir(split_dir, CLASS_LABEL_NEGATIVE)
+    positive = len(list(positive_dir.glob(f"*.{file_format}"))) if positive_dir.exists() else 0
+    negative = len(list(negative_dir.glob(f"*.{file_format}"))) if negative_dir.exists() else 0
+    return positive + negative, positive
+
 class ArchaeologyDataset(Dataset):
     """
     12 kanallı arkeolojik alan tespiti veri seti.
@@ -326,6 +432,11 @@ class ArchaeologyDataset(Dataset):
         if self.task_type not in {"segmentation", "tile_classification"}:
             raise ValueError(f"Desteklenmeyen task_type: {task_type}")
         self.tile_labels: Optional[List[float]] = None
+        self.dataset_layout = _detect_split_layout(self.data_dir, self.task_type)
+        self.class_dirs: Dict[str, Path] = {
+            label: _resolve_class_dir(self.data_dir, label)
+            for label in CLASS_LABELS
+        }
         self._use_deterministic_rotation = bool(
             self.augment and self.deterministic_rotate_step_deg > 0.0
         )
@@ -346,12 +457,35 @@ class ArchaeologyDataset(Dataset):
         
         # Dosyaları listele
         pattern = f"*.{file_format}"
-        self.image_files = sorted(self.images_dir.glob(pattern))
-        
-        if len(self.image_files) == 0:
-            raise ValueError(f"Hiç görüntü dosyası bulunamadı: {self.images_dir}")
+        if self.dataset_layout == "classification_folders":
+            if self.task_type != "tile_classification":
+                raise ValueError(
+                    "Positive/Negative klasor düzeni yalnızca tile_classification için kullanılabilir."
+                )
+            positive_files = (
+                sorted(self.class_dirs[CLASS_LABEL_POSITIVE].glob(pattern))
+                if self.class_dirs[CLASS_LABEL_POSITIVE].exists()
+                else []
+            )
+            negative_files = (
+                sorted(self.class_dirs[CLASS_LABEL_NEGATIVE].glob(pattern))
+                if self.class_dirs[CLASS_LABEL_NEGATIVE].exists()
+                else []
+            )
+            self.image_files = positive_files + negative_files
+            if len(self.image_files) == 0:
+                raise ValueError(
+                    "Hiç tile bulunamadı. Beklenen klasörler: "
+                    f"{self.class_dirs[CLASS_LABEL_POSITIVE]} / "
+                    f"{self.class_dirs[CLASS_LABEL_NEGATIVE]}"
+                )
+            self.tile_labels = [1.0] * len(positive_files) + [0.0] * len(negative_files)
+        else:
+            self.image_files = sorted(self.images_dir.glob(pattern))
+            if len(self.image_files) == 0:
+                raise ValueError(f"Hiç görüntü dosyası bulunamadı: {self.images_dir}")
 
-        if self.task_type == "tile_classification":
+        if self.task_type == "tile_classification" and self.dataset_layout == "paired":
             manifest_labels = _load_tile_label_manifest(self.data_dir)
             labels: List[float] = []
             missing_manifest_label = False
@@ -390,14 +524,20 @@ class ArchaeologyDataset(Dataset):
         total_count = len(self)
         if self._use_deterministic_rotation and self._augmentation_multiplier > 1:
             LOGGER.info(
-                "Dataset yuklendi: %d temel ornek, %d aci ile %d ornek (%s)",
+                "Dataset yuklendi: %d temel ornek, %d aci ile %d ornek (%s, layout=%s)",
                 base_count,
                 self._augmentation_multiplier,
                 total_count,
                 data_dir,
+                self.dataset_layout,
             )
         else:
-            LOGGER.info("Dataset yuklendi: %d ornek (%s)", total_count, data_dir)
+            LOGGER.info(
+                "Dataset yuklendi: %d ornek (%s, layout=%s)",
+                total_count,
+                data_dir,
+                self.dataset_layout,
+            )
     
     def __len__(self) -> int:
         return len(self.image_files) * self._augmentation_multiplier
@@ -426,12 +566,7 @@ class ArchaeologyDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         base_idx, rotation_angle = self._resolve_sample_index(idx)
         img_path = self.image_files[base_idx]
-        mask_path = self.masks_dir / img_path.name
 
-        if not mask_path.exists():
-            raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
-        
-        # Dosyaları oku
         if self.file_format == "npy":
             image = np.load(img_path)  # (C, H, W)
         else:  # npz
@@ -451,6 +586,10 @@ class ArchaeologyDataset(Dataset):
             label = np.array([self.tile_labels[base_idx]], dtype=np.float32)
             label = torch.from_numpy(label).float()
             return image, label
+
+        mask_path = self.masks_dir / img_path.name
+        if not mask_path.exists():
+            raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
 
         if self.file_format == "npy":
             mask = np.load(mask_path)  # (H, W)
@@ -1000,36 +1139,34 @@ def _publish_active_artifacts(
 
 def _detect_split_file_format(images_dir: Path) -> Optional[str]:
     """Detect file format for a split directory and reject mixed extensions."""
-    has_npz = any(images_dir.glob("*.npz"))
-    has_npy = any(images_dir.glob("*.npy"))
-
-    if has_npz and has_npy:
-        raise ValueError(
-            f"Ayni klasorde hem .npz hem .npy bulundu: {images_dir}. "
-            "Tek bir format kullanin."
-        )
-    if has_npz:
-        return "npz"
-    if has_npy:
-        return "npy"
-    return None
+    return _detect_file_format_in_dirs([images_dir])
 
 
 def _infer_file_format(data_dir: Path) -> str:
     """Egitim verisindeki dosya formatini (npz/npy) tespit eder."""
-    train_images = data_dir / "train" / "images"
-    val_images = data_dir / "val" / "images"
-
-    train_format = _detect_split_file_format(train_images)
-    val_format = _detect_split_file_format(val_images)
+    layout = _detect_dataset_layout(data_dir)
+    if layout == "classification_folders":
+        train_dirs = [_resolve_class_dir(data_dir / "train", label) for label in CLASS_LABELS]
+        val_dirs = [_resolve_class_dir(data_dir / "val", label) for label in CLASS_LABELS]
+        train_format = _detect_file_format_in_dirs(train_dirs)
+        val_format = _detect_file_format_in_dirs(val_dirs)
+        train_target = "train/Positive|Negative"
+        val_target = "val/Positive|Negative"
+    else:
+        train_images = data_dir / "train" / "images"
+        val_images = data_dir / "val" / "images"
+        train_format = _detect_split_file_format(train_images)
+        val_format = _detect_split_file_format(val_images)
+        train_target = str(train_images)
+        val_target = str(val_images)
 
     if train_format is None:
         raise ValueError(
-            f"Desteklenen egitim dosyasi bulunamadi: {train_images} (*.npz / *.npy)"
+            f"Desteklenen egitim dosyasi bulunamadi: {train_target} (*.npz / *.npy)"
         )
     if val_format is None:
         raise ValueError(
-            f"Desteklenen dogrulama dosyasi bulunamadi: {val_images} (*.npz / *.npy)"
+            f"Desteklenen dogrulama dosyasi bulunamadi: {val_target} (*.npz / *.npy)"
         )
     if train_format != val_format:
         raise ValueError(
@@ -2342,13 +2479,28 @@ def main():
     data_dir = Path(args.data)
     if not data_dir.exists():
         print(f"HATA: Veri dizini bulunamadı: {data_dir}")
-        print("\nÖnce egitim_verisi_olusturma.py ile veri oluşturun:")
+        print("\nÖnce veri hazırlama adımını çalıştırın:")
         print(f"  python egitim_verisi_olusturma.py --input kesif_alani.tif --mask ground_truth.tif --output {data_dir}")
+        print(
+            "  veya  python prepare_tile_classification_dataset.py "
+            f"--pair kesif_alani.tif ground_truth.tif --output-dir {data_dir}"
+        )
         sys.exit(1)
-    
-    if not (data_dir / "train" / "images").exists():
-        print(f"HATA: Eğitim verisi bulunamadı: {data_dir / 'train' / 'images'}")
-        print("\negitim_verisi_olusturma.py çıktısını kontrol edin.")
+
+    try:
+        data_layout = _detect_dataset_layout(data_dir, args.task)
+    except ValueError as exc:
+        print(f"HATA: Eğitim veri düzeni algılanamadı:\n{exc}")
+        sys.exit(1)
+
+    if data_layout == "paired":
+        expected_hint = data_dir / "train" / "images"
+    else:
+        expected_hint = data_dir / "train"
+
+    if not expected_hint.exists():
+        print(f"HATA: Eğitim verisi bulunamadı: {expected_hint}")
+        print("\nVeri hazırlama çıktısını kontrol edin.")
         sys.exit(1)
     
     # Metadata'dan kanal sayısını oku
@@ -2391,6 +2543,11 @@ def main():
 
     if manifest_train_counts is not None:
         train_total, train_positive = manifest_train_counts
+    elif data_layout == "classification_folders" and args.task == "tile_classification":
+        train_total, train_positive = _count_positive_tiles_from_class_dirs(
+            data_dir / "train",
+            file_format,
+        )
     else:
         train_total, train_positive = _count_positive_mask_files(
             data_dir / "train" / "masks",
@@ -2400,6 +2557,11 @@ def main():
 
     if manifest_val_counts is not None:
         val_total, val_positive = manifest_val_counts
+    elif data_layout == "classification_folders" and args.task == "tile_classification":
+        val_total, val_positive = _count_positive_tiles_from_class_dirs(
+            data_dir / "val",
+            file_format,
+        )
     else:
         val_total, val_positive = _count_positive_mask_files(
             data_dir / "val" / "masks",
@@ -2409,6 +2571,8 @@ def main():
     if args.task == "tile_classification":
         if manifest_train_counts is not None and manifest_val_counts is not None:
             LOGGER.info("Tile label sayaclari tile_labels.csv manifestinden okundu.")
+        elif data_layout == "classification_folders":
+            LOGGER.info("Tile etiket sayaclari Positive/Negative klasorlerinden okundu.")
         LOGGER.info(
             "Tile etiket dağılımı | train: %d/%d pozitif tile | val: %d/%d pozitif tile",
             train_positive, train_total, val_positive, val_total,

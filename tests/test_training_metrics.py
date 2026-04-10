@@ -96,6 +96,39 @@ def _build_npz_train_dataset(tmp_path: Path, positive_count: int, negative_count
     return ArchaeologyDataset(split_dir, augment=False, file_format="npz")
 
 
+def _build_class_folder_train_dataset(
+    tmp_path: Path,
+    positive_count: int,
+    negative_count: int,
+) -> ArchaeologyDataset:
+    split_dir = tmp_path / "train"
+    (split_dir / "Positive").mkdir(parents=True, exist_ok=True)
+    (split_dir / "Negative").mkdir(parents=True, exist_ok=True)
+
+    image = np.zeros((12, 8, 8), dtype=np.float32)
+    for idx in range(positive_count):
+        np.savez_compressed(split_dir / "Positive" / f"pos_{idx}.npz", image=image)
+    for idx in range(negative_count):
+        np.savez_compressed(split_dir / "Negative" / f"neg_{idx}.npz", image=image)
+
+    return ArchaeologyDataset(
+        split_dir,
+        augment=False,
+        file_format="npz",
+        task_type="tile_classification",
+    )
+
+
+def test_classification_folder_layout_loads_labels_without_masks(tmp_path: Path) -> None:
+    dataset = _build_class_folder_train_dataset(tmp_path, positive_count=2, negative_count=1)
+
+    assert len(dataset) == 3
+    labels = [float(dataset[idx][1].item()) for idx in range(len(dataset))]
+    assert labels.count(1.0) == 2
+    assert labels.count(0.0) == 1
+    assert dataset.tile_labels == [1.0, 1.0, 0.0]
+
+
 def test_train_negative_ratio_sampling_keeps_all_positive_and_target_negative(tmp_path: Path) -> None:
     dataset = _build_npz_train_dataset(tmp_path, positive_count=2, negative_count=5)
 

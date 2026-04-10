@@ -101,14 +101,21 @@ Bu sistem aşağıdaki arkeolojik özellikleri tespit edebilir:
 ```bash
 pip install -r requirements.txt
 
-# 1) 12 kanallı eğitim karoları (CLI), veya egitim_verisi_olusturma.py içindeki CONFIG ile IDE’den çalıştırın
+# 1a) Eski paired düzen (images + masks): segmentation veya geri uyumluluk için
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
   --output training_data
 
-# 2) Eğitim (training.py CONFIG’te varsayılan görev genelde tile_classification)
-python training.py --data training_data --task tile_classification --epochs 50
+# 1b) Doğrudan Positive/Negative klasörleri üreten tile-classification dataset
+python prepare_tile_classification_dataset.py \
+  --pair kesif_alani.tif ground_truth.tif \
+  --output-dir training_data_cls \
+  --sampling-mode selected_regions \
+  --overwrite
+
+# 2) Eğitim (training.py artık iki düzeni de kabul ediyor)
+python training.py --data training_data_cls --task tile_classification --epochs 50
 
 # 3) Çıkarım (config.yaml; checkpoints/active/ yayını eğitim çıktısında özetlenir)
 python archaeo_detect.py

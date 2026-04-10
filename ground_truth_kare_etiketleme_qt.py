@@ -18,17 +18,20 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import math
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
+from rasterio.features import rasterize, shapes
 
 QT_BACKEND = ""
 _pyside_import_error: Optional[Exception] = None
@@ -56,6 +59,7 @@ try:
         QComboBox,
         QDialog,
         QDialogButtonBox,
+        QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
         QGraphicsPixmapItem,
@@ -65,11 +69,13 @@ try:
         QGroupBox,
         QHBoxLayout,
         QLabel,
+        QLineEdit,
         QListWidget,
         QListWidgetItem,
         QMainWindow,
         QMenu,
         QMessageBox,
+        QProgressDialog,
         QPushButton,
         QSlider,
         QSpinBox,
@@ -92,6 +98,7 @@ except ImportError as exc:
             QComboBox,
             QDialog,
             QDialogButtonBox,
+            QDoubleSpinBox,
             QFileDialog,
             QFormLayout,
             QGraphicsPixmapItem,
@@ -101,11 +108,13 @@ except ImportError as exc:
             QGroupBox,
             QHBoxLayout,
             QLabel,
+            QLineEdit,
             QListWidget,
             QListWidgetItem,
             QMainWindow,
             QMenu,
             QMessageBox,
+            QProgressDialog,
             QPushButton,
             QSlider,
             QSpinBox,
@@ -127,6 +136,14 @@ APP_TITLE = "Ground Truth Kare Etiketleme (Qt)"
 OVERLAY_ALPHA = 96
 LAYER_KEY_BASE = "__base__"
 LAYER_KEY_MASK = "__mask__"
+ANNOTATIONS_LAYER_NAME = "annotations"
+DATASET_EXPORT_SCRIPT = "prepare_tile_classification_dataset.py"
+DATASET_DEFAULT_TILE_SIZE = 256
+DATASET_DEFAULT_OVERLAP = 128
+DATASET_DEFAULT_POSITIVE_RATIO = 0.02
+DATASET_DEFAULT_VALID_RATIO = 0.7
+DATASET_DEFAULT_TRAIN_NEG_KEEP = 0.35
+DATASET_DEFAULT_NEG_TO_POS_RATIO = 1.0
 
 # ---------------------------------------------------------------------------
 # Light Fresh Theme Stylesheet
@@ -275,6 +292,19 @@ def stretch_to_uint8(arr: np.ndarray, low: float = 2.0, high: float = 98.0) -> n
     return out
 
 
+def sanitize_name(value: str) -> str:
+    safe = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in value)
+    safe = safe.strip("_")
+    return safe or "source"
+
+
+def parse_int_csv(raw: str, expected_len: Optional[int] = None) -> tuple[int, ...]:
+    parts = tuple(int(part.strip()) for part in str(raw).split(",") if part.strip())
+    if expected_len is not None and len(parts) != expected_len:
+        raise ValueError(f"Beklenen {expected_len} tamsayi, verilen: {raw!r}")
+    return parts
+
+
 def qimage_from_rgb(rgb: np.ndarray) -> QImage:
     h, w, _ = rgb.shape
     img = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
@@ -332,11 +362,109 @@ def preview_to_full_box(
     return x0, y0, x1, y1
 
 
+def trim_process_output(text: str, max_lines: int = 20) -> str:
+    lines = [line.rstrip() for line in str(text).splitlines() if line.strip()]
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+    return "\n".join(lines[-max_lines:])
+
+
+def companion_gpkg_path(mask_path: Path) -> Path:
+    return mask_path.with_suffix(".gpkg")
+
+
+def write_annotations_gpkg(
+    *,
+    gpkg_path: Path,
+    mask: np.ndarray,
+    transform,
+    crs,
+    positive_value: int,
+    negative_value: int,
+    source_raster_path: Path,
+    mask_path: Path,
+) -> Optional[Path]:
+    selected = (mask.astype(np.uint8, copy=False) != np.uint8(negative_value)).astype(np.uint8)
+    if int(np.count_nonzero(selected)) <= 0:
+        if gpkg_path.exists():
+            gpkg_path.unlink(missing_ok=True)
+        return None
+
+    import geopandas as gpd
+    from shapely.geometry import shape as shapely_shape
+
+    features: list[dict[str, object]] = []
+    annotation_id = 1
+    for geom, value in shapes(selected, mask=selected.astype(bool), transform=transform):
+        if int(value) != 1:
+            continue
+        polygon = shapely_shape(geom)
+        if polygon.is_empty:
+            continue
+        features.append(
+            {
+                "annotation_id": int(annotation_id),
+                "class_name": "Positive",
+                "class_value": int(positive_value),
+                "source_raster": str(source_raster_path),
+                "mask_path": str(mask_path),
+                "geometry": polygon,
+            }
+        )
+        annotation_id += 1
+
+    gpkg_path.parent.mkdir(parents=True, exist_ok=True)
+    if gpkg_path.exists():
+        gpkg_path.unlink(missing_ok=True)
+    gdf = gpd.GeoDataFrame(features, geometry="geometry", crs=crs)
+    gdf.to_file(gpkg_path, layer=ANNOTATIONS_LAYER_NAME, driver="GPKG")
+    return gpkg_path
+
+
+def load_mask_from_annotations_gpkg(
+    *,
+    gpkg_path: Path,
+    width: int,
+    height: int,
+    transform,
+    crs,
+    positive_value: int,
+    negative_value: int,
+) -> np.ndarray:
+    import geopandas as gpd
+
+    try:
+        gdf = gpd.read_file(gpkg_path, layer=ANNOTATIONS_LAYER_NAME)
+    except Exception:
+        gdf = gpd.read_file(gpkg_path)
+    if gdf.empty:
+        return np.full((height, width), np.uint8(negative_value), dtype=np.uint8)
+
+    if crs is not None and gdf.crs is not None and str(gdf.crs) != str(crs):
+        gdf = gdf.to_crs(crs)
+
+    geometries = [geom for geom in gdf.geometry if geom is not None and not geom.is_empty]
+    if not geometries:
+        return np.full((height, width), np.uint8(negative_value), dtype=np.uint8)
+
+    out = np.full((height, width), np.uint8(negative_value), dtype=np.uint8)
+    burned = rasterize(
+        ((geom, int(positive_value)) for geom in geometries),
+        out_shape=(height, width),
+        transform=transform,
+        fill=int(negative_value),
+        dtype="uint8",
+    )
+    out[:, :] = burned.astype(np.uint8, copy=False)
+    return out
+
+
 @dataclass
 class AppConfig:
     input_path: Path
     output_path: Path
     existing_mask: Optional[Path]
+    existing_labels: Optional[Path]
     preview_max_size: int
     bands: tuple[int, int, int]
     positive_value: int
@@ -378,7 +506,7 @@ class Session:
 
         pos_val = np.uint8(cfg.positive_value)
         neg_val = np.uint8(cfg.negative_value)
-        self.mask_full = self._load_initial_mask(cfg.existing_mask)
+        self.mask_full = self._load_initial_mask(cfg.existing_mask, cfg.existing_labels)
         selected_preview = cv2.resize(
             (self.mask_full != neg_val).astype(np.uint8),
             (self.preview_w, self.preview_h),
@@ -419,9 +547,23 @@ class Session:
         rgb = _read_rgb_preview(self.src, bands, pw, ph)
         return rgb, float(w) / float(pw), float(h) / float(ph)
 
-    def _load_initial_mask(self, mask_path: Optional[Path]) -> np.ndarray:
+    def _load_initial_mask(
+        self,
+        mask_path: Optional[Path],
+        labels_path: Optional[Path],
+    ) -> np.ndarray:
         neg_val = np.uint8(self.cfg.negative_value)
         pos_val = np.uint8(self.cfg.positive_value)
+        if labels_path is not None and labels_path.exists():
+            return load_mask_from_annotations_gpkg(
+                gpkg_path=labels_path,
+                width=self.full_w,
+                height=self.full_h,
+                transform=self.src.transform,
+                crs=self.src.crs,
+                positive_value=int(pos_val),
+                negative_value=int(neg_val),
+            )
         if mask_path is None:
             return np.full((self.full_h, self.full_w), neg_val, dtype=np.uint8)
         with rasterio.open(mask_path) as ds:
@@ -605,7 +747,20 @@ class Session:
         path.parent.mkdir(parents=True, exist_ok=True)
         with rasterio.open(path, "w", **profile) as dst:
             dst.write(self.mask_full[np.newaxis, :, :].astype(np.uint8, copy=False))
+        gpkg_path = companion_gpkg_path(path)
+        write_annotations_gpkg(
+            gpkg_path=gpkg_path,
+            mask=self.mask_full,
+            transform=self.src.transform,
+            crs=self.src.crs,
+            positive_value=int(self.cfg.positive_value),
+            negative_value=int(self.cfg.negative_value),
+            source_raster_path=self.cfg.input_path,
+            mask_path=path,
+        )
         self.cfg.output_path = path
+        self.cfg.existing_mask = path
+        self.cfg.existing_labels = gpkg_path if gpkg_path.exists() else None
         self.dirty = False
 
     def stats(self) -> tuple[int, int, float]:
@@ -915,6 +1070,183 @@ class MaskValuesDialog(QDialog):
         return int(self.spin_positive.value()), int(self.spin_negative.value())
 
 
+class TileDatasetExportDialog(QDialog):
+    """Pozitif/Negatif tile dataset export ayarlari."""
+
+    def __init__(
+        self,
+        *,
+        default_output_dir: Path,
+        default_bands_raw: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Tile Dataset Export")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(APP_STYLE)
+
+        layout = QVBoxLayout(self)
+
+        info = QLabel(
+            "Mevcut secimler, Positive/Negative klasor yapisina sahip "
+            "tile-classification datasetine donusturulecek."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QFormLayout()
+
+        output_wrap = QWidget(self)
+        output_row = QHBoxLayout(output_wrap)
+        output_row.setContentsMargins(0, 0, 0, 0)
+        output_row.setSpacing(6)
+        self.edit_output_dir = QLineEdit(str(default_output_dir))
+        self.edit_output_dir.setPlaceholderText("Dataset cikti klasoru")
+        output_row.addWidget(self.edit_output_dir, 1)
+        self.btn_browse_output = QPushButton("Sec...")
+        self.btn_browse_output.clicked.connect(self._choose_output_dir)
+        output_row.addWidget(self.btn_browse_output)
+        form.addRow("Cikti klasoru:", output_wrap)
+
+        self.edit_model_bands = QLineEdit(default_bands_raw)
+        self.edit_model_bands.setPlaceholderText("1,2,3,4,5")
+        self.edit_model_bands.setToolTip("Model bantlari: R,G,B,DSM,DTM")
+        form.addRow("Model bantlari:", self.edit_model_bands)
+
+        self.spin_tile_size = QSpinBox(self)
+        self.spin_tile_size.setRange(64, 4096)
+        self.spin_tile_size.setValue(DATASET_DEFAULT_TILE_SIZE)
+        self.spin_tile_size.valueChanged.connect(self._sync_overlap_range)
+        form.addRow("Tile boyutu:", self.spin_tile_size)
+
+        self.spin_overlap = QSpinBox(self)
+        self.spin_overlap.setRange(0, DATASET_DEFAULT_TILE_SIZE - 1)
+        self.spin_overlap.setValue(DATASET_DEFAULT_OVERLAP)
+        form.addRow("Overlap:", self.spin_overlap)
+
+        self.combo_sampling_mode = QComboBox(self)
+        self.combo_sampling_mode.addItem("Secimlerden tile + rastgele negatif", "selected_regions")
+        self.combo_sampling_mode.addItem("Tum rasterda kayan pencere", "full_grid")
+        form.addRow("Uretim modu:", self.combo_sampling_mode)
+
+        self.spin_positive_ratio = QDoubleSpinBox(self)
+        self.spin_positive_ratio.setRange(0.0, 1.0)
+        self.spin_positive_ratio.setDecimals(4)
+        self.spin_positive_ratio.setSingleStep(0.005)
+        self.spin_positive_ratio.setValue(DATASET_DEFAULT_POSITIVE_RATIO)
+        form.addRow("Pozitif esigi:", self.spin_positive_ratio)
+
+        self.spin_negative_to_positive = QDoubleSpinBox(self)
+        self.spin_negative_to_positive.setRange(0.0, 20.0)
+        self.spin_negative_to_positive.setDecimals(3)
+        self.spin_negative_to_positive.setSingleStep(0.25)
+        self.spin_negative_to_positive.setValue(DATASET_DEFAULT_NEG_TO_POS_RATIO)
+        form.addRow("Neg/Poz oran:", self.spin_negative_to_positive)
+
+        self.spin_valid_ratio = QDoubleSpinBox(self)
+        self.spin_valid_ratio.setRange(0.0, 1.0)
+        self.spin_valid_ratio.setDecimals(3)
+        self.spin_valid_ratio.setSingleStep(0.05)
+        self.spin_valid_ratio.setValue(DATASET_DEFAULT_VALID_RATIO)
+        form.addRow("Min. gecerli oran:", self.spin_valid_ratio)
+
+        self.spin_train_negative_keep = QDoubleSpinBox(self)
+        self.spin_train_negative_keep.setRange(0.0, 1.0)
+        self.spin_train_negative_keep.setDecimals(3)
+        self.spin_train_negative_keep.setSingleStep(0.05)
+        self.spin_train_negative_keep.setValue(DATASET_DEFAULT_TRAIN_NEG_KEEP)
+        form.addRow("Train negatif tut:", self.spin_train_negative_keep)
+
+        self.combo_overwrite = QComboBox(self)
+        self.combo_overwrite.addItem("Evet - klasoru temizle", True)
+        self.combo_overwrite.addItem("Hayir - klasor bos olmali", False)
+        form.addRow("Uzerine yaz:", self.combo_overwrite)
+
+        layout.addLayout(form)
+
+        hint = QLabel(
+            "Onerilen baslangic: tile=256, overlap=128, pozitif esigi=0.02.\n"
+            "Secimlerden tile modu genelde daha kontrollu baslangic verir."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #475569; font-size: 12px;")
+        layout.addWidget(hint)
+
+        self._validation = QLabel()
+        self._validation.setStyleSheet("color: #b91c1c;")
+        layout.addWidget(self._validation)
+
+        self._btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._btn_box.accepted.connect(self.accept)
+        self._btn_box.rejected.connect(self.reject)
+        layout.addWidget(self._btn_box)
+
+        self.edit_output_dir.textChanged.connect(self._sync_validation)
+        self.edit_model_bands.textChanged.connect(self._sync_validation)
+        self.spin_overlap.valueChanged.connect(self._sync_validation)
+        self.spin_tile_size.valueChanged.connect(self._sync_validation)
+        self.combo_sampling_mode.currentIndexChanged.connect(self._sync_mode_ui)
+        self._sync_overlap_range()
+        self._sync_mode_ui()
+        self._sync_validation()
+
+    def _choose_output_dir(self) -> None:
+        current = self.edit_output_dir.text().strip() or str(Path.cwd())
+        chosen = QFileDialog.getExistingDirectory(self, "Cikti klasorunu sec", current)
+        if chosen:
+            self.edit_output_dir.setText(chosen)
+
+    def _sync_overlap_range(self) -> None:
+        tile_size = max(1, int(self.spin_tile_size.value()))
+        current = int(self.spin_overlap.value())
+        self.spin_overlap.setMaximum(max(0, tile_size - 1))
+        if current >= tile_size:
+            self.spin_overlap.setValue(max(0, tile_size - 1))
+
+    def _sync_mode_ui(self) -> None:
+        selected_mode = str(self.combo_sampling_mode.currentData())
+        is_selected_regions = selected_mode == "selected_regions"
+        self.spin_negative_to_positive.setEnabled(is_selected_regions)
+        self.spin_train_negative_keep.setEnabled(not is_selected_regions)
+
+    def _sync_validation(self) -> None:
+        output_ok = bool(self.edit_output_dir.text().strip())
+        overlap_ok = int(self.spin_overlap.value()) < int(self.spin_tile_size.value())
+        try:
+            bands = parse_int_csv(self.edit_model_bands.text().strip(), expected_len=5)
+            bands_ok = all(int(v) > 0 for v in bands)
+        except Exception:
+            bands_ok = False
+        ok_btn = self._btn_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setEnabled(output_ok and overlap_ok and bands_ok)
+        if not output_ok:
+            self._validation.setText("Bir cikti klasoru belirtin.")
+        elif not bands_ok:
+            self._validation.setText("Model bantlari 5 tamsayi olmali: R,G,B,DSM,DTM")
+        elif not overlap_ok:
+            self._validation.setText("Overlap, tile boyutundan kucuk olmali.")
+        else:
+            self._validation.setText("")
+
+    def values(self) -> dict[str, object]:
+        output_dir = Path(self.edit_output_dir.text().strip()).expanduser().resolve()
+        return {
+            "output_dir": output_dir,
+            "bands_raw": self.edit_model_bands.text().strip(),
+            "tile_size": int(self.spin_tile_size.value()),
+            "overlap": int(self.spin_overlap.value()),
+            "sampling_mode": str(self.combo_sampling_mode.currentData()),
+            "positive_ratio_threshold": float(self.spin_positive_ratio.value()),
+            "negative_to_positive_ratio": float(self.spin_negative_to_positive.value()),
+            "valid_ratio_threshold": float(self.spin_valid_ratio.value()),
+            "train_negative_keep_ratio": float(self.spin_train_negative_keep.value()),
+            "overwrite": bool(self.combo_overwrite.currentData()),
+        }
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -931,6 +1263,7 @@ class MainWindow(QMainWindow):
         self.square_mode = bool(square_mode)
         self.preview_max_size = int(preview_max_size)
         self.bands_raw = bands_raw
+        self.model_bands_raw = "1,2,3,4,5"
         self.positive_value = int(positive_value)
         self.negative_value = int(negative_value)
 
@@ -1456,8 +1789,10 @@ class MainWindow(QMainWindow):
 
     def _set_actions_enabled(self, enabled: bool) -> None:
         for act in (
+            self.act_open_labels,
             self.act_save,
             self.act_save_as,
+            self.act_export_dataset,
             self.act_add_layer,
             self.act_remove_layer,
             self.act_draw,
@@ -1509,6 +1844,11 @@ class MainWindow(QMainWindow):
         self.act_open.triggered.connect(self.open_input)
         tb.addAction(self.act_open)
 
+        self.act_open_labels = QAction("🗂️ Etiket Aç", self)
+        self.act_open_labels.setToolTip("Mevcut maske veya GPKG etiketten devam et")
+        self.act_open_labels.triggered.connect(self.open_existing_labels)
+        tb.addAction(self.act_open_labels)
+
         self.act_save = QAction("💾 Kaydet", self)
         self.act_save.setToolTip("Maskeyi kaydet  (Ctrl+S)")
         self.act_save.setShortcut(QKeySequence.StandardKey.Save)
@@ -1520,6 +1860,11 @@ class MainWindow(QMainWindow):
         self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.act_save_as.triggered.connect(self.save_as)
         tb.addAction(self.act_save_as)
+
+        self.act_export_dataset = QAction("🧩 Tile Dataset", self)
+        self.act_export_dataset.setToolTip("Positive/Negative tile dataset uret")
+        self.act_export_dataset.triggered.connect(self.open_tile_dataset_export_dialog)
+        tb.addAction(self.act_export_dataset)
 
         self.act_add_layer = QAction("🧱 Katman Ekle", self)
         self.act_add_layer.setToolTip("Ek bir raster katman ekle")
@@ -1642,6 +1987,201 @@ class MainWindow(QMainWindow):
         self._status_undo = QLabel()
         sb.addPermanentWidget(self._status_undo)
 
+    def _show_busy_indicator(
+        self,
+        text: str,
+        *,
+        maximum: int = 0,
+        value: int = 0,
+    ) -> QProgressDialog:
+        dlg = QProgressDialog(text, "", 0, int(maximum), self)
+        dlg.setWindowTitle(APP_TITLE)
+        dlg.setCancelButton(None)
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(int(value))
+        dlg.show()
+        QApplication.processEvents()
+        return dlg
+
+    def _update_busy_indicator(
+        self,
+        dlg: Optional[QProgressDialog],
+        *,
+        text: str,
+        value: int,
+        maximum: int,
+    ) -> None:
+        if dlg is None:
+            return
+        dlg.setMaximum(int(maximum))
+        dlg.setLabelText(str(text))
+        dlg.setValue(int(value))
+        QApplication.processEvents()
+
+    def _hide_busy_indicator(self, dlg: Optional[QProgressDialog]) -> None:
+        if dlg is None:
+            return
+        dlg.close()
+        dlg.deleteLater()
+        QApplication.processEvents()
+
+    def _parse_export_progress_payload(self, line: str) -> Optional[dict[str, object]]:
+        prefix = "PROGRESS_JSON\t"
+        if not line.startswith(prefix):
+            return None
+        try:
+            payload = json.loads(line[len(prefix):].strip())
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    def _default_dataset_output_dir(self) -> Path:
+        base_dir = Path(__file__).resolve().parent
+        if self.s is None:
+            return base_dir / "training_data_classification"
+        return base_dir / f"training_data_classification_{sanitize_name(self.s.cfg.input_path.stem)}"
+
+    def _ensure_mask_saved_for_export(self) -> bool:
+        if self.s is None:
+            return False
+        try:
+            gpkg_path = companion_gpkg_path(self.s.cfg.output_path)
+            if self.s.dirty or not self.s.cfg.output_path.exists() or not gpkg_path.exists():
+                self.s.save(self.s.cfg.output_path)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Export oncesi etiketler kaydedilemedi:\n{exc}")
+            return False
+        self.update_status()
+        return True
+
+    def _build_dataset_export_command(self, options: dict[str, object]) -> list[str]:
+        if self.s is None:
+            raise RuntimeError("Aktif oturum yok")
+        script_path = Path(__file__).resolve().with_name(DATASET_EXPORT_SCRIPT)
+        if not script_path.exists():
+            raise FileNotFoundError(f"Dataset export script bulunamadi: {script_path}")
+        output_dir = Path(options["output_dir"]).expanduser().resolve()
+        cmd = [
+            sys.executable,
+            "-u",
+            str(script_path),
+            "--pair",
+            str(self.s.cfg.input_path),
+            str(self.s.cfg.output_path),
+            "--output-dir",
+            str(output_dir),
+            "--tile-size",
+            str(int(options["tile_size"])),
+            "--overlap",
+            str(int(options["overlap"])),
+            "--bands",
+            str(options["bands_raw"]),
+            "--sampling-mode",
+            str(options["sampling_mode"]),
+            "--positive-ratio-threshold",
+            str(float(options["positive_ratio_threshold"])),
+            "--negative-to-positive-ratio",
+            str(float(options["negative_to_positive_ratio"])),
+            "--valid-ratio-threshold",
+            str(float(options["valid_ratio_threshold"])),
+            "--train-negative-keep-ratio",
+            str(float(options["train_negative_keep_ratio"])),
+        ]
+        if bool(options["overwrite"]):
+            cmd.append("--overwrite")
+        return cmd
+
+    def open_tile_dataset_export_dialog(self) -> None:
+        if self.s is None:
+            QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
+            return
+        dlg = TileDatasetExportDialog(
+            default_output_dir=self._default_dataset_output_dir(),
+            default_bands_raw=self.model_bands_raw,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dlg.values()
+        self.model_bands_raw = str(values["bands_raw"])
+        self.export_tile_dataset(values)
+
+    def export_tile_dataset(self, options: dict[str, object]) -> None:
+        if self.s is None:
+            QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
+            return
+        if not self._ensure_mask_saved_for_export():
+            return
+
+        try:
+            cmd = self._build_dataset_export_command(options)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Export komutu hazirlanamadi:\n{exc}")
+            return
+
+        busy = self._show_busy_indicator("Tile dataset hazirlaniyor...", maximum=100, value=0)
+        output_lines: list[str] = []
+        try:
+            process = subprocess.Popen(
+                cmd,
+                text=True,
+                cwd=str(Path(__file__).resolve().parent),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+            )
+        except Exception as exc:
+            self._hide_busy_indicator(busy)
+            QMessageBox.critical(self, APP_TITLE, f"Dataset export baslatilamadi:\n{exc}")
+            return
+
+        try:
+            if process.stdout is not None:
+                for raw_line in process.stdout:
+                    line = raw_line.rstrip()
+                    payload = self._parse_export_progress_payload(line)
+                    if payload is not None:
+                        current = int(payload.get("current", 0))
+                        total = max(1, int(payload.get("total", 1)))
+                        pct = int(round((100.0 * current) / total))
+                        self._update_busy_indicator(
+                            busy,
+                            text=str(payload.get("message", "Islem suruyor...")),
+                            value=pct,
+                            maximum=100,
+                        )
+                        continue
+                    if line.strip():
+                        output_lines.append(line)
+                        self.statusBar().showMessage(trim_process_output("\n".join(output_lines), max_lines=1))
+                        QApplication.processEvents()
+            result_code = int(process.wait())
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+
+        output_dir = Path(options["output_dir"]).expanduser().resolve()
+        details = trim_process_output("\n".join(output_lines))
+        self._hide_busy_indicator(busy)
+        if result_code != 0:
+            message = f"Dataset export basarisiz oldu.\n\nCikti klasoru:\n{output_dir}"
+            if details:
+                message += f"\n\nSon log satirlari:\n{details}"
+            QMessageBox.critical(self, APP_TITLE, message)
+            return
+
+        message = (
+            "Tile dataset hazirlandi.\n\n"
+            f"Maske:\n{self.s.cfg.output_path}\n\n"
+            f"Dataset klasoru:\n{output_dir}"
+        )
+        if details:
+            message += f"\n\nOzet:\n{details}"
+        QMessageBox.information(self, APP_TITLE, message)
+
     def _confirm_save_if_dirty(self) -> bool:
         if self.s is None or not self.s.dirty:
             return True
@@ -1692,11 +2232,38 @@ class MainWindow(QMainWindow):
         self.bands_raw = selected_bands
         self.load_input(input_path)
 
+    def open_existing_labels(self) -> None:
+        if self.s is None:
+            QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
+            return
+        if not self._confirm_save_if_dirty():
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Mevcut etiket dosyasini sec",
+            str(self.s.cfg.output_path.parent),
+            "Etiket Dosyalari (*.gpkg *.tif *.tiff);;GeoPackage (*.gpkg);;GeoTIFF (*.tif *.tiff)",
+        )
+        if not path:
+            return
+        label_path = Path(path).expanduser()
+        suffix = label_path.suffix.lower()
+        existing_mask = label_path if suffix in {".tif", ".tiff"} else None
+        existing_labels = label_path if suffix == ".gpkg" else None
+        self.load_input(
+            self.s.cfg.input_path,
+            output_path=self.s.cfg.output_path,
+            existing_mask=existing_mask,
+            existing_labels=existing_labels,
+        )
+
     def load_input(
         self,
         input_path: Path,
         output_path: Optional[Path] = None,
         existing_mask: Optional[Path] = None,
+        existing_labels: Optional[Path] = None,
     ) -> bool:
         input_path = input_path.expanduser()
         if not input_path.exists():
@@ -1708,8 +2275,20 @@ class MainWindow(QMainWindow):
             out_path = out_path.with_suffix(".tif")
 
         mask_path = existing_mask.expanduser() if existing_mask is not None else None
+        labels_path = existing_labels.expanduser() if existing_labels is not None else None
+
+        if mask_path is None and out_path.exists():
+            mask_path = out_path
+        if labels_path is None:
+            auto_gpkg = companion_gpkg_path(out_path)
+            if auto_gpkg.exists():
+                labels_path = auto_gpkg
+
         if mask_path is not None and not mask_path.exists():
             QMessageBox.critical(self, APP_TITLE, f"Mevcut maske dosyasi bulunamadi:\n{mask_path}")
+            return False
+        if labels_path is not None and not labels_path.exists():
+            QMessageBox.critical(self, APP_TITLE, f"Mevcut etiket GPKG dosyasi bulunamadi:\n{labels_path}")
             return False
 
         try:
@@ -1723,6 +2302,7 @@ class MainWindow(QMainWindow):
             input_path=input_path,
             output_path=out_path,
             existing_mask=mask_path,
+            existing_labels=labels_path,
             preview_max_size=self.preview_max_size,
             bands=bands,
             positive_value=self.positive_value,
@@ -1955,6 +2535,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--input", "-i", type=str, default="")
     p.add_argument("--output", "-o", type=str, default="")
     p.add_argument("--existing-mask", type=str, default="")
+    p.add_argument("--existing-labels", type=str, default="")
     p.add_argument("--preview-max-size", type=int, default=0)
     p.add_argument("--bands", type=str, default="1,2,3")
     p.add_argument("--positive-value", type=int, default=1)
@@ -1999,7 +2580,13 @@ def main() -> int:
         if output_path.suffix == "":
             output_path = output_path.with_suffix(".tif")
         existing_mask = Path(args.existing_mask).expanduser() if args.existing_mask else None
-        if not win.load_input(input_path, output_path=output_path, existing_mask=existing_mask):
+        existing_labels = Path(args.existing_labels).expanduser() if args.existing_labels else None
+        if not win.load_input(
+            input_path,
+            output_path=output_path,
+            existing_mask=existing_mask,
+            existing_labels=existing_labels,
+        ):
             return 1
 
     win.show()

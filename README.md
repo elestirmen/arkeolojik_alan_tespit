@@ -102,14 +102,21 @@ This system can detect the following archaeological features:
 ```bash
 pip install -r requirements.txt
 
-# 1) Build 12-channel tiles (CLI), or set paths in CONFIG inside egitim_verisi_olusturma.py and run from the IDE
+# 1a) Legacy paired tiles (images + masks) for segmentation or backward compatibility
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
   --output training_data
 
-# 2) Train (tile classification is the default in training.py CONFIG / repo profile)
-python training.py --data training_data --task tile_classification --epochs 50
+# 1b) Direct tile-classification dataset with explicit Positive/Negative folders
+python prepare_tile_classification_dataset.py \
+  --pair kesif_alani.tif ground_truth.tif \
+  --output-dir training_data_cls \
+  --sampling-mode selected_regions \
+  --overwrite
+
+# 2) Train (training.py now accepts both layouts)
+python training.py --data training_data_cls --task tile_classification --epochs 50
 
 # 3) Inference (uses config.yaml; publishes to checkpoints/active/ are described in training output)
 python archaeo_detect.py

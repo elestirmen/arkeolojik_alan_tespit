@@ -2320,6 +2320,8 @@ def load_training_metadata_hints(metadata_path: Path) -> Dict[str, Any]:
 
 
 def _canonical_bands_string(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(part).strip() for part in value if str(part).strip())
     return ",".join(part.strip() for part in str(value).split(",") if part.strip())
 
 
