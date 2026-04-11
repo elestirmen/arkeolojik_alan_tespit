@@ -26,10 +26,12 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 import shutil
 import sys
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -42,9 +44,16 @@ from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
 
 try:
     from archaeo_detect import (
+        PrecomputedDerivatives,
+        build_derivative_raster_cache,
         compute_derivatives_with_rvt,
         compute_ndsm,
         compute_tpi_multiscale,
+        full_raster_cache_precompute_ok,
+        get_cache_path,
+        get_derivative_raster_cache_paths,
+        load_derivative_raster_cache_info,
+        precompute_derivatives,
         robust_norm,
         stack_channels,
     )
@@ -71,6 +80,10 @@ CONFIG = {
     "train_negative_max": None,
     "normalize": True,
     "format": "npz",
+    "num_workers": max(1, min(8, (os.cpu_count() or 1) // 2)),
+    "derivative_cache_mode": "auto",
+    "derivative_cache_dir": "",
+    "recalculate_derivative_cache": False,
     "tile_prefix": "",
     "seed": 42,
     "overwrite": False,
@@ -89,6 +102,18 @@ SAMPLING_MODES = (
     SAMPLING_MODE_FULL_GRID,
     SAMPLING_MODE_SELECTED_REGIONS,
 )
+
+_SAVE_TILE_WORKER_CONTEXT: Dict[str, object] = {}
+
+
+@dataclass
+class PreparedDerivativeCache:
+    mode: str = "none"
+    location: Optional[str] = None
+    precomputed: Optional[PrecomputedDerivatives] = None
+    raster_cache_tif: Optional[Path] = None
+    raster_cache_meta: Optional[Path] = None
+    raster_band_map: Optional[Dict[str, int]] = None
 
 
 def emit_progress(*, phase: str, current: int, total: int, message: str) -> None:
@@ -330,6 +355,24 @@ def parse_args() -> argparse.Namespace:
         default=bool(CONFIG["normalize"]),
     )
     parser.add_argument("--format", choices=("npz", "npy"), default=str(CONFIG["format"]))
+    parser.add_argument("--num-workers", type=int, default=int(CONFIG["num_workers"]))
+    parser.add_argument(
+        "--derivative-cache-mode",
+        choices=("none", "auto", "npz", "raster"),
+        default=str(CONFIG["derivative_cache_mode"]),
+    )
+    parser.add_argument(
+        "--derivative-cache-dir",
+        type=str,
+        default=str(CONFIG["derivative_cache_dir"]),
+        help="Bos birakilirsa cache, her girdi rasterinin yanindaki 'cache/' klasorune yazilir.",
+    )
+    parser.add_argument(
+        "--recalculate-derivative-cache",
+        action=argparse.BooleanOptionalAction,
+        default=bool(CONFIG["recalculate_derivative_cache"]),
+        help="Mevcut derivative cache varsa yeniden olustur.",
+    )
     parser.add_argument("--tile-prefix", type=str, default=str(CONFIG["tile_prefix"]))
     parser.add_argument("--seed", type=int, default=int(CONFIG["seed"]))
     parser.add_argument(
@@ -388,6 +431,8 @@ def validate_args(args: argparse.Namespace) -> None:
         )
     if int(args.seed) < 0:
         errors.append(f"seed >= 0 olmali, verilen: {args.seed}")
+    if int(args.num_workers) < 1:
+        errors.append(f"num_workers >= 1 olmali, verilen: {args.num_workers}")
     if errors:
         raise ValueError("Arguman dogrulama hatalari:\n- " + "\n- ".join(errors))
 
@@ -648,10 +693,123 @@ def collect_tile_records(
         "train_negative_max": None if args.train_negative_max is None else int(args.train_negative_max),
         "normalize": bool(args.normalize),
         "save_format": str(args.format),
+        "num_workers": int(args.num_workers),
+        "derivative_cache_mode": str(args.derivative_cache_mode),
+        "derivative_cache_dir": str(args.derivative_cache_dir).strip(),
+        "recalculate_derivative_cache": bool(args.recalculate_derivative_cache),
         "sampling_mode": str(args.sampling_mode),
         "sources": source_summaries,
     }
     return all_records, metadata
+
+
+def resolve_derivative_cache_dir(args: argparse.Namespace, raster_path: Path) -> Path:
+    raw = str(getattr(args, "derivative_cache_dir", "")).strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return raster_path.resolve().parent / "cache"
+
+
+def prepare_derivative_cache_for_source(
+    *,
+    pair: SourcePair,
+    band_idx: Sequence[int],
+    tpi_radii: Sequence[int],
+    args: argparse.Namespace,
+) -> PreparedDerivativeCache:
+    cache_mode = str(getattr(args, "derivative_cache_mode", "none")).strip().lower()
+    if cache_mode == "none":
+        return PreparedDerivativeCache(mode="none")
+
+    cache_dir = resolve_derivative_cache_dir(args, pair.raster_path)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    enable_curvature = False
+    enable_tpi = True
+    recalculate = bool(getattr(args, "recalculate_derivative_cache", False))
+
+    if cache_mode in ("auto", "npz"):
+        precompute_ok, reason = full_raster_cache_precompute_ok(
+            pair.raster_path,
+            band_idx,
+            enable_curvature=enable_curvature,
+            enable_tpi=enable_tpi,
+        )
+        if precompute_ok:
+            cache_path = get_cache_path(pair.raster_path, str(cache_dir))
+            precomputed = precompute_derivatives(
+                input_path=pair.raster_path,
+                band_idx=band_idx,
+                use_cache=True,
+                cache_path=cache_path,
+                recalculate=recalculate,
+                enable_curvature=enable_curvature,
+                enable_tpi=enable_tpi,
+                tpi_radii=tuple(int(v) for v in tpi_radii),
+            )
+            if precomputed is not None:
+                return PreparedDerivativeCache(
+                    mode="npz",
+                    location=str(cache_path),
+                    precomputed=precomputed,
+                )
+        elif reason:
+            print(f"BILGI: {reason}", flush=True)
+
+    cache_tif_path, cache_meta_path = get_derivative_raster_cache_paths(pair.raster_path, str(cache_dir))
+    raster_info = None
+    if not recalculate:
+        raster_info = load_derivative_raster_cache_info(
+            cache_tif_path,
+            cache_meta_path,
+            pair.raster_path,
+            band_idx,
+            rvt_radii=None,
+            gaussian_lrm_sigma=None,
+            enable_curvature=enable_curvature,
+            enable_tpi=enable_tpi,
+            tpi_radii=tpi_radii,
+        )
+    if raster_info is None:
+        build_derivative_raster_cache(
+            input_path=pair.raster_path,
+            band_idx=band_idx,
+            cache_tif_path=cache_tif_path,
+            cache_meta_path=cache_meta_path,
+            recalculate=recalculate,
+            rvt_radii=None,
+            gaussian_lrm_sigma=None,
+            enable_curvature=enable_curvature,
+            enable_tpi=enable_tpi,
+            tpi_radii=tuple(int(v) for v in tpi_radii),
+            chunk_size=2048,
+            worker_count=max(1, int(args.num_workers)),
+            halo_px=None,
+        )
+        raster_info = load_derivative_raster_cache_info(
+            cache_tif_path,
+            cache_meta_path,
+            pair.raster_path,
+            band_idx,
+            rvt_radii=None,
+            gaussian_lrm_sigma=None,
+            enable_curvature=enable_curvature,
+            enable_tpi=enable_tpi,
+            tpi_radii=tpi_radii,
+        )
+    if raster_info is None:
+        print(
+            f"UYARI: Derivative cache hazirlanamadi, kayit asamasi tile-bazli hesaplamaya donecek ({pair.name}).",
+            flush=True,
+        )
+        return PreparedDerivativeCache(mode="none")
+
+    return PreparedDerivativeCache(
+        mode="raster",
+        location=str(cache_tif_path),
+        raster_cache_tif=cache_tif_path,
+        raster_cache_meta=cache_meta_path,
+        raster_band_map={str(k): int(v) for k, v in dict(raster_info.get("band_map", {})).items()},
+    )
 
 
 def compute_tile_stack(
@@ -692,6 +850,163 @@ def compute_tile_stack(
     return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
+def compute_tile_stack_from_precomputed(
+    *,
+    precomputed: PrecomputedDerivatives,
+    window: Window,
+    normalize: bool,
+) -> np.ndarray:
+    row_start = int(window.row_off)
+    col_start = int(window.col_off)
+    row_end = row_start + int(window.height)
+    col_end = col_start + int(window.width)
+
+    rgb = precomputed.rgb[:, row_start:row_end, col_start:col_end].copy()
+    dsm = (
+        precomputed.dsm[row_start:row_end, col_start:col_end].copy()
+        if precomputed.dsm is not None
+        else None
+    )
+    dtm = precomputed.dtm[row_start:row_end, col_start:col_end].copy()
+    svf = precomputed.svf[row_start:row_end, col_start:col_end].copy()
+    pos_open = precomputed.pos_open[row_start:row_end, col_start:col_end].copy()
+    neg_open = precomputed.neg_open[row_start:row_end, col_start:col_end].copy()
+    lrm = precomputed.lrm[row_start:row_end, col_start:col_end].copy()
+    slope = precomputed.slope[row_start:row_end, col_start:col_end].copy()
+    ndsm = precomputed.ndsm[row_start:row_end, col_start:col_end].copy()
+    tpi = (
+        precomputed.tpi[row_start:row_end, col_start:col_end].copy()
+        if precomputed.tpi is not None
+        else None
+    )
+    stacked = stack_channels(
+        rgb=rgb,
+        dsm=dsm,
+        dtm=dtm,
+        svf=svf,
+        pos_open=pos_open,
+        neg_open=neg_open,
+        lrm=lrm,
+        slope=slope,
+        ndsm=ndsm,
+        tpi=tpi,
+    )
+    if normalize:
+        stacked = robust_norm(stacked)
+    return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def compute_tile_stack_from_raster_cache(
+    *,
+    src: rasterio.DatasetReader,
+    derivative_src: rasterio.DatasetReader,
+    derivative_band_map: Dict[str, int],
+    window: Window,
+    band_idx: Sequence[int],
+    normalize: bool,
+) -> np.ndarray:
+    data, _ = read_window_data(src, band_idx, window)
+    rgb = data[:3]
+    dsm = data[3]
+    dtm = data[4]
+    band_names = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm", "tpi"]
+    indexes = [int(derivative_band_map[name]) for name in band_names]
+    deriv_stack = derivative_src.read(indexes=indexes, window=window, masked=True)
+    deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
+    svf, pos_open, neg_open, lrm, slope, ndsm, tpi = deriv_stack
+    stacked = stack_channels(
+        rgb=rgb,
+        dsm=dsm,
+        dtm=dtm,
+        svf=svf,
+        pos_open=pos_open,
+        neg_open=neg_open,
+        lrm=lrm,
+        slope=slope,
+        ndsm=ndsm,
+        tpi=tpi,
+    )
+    if normalize:
+        stacked = robust_norm(stacked)
+    return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def _save_tile_array(output_path: Path, stacked: np.ndarray, file_ext: str) -> None:
+    if file_ext == "npy":
+        np.save(output_path, stacked)
+    else:
+        np.savez_compressed(output_path, image=stacked)
+
+
+def _init_save_tile_worker(
+    raster_path: str,
+    band_idx: Tuple[int, ...],
+    tpi_radii: Tuple[int, ...],
+    normalize: bool,
+    tile_size: int,
+    output_dir: str,
+    file_ext: str,
+    tile_prefix: str,
+    derivative_cache_tif: Optional[str] = None,
+    derivative_band_map: Optional[Tuple[Tuple[str, int], ...]] = None,
+) -> None:
+    global _SAVE_TILE_WORKER_CONTEXT
+    derivative_src = None
+    derivative_map: Optional[Dict[str, int]] = None
+    if derivative_cache_tif:
+        derivative_src = rasterio.open(str(derivative_cache_tif))
+        derivative_map = {str(k): int(v) for k, v in (derivative_band_map or ())}
+    _SAVE_TILE_WORKER_CONTEXT = {
+        "src": rasterio.open(raster_path),
+        "derivative_src": derivative_src,
+        "derivative_band_map": derivative_map,
+        "band_idx": tuple(int(v) for v in band_idx),
+        "tpi_radii": tuple(int(v) for v in tpi_radii),
+        "normalize": bool(normalize),
+        "tile_size": int(tile_size),
+        "output_dir": Path(output_dir),
+        "file_ext": str(file_ext),
+        "tile_prefix": str(tile_prefix),
+    }
+
+
+def _save_tile_worker(record: TileRecord) -> str:
+    ctx = _SAVE_TILE_WORKER_CONTEXT
+    src = ctx["src"]
+    derivative_src = ctx.get("derivative_src")
+    derivative_band_map = ctx.get("derivative_band_map")
+    tile_size = int(ctx["tile_size"])
+    window = Window(
+        col_off=int(record.col_off),
+        row_off=int(record.row_off),
+        width=tile_size,
+        height=tile_size,
+    )
+    if derivative_src is not None and derivative_band_map is not None:
+        stacked = compute_tile_stack_from_raster_cache(
+            src=src,
+            derivative_src=derivative_src,
+            derivative_band_map=derivative_band_map,
+            window=window,
+            band_idx=ctx["band_idx"],
+            normalize=bool(ctx["normalize"]),
+        )
+    else:
+        stacked = compute_tile_stack(
+            src=src,
+            window=window,
+            band_idx=ctx["band_idx"],
+            tpi_radii=ctx["tpi_radii"],
+            normalize=bool(ctx["normalize"]),
+        )
+    output_dir = ctx["output_dir"]
+    file_ext = str(ctx["file_ext"])
+    tile_name = make_tile_name(record, str(ctx["tile_prefix"]).strip())
+    output_path = output_dir / record.split / record.label / f"{tile_name}.{file_ext}"
+    _save_tile_array(output_path, stacked, file_ext)
+    return str(output_path.relative_to(output_dir)).replace("\\", "/")
+
+
 def save_tiles(
     *,
     output_dir: Path,
@@ -709,15 +1024,38 @@ def save_tiles(
     band_idx = parse_int_csv(args.bands, expected_len=5)
     tpi_radii = parse_int_csv(args.tpi_radii)
     file_ext = str(args.format)
+    num_workers = int(args.num_workers)
     total_records = len(selected_records)
     saved_count = 0
+    cache_records: List[Dict[str, object]] = []
+    total_sources = max(1, len(records_by_source))
     for source_name in sorted(records_by_source):
         pair = pair_by_name[source_name]
-        with rasterio.open(pair.raster_path) as src:
-            source_records = sorted(
-                records_by_source[source_name],
-                key=lambda item: (SPLIT_ORDER.index(item.split), item.row_off, item.col_off),
-            )
+        source_records = sorted(
+            records_by_source[source_name],
+            key=lambda item: (SPLIT_ORDER.index(item.split), item.row_off, item.col_off),
+        )
+        emit_progress(
+            phase="cache",
+            current=len(cache_records) + 1,
+            total=total_sources,
+            message=f"Turev cache hazirlaniyor: {pair.name}",
+        )
+        prepared_cache = prepare_derivative_cache_for_source(
+            pair=pair,
+            band_idx=band_idx,
+            tpi_radii=tpi_radii,
+            args=args,
+        )
+        cache_records.append(
+            {
+                "source_name": pair.name,
+                "mode": prepared_cache.mode,
+                "location": prepared_cache.location,
+            }
+        )
+
+        if prepared_cache.precomputed is not None:
             for record in source_records:
                 window = Window(
                     col_off=int(record.col_off),
@@ -725,19 +1063,14 @@ def save_tiles(
                     width=int(args.tile_size),
                     height=int(args.tile_size),
                 )
-                stacked = compute_tile_stack(
-                    src=src,
+                stacked = compute_tile_stack_from_precomputed(
+                    precomputed=prepared_cache.precomputed,
                     window=window,
-                    band_idx=band_idx,
-                    tpi_radii=tpi_radii,
                     normalize=bool(args.normalize),
                 )
                 tile_name = make_tile_name(record, str(args.tile_prefix).strip())
                 output_path = output_dir / record.split / record.label / f"{tile_name}.{file_ext}"
-                if file_ext == "npy":
-                    np.save(output_path, stacked)
-                else:
-                    np.savez_compressed(output_path, image=stacked)
+                _save_tile_array(output_path, stacked, file_ext)
                 record.output_relpath = str(output_path.relative_to(output_dir)).replace("\\", "/")
                 saved_count += 1
                 if saved_count == 1 or saved_count == total_records or saved_count % 50 == 0:
@@ -747,7 +1080,85 @@ def save_tiles(
                         total=total_records,
                         message=f"Tile kaydi: {saved_count}/{total_records}",
                     )
+            continue
+
+        if num_workers == 1:
+            derivative_src = None
+            if prepared_cache.raster_cache_tif is not None and prepared_cache.raster_band_map is not None:
+                derivative_src = rasterio.open(prepared_cache.raster_cache_tif)
+            with rasterio.open(pair.raster_path) as src:
+                for record in source_records:
+                    window = Window(
+                        col_off=int(record.col_off),
+                        row_off=int(record.row_off),
+                        width=int(args.tile_size),
+                        height=int(args.tile_size),
+                    )
+                    if derivative_src is not None and prepared_cache.raster_band_map is not None:
+                        stacked = compute_tile_stack_from_raster_cache(
+                            src=src,
+                            derivative_src=derivative_src,
+                            derivative_band_map=prepared_cache.raster_band_map,
+                            window=window,
+                            band_idx=band_idx,
+                            normalize=bool(args.normalize),
+                        )
+                    else:
+                        stacked = compute_tile_stack(
+                            src=src,
+                            window=window,
+                            band_idx=band_idx,
+                            tpi_radii=tpi_radii,
+                            normalize=bool(args.normalize),
+                        )
+                    tile_name = make_tile_name(record, str(args.tile_prefix).strip())
+                    output_path = output_dir / record.split / record.label / f"{tile_name}.{file_ext}"
+                    _save_tile_array(output_path, stacked, file_ext)
+                    record.output_relpath = str(output_path.relative_to(output_dir)).replace("\\", "/")
+                    saved_count += 1
+                    if saved_count == 1 or saved_count == total_records or saved_count % 50 == 0:
+                        emit_progress(
+                            phase="write",
+                            current=saved_count,
+                            total=total_records,
+                            message=f"Tile kaydi: {saved_count}/{total_records}",
+                        )
+            if derivative_src is not None:
+                derivative_src.close()
+            continue
+
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_init_save_tile_worker,
+            initargs=(
+                str(pair.raster_path),
+                tuple(int(v) for v in band_idx),
+                tuple(int(v) for v in tpi_radii),
+                bool(args.normalize),
+                int(args.tile_size),
+                str(output_dir),
+                file_ext,
+                str(args.tile_prefix).strip(),
+                str(prepared_cache.raster_cache_tif) if prepared_cache.raster_cache_tif is not None else None,
+                tuple(sorted((prepared_cache.raster_band_map or {}).items())),
+            ),
+        ) as executor:
+            future_to_record = {
+                executor.submit(_save_tile_worker, record): record for record in source_records
+            }
+            for future in as_completed(future_to_record):
+                record = future_to_record[future]
+                record.output_relpath = future.result()
+                saved_count += 1
+                if saved_count == 1 or saved_count == total_records or saved_count % 50 == 0:
+                    emit_progress(
+                        phase="write",
+                        current=saved_count,
+                        total=total_records,
+                        message=f"Tile kaydi: {saved_count}/{total_records}",
+                    )
     metadata["saved_tiles"] = int(saved_count)
+    metadata["derivative_cache"] = cache_records
 
 
 def write_manifests(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,10 @@ from prepare_tile_classification_dataset import (
     _implicit_invalid_mask,
     positive_ratio_from_mask,
     read_window_data,
+    save_tiles,
+    SourcePair,
+    TileRecord,
+    validate_args,
     validate_source_raster,
 )
 
@@ -92,3 +97,93 @@ def test_positive_ratio_from_mask_ignores_invalid_pixels() -> None:
     assert ratio == 1.0
     assert positive_pixels == 2
     assert total_pixels == 2
+
+
+def test_validate_args_rejects_non_positive_num_workers() -> None:
+    args = argparse.Namespace(
+        tile_size=256,
+        overlap=128,
+        bands="1,2,3,4,5",
+        tpi_radii="5,15,30",
+        positive_ratio_threshold=0.02,
+        valid_ratio_threshold=0.7,
+        train_ratio=0.8,
+        val_ratio=0.2,
+        test_ratio=0.0,
+        train_negative_keep_ratio=0.35,
+        negative_to_positive_ratio=1.0,
+        train_negative_max=None,
+        seed=42,
+        num_workers=0,
+    )
+
+    with pytest.raises(ValueError, match="num_workers"):
+        validate_args(args)
+
+
+def test_save_tiles_supports_npy_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    raster_path = tmp_path / "source.tif"
+    mask_path = tmp_path / "mask.tif"
+    profile = {
+        "driver": "GTiff",
+        "height": 4,
+        "width": 4,
+        "count": 5,
+        "dtype": "float32",
+        "transform": from_origin(0, 4, 1, 1),
+    }
+    raster_data = np.ones((5, 4, 4), dtype=np.float32)
+    mask_data = np.zeros((1, 4, 4), dtype=np.float32)
+
+    with rasterio.open(raster_path, "w", **profile) as dst:
+        dst.write(raster_data)
+    mask_profile = dict(profile)
+    mask_profile["count"] = 1
+    with rasterio.open(mask_path, "w", **mask_profile) as dst:
+        dst.write(mask_data)
+
+    output_dir = tmp_path / "dataset"
+    (output_dir / "train" / "Positive").mkdir(parents=True)
+    metadata: dict[str, object] = {}
+    pair = SourcePair(name="source", raster_path=raster_path, mask_path=mask_path)
+    record = TileRecord(
+        source_name="source",
+        split="train",
+        label="Positive",
+        row_off=0,
+        col_off=0,
+        positive_ratio=0.5,
+        valid_ratio=1.0,
+        positive_pixels=8,
+        total_pixels=16,
+    )
+
+    monkeypatch.setattr(
+        "prepare_tile_classification_dataset.compute_tile_stack",
+        lambda **_: np.ones((12, 4, 4), dtype=np.float32),
+    )
+
+    args = argparse.Namespace(
+        bands="1,2,3,4,5",
+        tpi_radii="5,15,30",
+        format="npy",
+        num_workers=1,
+        tile_size=4,
+        normalize=True,
+        tile_prefix="",
+    )
+
+    save_tiles(
+        output_dir=output_dir,
+        pairs=[pair],
+        selected_records=[record],
+        metadata=metadata,
+        args=args,
+    )
+
+    saved_path = output_dir / record.output_relpath
+    assert saved_path.exists()
+    assert saved_path.suffix == ".npy"
+    loaded = np.load(saved_path)
+    assert loaded.shape == (12, 4, 4)
+    assert metadata["saved_tiles"] == 1

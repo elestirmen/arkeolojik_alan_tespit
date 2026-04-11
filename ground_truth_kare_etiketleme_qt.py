@@ -145,6 +145,10 @@ DATASET_DEFAULT_POSITIVE_RATIO = 0.02
 DATASET_DEFAULT_VALID_RATIO = 0.7
 DATASET_DEFAULT_TRAIN_NEG_KEEP = 0.35
 DATASET_DEFAULT_NEG_TO_POS_RATIO = 1.0
+DATASET_DEFAULT_FORMAT = "npz"
+DATASET_DEFAULT_NUM_WORKERS = max(1, min(8, (os.cpu_count() or 1) // 2))
+DATASET_DEFAULT_DERIVATIVE_CACHE_MODE = "auto"
+DATASET_DEFAULT_DERIVATIVE_CACHE_DIR = ""
 DEFAULT_PREVIEW_MAX_SIZE = 4096
 DETAIL_REFRESH_DELAY_MS = 90
 DETAIL_MIN_ZOOM = 1.0
@@ -1285,6 +1289,42 @@ class TileDatasetExportDialog(QDialog):
         self.spin_train_negative_keep.setValue(DATASET_DEFAULT_TRAIN_NEG_KEEP)
         form.addRow("Train negatif tut:", self.spin_train_negative_keep)
 
+        self.combo_format = QComboBox(self)
+        self.combo_format.addItem("NPZ - sikistirilmis, daha kucuk", "npz")
+        self.combo_format.addItem("NPY - sikistirmasiz, genelde daha hizli", "npy")
+        self.combo_format.setCurrentIndex(0 if DATASET_DEFAULT_FORMAT == "npz" else 1)
+        form.addRow("Dosya formati:", self.combo_format)
+
+        self.spin_num_workers = QSpinBox(self)
+        self.spin_num_workers.setRange(1, 64)
+        self.spin_num_workers.setValue(DATASET_DEFAULT_NUM_WORKERS)
+        self.spin_num_workers.setToolTip("Daha yuksek deger CPU ve disk kullanimini artirir.")
+        form.addRow("Worker sayisi:", self.spin_num_workers)
+
+        self.combo_derivative_cache_mode = QComboBox(self)
+        self.combo_derivative_cache_mode.addItem("Otomatik (onerilen)", "auto")
+        self.combo_derivative_cache_mode.addItem("Kapali", "none")
+        self.combo_derivative_cache_mode.addItem("NPZ (RAM uygunsa)", "npz")
+        self.combo_derivative_cache_mode.addItem("Raster-cache (buyuk raster)", "raster")
+        default_cache_index = self.combo_derivative_cache_mode.findData(DATASET_DEFAULT_DERIVATIVE_CACHE_MODE)
+        self.combo_derivative_cache_mode.setCurrentIndex(max(0, default_cache_index))
+        self.combo_derivative_cache_mode.setToolTip(
+            "Bos birakilan cache klasoru icin varsayilan yol: <girdi_raster_klasoru>/cache"
+        )
+        form.addRow("Turev cache:", self.combo_derivative_cache_mode)
+
+        cache_wrap = QWidget(self)
+        cache_row = QHBoxLayout(cache_wrap)
+        cache_row.setContentsMargins(0, 0, 0, 0)
+        cache_row.setSpacing(6)
+        self.edit_derivative_cache_dir = QLineEdit(DATASET_DEFAULT_DERIVATIVE_CACHE_DIR)
+        self.edit_derivative_cache_dir.setPlaceholderText("<girdi_raster_klasoru>/cache")
+        cache_row.addWidget(self.edit_derivative_cache_dir, 1)
+        self.btn_browse_derivative_cache_dir = QPushButton("Sec...")
+        self.btn_browse_derivative_cache_dir.clicked.connect(self._choose_derivative_cache_dir)
+        cache_row.addWidget(self.btn_browse_derivative_cache_dir)
+        form.addRow("Cache klasoru:", cache_wrap)
+
         self.combo_overwrite = QComboBox(self)
         self.combo_overwrite.addItem("Evet - klasoru temizle", True)
         self.combo_overwrite.addItem("Hayir - klasor bos olmali", False)
@@ -1294,7 +1334,8 @@ class TileDatasetExportDialog(QDialog):
 
         hint = QLabel(
             "Onerilen baslangic: tile=256, overlap=128, pozitif esigi=0.02.\n"
-            "Secimlerden tile modu genelde daha kontrollu baslangic verir."
+            "Derivative cache varsayilan olarak <girdi_raster_klasoru>/cache altina yazilir.\n"
+            "Hiz onemliyse NPY + auto cache + orta seviye worker sayisi iyi baslangictir."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #475569; font-size: 12px;")
@@ -1325,6 +1366,12 @@ class TileDatasetExportDialog(QDialog):
         chosen = QFileDialog.getExistingDirectory(self, "Cikti klasorunu sec", current)
         if chosen:
             self.edit_output_dir.setText(chosen)
+
+    def _choose_derivative_cache_dir(self) -> None:
+        current = self.edit_derivative_cache_dir.text().strip() or str(Path.cwd())
+        chosen = QFileDialog.getExistingDirectory(self, "Cache klasorunu sec", current)
+        if chosen:
+            self.edit_derivative_cache_dir.setText(chosen)
 
     def _sync_overlap_range(self) -> None:
         tile_size = max(1, int(self.spin_tile_size.value()))
@@ -1371,6 +1418,10 @@ class TileDatasetExportDialog(QDialog):
             "negative_to_positive_ratio": float(self.spin_negative_to_positive.value()),
             "valid_ratio_threshold": float(self.spin_valid_ratio.value()),
             "train_negative_keep_ratio": float(self.spin_train_negative_keep.value()),
+            "format": str(self.combo_format.currentData()),
+            "num_workers": int(self.spin_num_workers.value()),
+            "derivative_cache_mode": str(self.combo_derivative_cache_mode.currentData()),
+            "derivative_cache_dir": self.edit_derivative_cache_dir.text().strip(),
             "overwrite": bool(self.combo_overwrite.currentData()),
         }
 
@@ -2566,7 +2617,20 @@ class MainWindow(QMainWindow):
             str(float(options["valid_ratio_threshold"])),
             "--train-negative-keep-ratio",
             str(float(options["train_negative_keep_ratio"])),
+            "--format",
+            str(options["format"]),
+            "--num-workers",
+            str(int(options["num_workers"])),
+            "--derivative-cache-mode",
+            str(options["derivative_cache_mode"]),
         ]
+        if str(options["derivative_cache_dir"]).strip():
+            cmd.extend(
+                [
+                    "--derivative-cache-dir",
+                    str(options["derivative_cache_dir"]).strip(),
+                ]
+            )
         if bool(options["overwrite"]):
             cmd.append("--overwrite")
         return cmd
