@@ -32,6 +32,7 @@ import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.features import rasterize, shapes
+from rasterio.windows import Window
 
 QT_BACKEND = ""
 _pyside_import_error: Optional[Exception] = None
@@ -49,10 +50,10 @@ if sys.platform == "win32":
                 pass
 
 try:
-    from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+    from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
     from PySide6.QtGui import (
         QAction, QActionGroup, QBrush, QColor, QCursor, QDragEnterEvent, QDropEvent,
-        QImage, QKeySequence, QPainter, QPen, QPixmap,
+        QImage, QKeySequence, QPainter, QPen, QPixmap, QTransform,
     )
     from PySide6.QtWidgets import (
         QApplication,
@@ -88,10 +89,10 @@ try:
 except ImportError as exc:
     _pyside_import_error = exc
     try:
-        from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal as Signal
+        from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal as Signal
         from PyQt6.QtGui import (
             QAction, QActionGroup, QBrush, QColor, QCursor, QDragEnterEvent, QDropEvent,
-            QImage, QKeySequence, QPainter, QPen, QPixmap,
+            QImage, QKeySequence, QPainter, QPen, QPixmap, QTransform,
         )
         from PyQt6.QtWidgets import (
             QApplication,
@@ -144,6 +145,11 @@ DATASET_DEFAULT_POSITIVE_RATIO = 0.02
 DATASET_DEFAULT_VALID_RATIO = 0.7
 DATASET_DEFAULT_TRAIN_NEG_KEEP = 0.35
 DATASET_DEFAULT_NEG_TO_POS_RATIO = 1.0
+DEFAULT_PREVIEW_MAX_SIZE = 4096
+DETAIL_REFRESH_DELAY_MS = 90
+DETAIL_MIN_ZOOM = 1.0
+DETAIL_MAX_OUTPUT_SIDE = 4096
+StretchBounds = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
 
 # ---------------------------------------------------------------------------
 # Light Fresh Theme Stylesheet
@@ -274,19 +280,32 @@ def parse_bands(raw: str, count: int) -> tuple[int, int, int]:
     return parts[0], parts[1], parts[2]
 
 
-def stretch_to_uint8(arr: np.ndarray, low: float = 2.0, high: float = 98.0) -> np.ndarray:
+def compute_stretch_bounds(
+    arr: np.ndarray,
+    low: float = 2.0,
+    high: float = 98.0,
+) -> tuple[float, float]:
+    valid = np.isfinite(arr)
+    if not np.any(valid):
+        return 0.0, 255.0
+    vals = arr[valid].astype(np.float32, copy=False)
+    lo = float(np.percentile(vals, low))
+    hi = float(np.percentile(vals, high))
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return 0.0, 255.0
+    return lo, hi
+
+
+def stretch_to_uint8(arr: np.ndarray, low: float, high: float) -> np.ndarray:
     out = np.zeros(arr.shape, dtype=np.uint8)
     valid = np.isfinite(arr)
     if not np.any(valid):
         return out
-    vals = arr[valid].astype(np.float32, copy=False)
-    lo = float(np.percentile(vals, low))
-    hi = float(np.percentile(vals, high))
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        clipped = np.clip(vals, 0.0, 255.0)
-        out[valid] = clipped.astype(np.uint8)
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        clipped = np.clip(arr.astype(np.float32, copy=False), 0.0, 255.0)
+        out[valid] = clipped[valid].astype(np.uint8)
         return out
-    scaled = (arr.astype(np.float32) - lo) / (hi - lo)
+    scaled = (arr.astype(np.float32) - float(low)) / float(high - low)
     scaled = np.clip(scaled, 0.0, 1.0)
     out[valid] = (scaled[valid] * 255.0).astype(np.uint8)
     return out
@@ -317,8 +336,24 @@ def qimage_from_rgba(rgba: np.ndarray) -> QImage:
     return img.copy()
 
 
-def _read_rgb_preview(ds, bands: tuple[int, int, int], out_w: int, out_h: int) -> np.ndarray:
-    """Seçilen bantlardan hedef boyutta RGB preview üret."""
+def mask_to_rgba(mask: np.ndarray, negative_value: int) -> np.ndarray:
+    rgba = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
+    idx = mask != np.uint8(negative_value)
+    rgba[idx, 0] = 255
+    rgba[idx, 3] = OVERLAY_ALPHA
+    return rgba
+
+
+def _read_rgb(
+    ds,
+    bands: tuple[int, int, int],
+    out_w: int,
+    out_h: int,
+    *,
+    window: Optional[Window] = None,
+    stretch_bounds: Optional[StretchBounds] = None,
+) -> tuple[np.ndarray, StretchBounds]:
+    """Secilen bantlardan hedef boyutta RGB goruntu uret."""
     unique_bands: list[int] = []
     band_to_idx: dict[int, int] = {}
     for b in bands[:3]:
@@ -329,14 +364,32 @@ def _read_rgb_preview(ds, bands: tuple[int, int, int], out_w: int, out_h: int) -
     data = ds.read(
         unique_bands,
         out_shape=(len(unique_bands), out_h, out_w),
+        window=window,
         resampling=Resampling.bilinear,
     )
 
     rgb = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    resolved_bounds: list[tuple[float, float]] = []
     for ch, b in enumerate(bands[:3]):
         src_idx = band_to_idx[b]
-        rgb[:, :, ch] = stretch_to_uint8(data[src_idx].astype(np.float32, copy=False))
-    return rgb
+        arr = data[src_idx].astype(np.float32, copy=False)
+        if stretch_bounds is None:
+            low, high = compute_stretch_bounds(arr)
+        else:
+            low, high = stretch_bounds[ch]
+        rgb[:, :, ch] = stretch_to_uint8(arr, low, high)
+        resolved_bounds.append((float(low), float(high)))
+    return rgb, (resolved_bounds[0], resolved_bounds[1], resolved_bounds[2])
+
+
+def _read_rgb_preview(
+    ds,
+    bands: tuple[int, int, int],
+    out_w: int,
+    out_h: int,
+) -> tuple[np.ndarray, StretchBounds]:
+    """Seçilen bantlardan hedef boyutta RGB preview üret."""
+    return _read_rgb(ds, bands, out_w, out_h)
 
 
 def read_preview_rgb(path: Path, bands: tuple[int, int, int], out_w: int, out_h: int) -> np.ndarray:
@@ -344,7 +397,8 @@ def read_preview_rgb(path: Path, bands: tuple[int, int, int], out_w: int, out_h:
     if out_w <= 0 or out_h <= 0:
         raise ValueError("Hedef preview boyutu gecerli degil")
     with rasterio.open(path) as ds:
-        return _read_rgb_preview(ds, bands, out_w, out_h)
+        rgb, _ = _read_rgb_preview(ds, bands, out_w, out_h)
+        return rgb
 
 
 def preview_to_full_box(
@@ -481,6 +535,11 @@ class LayerState:
     source_path: Optional[Path] = None
     opacity: float = 1.0
     visible: bool = True
+    bands: Optional[tuple[int, int, int]] = None
+    preview_stretch_bounds: Optional[StretchBounds] = None
+    detail_item: Optional[QGraphicsPixmapItem] = None
+    full_w: Optional[int] = None
+    full_h: Optional[int] = None
 
 
 @dataclass
@@ -501,7 +560,12 @@ class Session:
         self.full_h = int(self.src.height)
         self.full_w = int(self.src.width)
 
-        self.preview_rgb, self.scale_x, self.scale_y = self._build_preview(cfg.preview_max_size, cfg.bands)
+        (
+            self.preview_rgb,
+            self.preview_stretch_bounds,
+            self.scale_x,
+            self.scale_y,
+        ) = self._build_preview(cfg.preview_max_size, cfg.bands)
         self.preview_h, self.preview_w = self.preview_rgb.shape[:2]
 
         pos_val = np.uint8(cfg.positive_value)
@@ -525,6 +589,7 @@ class Session:
         # --- O(1) stats counter ---
         self._pos_count = int(np.count_nonzero(self.mask_full != neg_val))
         self._total = int(self.mask_full.size)
+        self.render_revision = 0
 
         # --- Persistent overlay RGBA buffer ---
         self.overlay_rgba = np.zeros((self.preview_h, self.preview_w, 4), dtype=np.uint8)
@@ -536,7 +601,16 @@ class Session:
         except Exception:
             pass
 
-    def _build_preview(self, max_size: int, bands: tuple[int, int, int]) -> tuple[np.ndarray, float, float]:
+    def _build_preview(
+        self,
+        max_size: int,
+        bands: tuple[int, int, int],
+    ) -> tuple[
+        np.ndarray,
+        StretchBounds,
+        float,
+        float,
+    ]:
         h, w = self.src.height, self.src.width
         if max_size <= 0:
             scale = 1.0
@@ -544,8 +618,8 @@ class Session:
             scale = min(1.0, float(max_size) / float(max(h, w)))
         ph = max(1, int(round(h * scale)))
         pw = max(1, int(round(w * scale)))
-        rgb = _read_rgb_preview(self.src, bands, pw, ph)
-        return rgb, float(w) / float(pw), float(h) / float(ph)
+        rgb, stretch_bounds = _read_rgb_preview(self.src, bands, pw, ph)
+        return rgb, stretch_bounds, float(w) / float(pw), float(h) / float(ph)
 
     def _load_initial_mask(
         self,
@@ -582,19 +656,60 @@ class Session:
     # --- Overlay helpers ---
     def _rebuild_overlay_full(self) -> None:
         """Tüm overlay RGBA buffer'ını mask_preview'dan yeniden oluştur."""
-        self.overlay_rgba.fill(0)
-        idx = self.mask_preview != np.uint8(self.cfg.negative_value)
-        self.overlay_rgba[idx, 0] = 255
-        self.overlay_rgba[idx, 3] = OVERLAY_ALPHA
+        self.overlay_rgba[:, :] = mask_to_rgba(self.mask_preview, int(self.cfg.negative_value))
 
     def _update_overlay_region(self, py0: int, py1: int, px0: int, px1: int) -> None:
         """Overlay RGBA buffer'ın sadece belirli bölgesini güncelle."""
         region_mask = self.mask_preview[py0:py1, px0:px1]
         region = self.overlay_rgba[py0:py1, px0:px1]
-        region[:] = 0
-        idx = region_mask != np.uint8(self.cfg.negative_value)
-        region[idx, 0] = 255
-        region[idx, 3] = OVERLAY_ALPHA
+        region[:, :] = mask_to_rgba(region_mask, int(self.cfg.negative_value))
+
+    def visible_preview_rect_to_full(
+        self,
+        preview_rect: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int]:
+        px0, py0, px1, py1 = preview_rect
+        if px1 <= px0 or py1 <= py0:
+            raise ValueError("Preview rect bos olamaz")
+        return preview_to_full_box(
+            (px0, py0, px1 - 1, py1 - 1),
+            self.scale_x,
+            self.scale_y,
+            self.full_w,
+            self.full_h,
+        )
+
+    def render_detail_patch(
+        self,
+        preview_rect: tuple[int, int, int, int],
+        target_w: int,
+        target_h: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        full_x0, full_y0, full_x1, full_y1 = self.visible_preview_rect_to_full(preview_rect)
+        full_window_w = max(1, full_x1 - full_x0)
+        full_window_h = max(1, full_y1 - full_y0)
+        out_w = max(1, min(int(target_w), int(full_window_w), DETAIL_MAX_OUTPUT_SIDE))
+        out_h = max(1, min(int(target_h), int(full_window_h), DETAIL_MAX_OUTPUT_SIDE))
+        window = Window(
+            col_off=int(full_x0),
+            row_off=int(full_y0),
+            width=int(full_window_w),
+            height=int(full_window_h),
+        )
+        rgb, _ = _read_rgb(
+            self.src,
+            self.cfg.bands,
+            out_w,
+            out_h,
+            window=window,
+            stretch_bounds=self.preview_stretch_bounds,
+        )
+
+        mask_patch = self.mask_full[full_y0:full_y1, full_x0:full_x1]
+        if mask_patch.shape[1] != out_w or mask_patch.shape[0] != out_h:
+            mask_patch = cv2.resize(mask_patch, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
+        rgba = mask_to_rgba(mask_patch.astype(np.uint8, copy=False), int(self.cfg.negative_value))
+        return rgb, rgba
 
     def apply_box(self, box: tuple[int, int, int, int], mode: str) -> None:
         px0, py0, px1, py1 = box
@@ -642,6 +757,7 @@ class Session:
             )
         )
         self.dirty = True
+        self.render_revision += 1
 
     def undo(self) -> None:
         if not self.history:
@@ -660,6 +776,7 @@ class Session:
         self.mask_preview[py0:pyi1, px0:pxi1] = entry.preview_prev
         self._update_overlay_region(py0, pyi1, px0, pxi1)
         self.dirty = bool(self.history)
+        self.render_revision += 1
 
     def clear(self) -> None:
         neg_val = np.uint8(self.cfg.negative_value)
@@ -669,6 +786,7 @@ class Session:
         self.history.clear()
         self._pos_count = 0
         self.dirty = True
+        self.render_revision += 1
 
     def reset(self) -> None:
         neg_val = np.uint8(self.cfg.negative_value)
@@ -678,6 +796,7 @@ class Session:
         self._pos_count = int(np.count_nonzero(self.initial_mask_full != neg_val))
         self._rebuild_overlay_full()
         self.dirty = True
+        self.render_revision += 1
 
     def set_positive_value(self, new_value: int) -> bool:
         """Pozitif sınıf değerini güncelle ve mevcut seçili alanları yeni değere eşitle."""
@@ -726,6 +845,7 @@ class Session:
 
             self._rebuild_overlay_full()
             self.dirty = True
+            self.render_revision += 1
 
         self.cfg.positive_value = new_pos
         self.cfg.negative_value = new_neg
@@ -771,6 +891,7 @@ class Session:
 class AnnotView(QGraphicsView):
     box_committed = Signal(int, int, int, int)
     zoom_changed = Signal(float)
+    viewport_changed = Signal()
 
     # Cursors
     _CURSOR_DRAW = Qt.CursorShape.CrossCursor
@@ -815,6 +936,7 @@ class AnnotView(QGraphicsView):
     def fit_all(self) -> None:
         self.fitInView(QRectF(0, 0, self.image_w, self.image_h), Qt.AspectRatioMode.KeepAspectRatio)
         self.zoom_changed.emit(self.transform().m11())
+        self.viewport_changed.emit()
 
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()
@@ -825,6 +947,11 @@ class AnnotView(QGraphicsView):
         factor = 1.2 if delta > 0 else (1.0 / 1.2)
         self.scale(factor, factor)
         self.zoom_changed.emit(self.transform().m11())
+        self.viewport_changed.emit()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.viewport_changed.emit()
 
     def _clamp_point(self, p: QPointF) -> QPointF:
         x = min(max(p.x(), 0.0), float(self.image_w - 1))
@@ -900,6 +1027,7 @@ class AnnotView(QGraphicsView):
             self._panning = False
             self._pan_last_pos = None
             self.unsetCursor()
+            self.viewport_changed.emit()
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._drawing and self._start is not None:
@@ -1264,6 +1392,7 @@ class MainWindow(QMainWindow):
         self.preview_max_size = int(preview_max_size)
         self.bands_raw = bands_raw
         self.model_bands_raw = "1,2,3,4,5"
+        self._shown_dataset_input_warnings: set[tuple[str, str]] = set()
         self.positive_value = int(positive_value)
         self.negative_value = int(negative_value)
 
@@ -1280,17 +1409,34 @@ class MainWindow(QMainWindow):
         self.view.mode = self.mode
         self.view.box_committed.connect(self.on_box)
         self.view.zoom_changed.connect(self.update_status)
+        self.view.zoom_changed.connect(self._schedule_detail_refresh)
+        self.view.viewport_changed.connect(self._schedule_detail_refresh)
+        self.view.horizontalScrollBar().valueChanged.connect(self._schedule_detail_refresh)
+        self.view.verticalScrollBar().valueChanged.connect(self._schedule_detail_refresh)
 
         self._layers_updating_ui = False
         self._extra_layer_counter = 0
         self.layers: list[LayerState] = []
+        self._detail_cache_key: Optional[tuple[object, ...]] = None
+        self._detail_refresh_in_progress = False
+        self._detail_timer = QTimer(self)
+        self._detail_timer.setSingleShot(True)
+        self._detail_timer.timeout.connect(self._refresh_detail_view)
 
         self.base_item = QGraphicsPixmapItem()
         self.base_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
         self.mask_item = QGraphicsPixmapItem()
         self.mask_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
+        self.base_detail_item = QGraphicsPixmapItem()
+        self.base_detail_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self.base_detail_item.setVisible(False)
+        self.mask_detail_item = QGraphicsPixmapItem()
+        self.mask_detail_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self.mask_detail_item.setVisible(False)
         self.scene.addItem(self.base_item)
+        self.scene.addItem(self.base_detail_item)
         self.scene.addItem(self.mask_item)
+        self.scene.addItem(self.mask_detail_item)
 
         self.layer_panel = self._build_layer_panel()
         center = QWidget(self)
@@ -1466,8 +1612,11 @@ class MainWindow(QMainWindow):
         for layer in self.layers:
             if layer.kind == "raster":
                 self.scene.removeItem(layer.item)
+                if layer.detail_item is not None:
+                    self.scene.removeItem(layer.detail_item)
 
         self._extra_layer_counter = 0
+        self._clear_detail_view()
         self.base_item.setVisible(True)
         self.base_item.setOpacity(1.0)
         self.mask_item.setVisible(True)
@@ -1500,11 +1649,41 @@ class MainWindow(QMainWindow):
                 return layer
         return None
 
+    def _selected_layer_key(self) -> Optional[str]:
+        item = self.layer_list.currentItem()
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return str(value) if value is not None else None
+
+    def _selected_layer_row(self) -> int:
+        key = self._selected_layer_key()
+        if key is None:
+            return -1
+        for index, layer in enumerate(self.layers):
+            if layer.key == key:
+                return index
+        return -1
+
     def _selected_layer(self) -> Optional[LayerState]:
-        row = self.layer_list.currentRow()
-        if 0 <= row < len(self.layers):
-            return self.layers[row]
-        return None
+        key = self._selected_layer_key()
+        if key is None:
+            return None
+        return self._find_layer(key)
+
+    def _layer_detail_item(self, layer: LayerState) -> Optional[QGraphicsPixmapItem]:
+        if layer.key == LAYER_KEY_BASE:
+            return self.base_detail_item
+        if layer.key == LAYER_KEY_MASK:
+            return self.mask_detail_item
+        return layer.detail_item
+
+    def _detail_items(self) -> list[QGraphicsPixmapItem]:
+        items = [self.base_detail_item, self.mask_detail_item]
+        for layer in self.layers:
+            if layer.kind == "raster" and layer.detail_item is not None:
+                items.append(layer.detail_item)
+        return items
 
     def _apply_layer_order(self) -> None:
         total = len(self.layers)
@@ -1512,6 +1691,213 @@ class MainWindow(QMainWindow):
             layer.item.setZValue(float(total - idx))
             layer.item.setVisible(layer.visible)
             layer.item.setOpacity(layer.opacity)
+        self._sync_detail_layer_state()
+
+    def _sync_detail_layer_state(self) -> None:
+        managed_items: set[int] = set()
+        for layer in self.layers:
+            detail_item = self._layer_detail_item(layer)
+            if detail_item is None:
+                continue
+            managed_items.add(id(detail_item))
+            detail_item.setZValue(layer.item.zValue() + 0.25)
+            detail_item.setOpacity(layer.opacity)
+            detail_item.setVisible(layer.visible and not detail_item.pixmap().isNull())
+        for item in self._detail_items():
+            if id(item) not in managed_items:
+                item.setVisible(False)
+
+    def _clear_detail_view(self) -> None:
+        self._detail_timer.stop()
+        self._detail_cache_key = None
+        self._set_detail_loading(None)
+        for item in self._detail_items():
+            item.setPixmap(QPixmap())
+            item.setTransform(QTransform())
+            item.setPos(0.0, 0.0)
+            item.setVisible(False)
+
+    def _schedule_detail_refresh(self, *_args) -> None:
+        if self.s is None:
+            self._clear_detail_view()
+            return
+        self._detail_timer.start(DETAIL_REFRESH_DELAY_MS)
+
+    def _viewport_preview_rect(self) -> Optional[tuple[int, int, int, int]]:
+        if self.s is None:
+            return None
+        visible_rect = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
+        px0 = max(0, int(math.floor(visible_rect.left())))
+        py0 = max(0, int(math.floor(visible_rect.top())))
+        px1 = min(self.s.preview_w, int(math.ceil(visible_rect.right())))
+        py1 = min(self.s.preview_h, int(math.ceil(visible_rect.bottom())))
+        if px1 <= px0 or py1 <= py0:
+            return None
+        return px0, py0, px1, py1
+
+    def _apply_detail_pixmap(
+        self,
+        item: QGraphicsPixmapItem,
+        image: QImage,
+        preview_rect: tuple[int, int, int, int],
+    ) -> None:
+        px0, py0, px1, py1 = preview_rect
+        scene_w = max(1.0, float(px1 - px0))
+        scene_h = max(1.0, float(py1 - py0))
+        pixmap = QPixmap.fromImage(image)
+        item.setPixmap(pixmap)
+        item.setPos(float(px0), float(py0))
+        if pixmap.width() > 0 and pixmap.height() > 0:
+            item.setTransformOriginPoint(0.0, 0.0)
+            item.setTransform(
+                QTransform.fromScale(
+                    scene_w / float(pixmap.width()),
+                    scene_h / float(pixmap.height()),
+                )
+            )
+
+    def _render_layer_detail_rgb(
+        self,
+        layer: LayerState,
+        preview_rect: tuple[int, int, int, int],
+        target_w: int,
+        target_h: int,
+    ) -> Optional[np.ndarray]:
+        if (
+            self.s is None
+            or layer.source_path is None
+            or layer.bands is None
+            or layer.preview_stretch_bounds is None
+            or layer.full_w is None
+            or layer.full_h is None
+        ):
+            return None
+
+        full_x0, full_y0, full_x1, full_y1 = preview_to_full_box(
+            (preview_rect[0], preview_rect[1], preview_rect[2] - 1, preview_rect[3] - 1),
+            float(layer.full_w) / float(self.s.preview_w),
+            float(layer.full_h) / float(self.s.preview_h),
+            int(layer.full_w),
+            int(layer.full_h),
+        )
+        full_window_w = max(1, full_x1 - full_x0)
+        full_window_h = max(1, full_y1 - full_y0)
+        out_w = max(1, min(int(target_w), int(full_window_w), DETAIL_MAX_OUTPUT_SIDE))
+        out_h = max(1, min(int(target_h), int(full_window_h), DETAIL_MAX_OUTPUT_SIDE))
+
+        try:
+            with rasterio.open(layer.source_path) as ds:
+                rgb, _ = _read_rgb(
+                    ds,
+                    layer.bands,
+                    out_w,
+                    out_h,
+                    window=Window(
+                        col_off=int(full_x0),
+                        row_off=int(full_y0),
+                        width=int(full_window_w),
+                        height=int(full_window_h),
+                    ),
+                    stretch_bounds=layer.preview_stretch_bounds,
+                )
+        except Exception:
+            return None
+        return rgb
+
+    def _refresh_detail_view(self) -> None:
+        if self._detail_refresh_in_progress:
+            return
+        if self.s is None:
+            self._clear_detail_view()
+            return
+
+        zoom = float(self.view.transform().m11())
+        if max(self.s.scale_x, self.s.scale_y) <= 1.01 or zoom < DETAIL_MIN_ZOOM:
+            self._clear_detail_view()
+            return
+
+        preview_rect = self._viewport_preview_rect()
+        if preview_rect is None:
+            self._clear_detail_view()
+            return
+
+        px0, py0, px1, py1 = preview_rect
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        target_w = max(
+            1,
+            min(
+                DETAIL_MAX_OUTPUT_SIDE,
+                int(math.ceil((px1 - px0) * zoom * dpr)),
+            ),
+        )
+        target_h = max(
+            1,
+            min(
+                DETAIL_MAX_OUTPUT_SIDE,
+                int(math.ceil((py1 - py0) * zoom * dpr)),
+            ),
+        )
+        base_layer = self._find_layer(LAYER_KEY_BASE)
+        mask_layer = self._find_layer(LAYER_KEY_MASK)
+        extra_layers_state = tuple(
+            (
+                layer.key,
+                bool(layer.visible),
+                round(float(layer.opacity), 4),
+                str(layer.source_path) if layer.source_path is not None else "",
+                layer.bands,
+            )
+            for layer in self.layers
+            if layer.kind == "raster"
+        )
+        cache_key = (
+            preview_rect,
+            target_w,
+            target_h,
+            int(self.s.render_revision),
+            bool(base_layer.visible if base_layer is not None else False),
+            bool(mask_layer.visible if mask_layer is not None else False),
+            extra_layers_state,
+        )
+        if cache_key == self._detail_cache_key:
+            return
+
+        visible_extra_layers = sum(1 for layer in self.layers if layer.kind == "raster" and layer.visible)
+        show_loading = visible_extra_layers > 0 or (target_w * target_h) >= 1_000_000
+        loading_text = (
+            f"Detay yukleniyor ({visible_extra_layers} ek katman)..."
+            if visible_extra_layers > 0
+            else "Detay yukleniyor..."
+        )
+
+        self._detail_refresh_in_progress = True
+        if show_loading:
+            self._set_detail_loading(loading_text, flush=True)
+        try:
+            try:
+                rgb, rgba = self.s.render_detail_patch(preview_rect, target_w, target_h)
+            except Exception:
+                self._clear_detail_view()
+                return
+
+            self._apply_detail_pixmap(self.base_detail_item, qimage_from_rgb(rgb), preview_rect)
+            self._apply_detail_pixmap(self.mask_detail_item, qimage_from_rgba(rgba), preview_rect)
+            for layer in self.layers:
+                if layer.kind != "raster" or layer.detail_item is None:
+                    continue
+                layer_rgb = self._render_layer_detail_rgb(layer, preview_rect, target_w, target_h)
+                if layer_rgb is None:
+                    layer.detail_item.setPixmap(QPixmap())
+                    layer.detail_item.setTransform(QTransform())
+                    layer.detail_item.setPos(0.0, 0.0)
+                    continue
+                self._apply_detail_pixmap(layer.detail_item, qimage_from_rgb(layer_rgb), preview_rect)
+            self._detail_cache_key = cache_key
+            self._sync_detail_layer_state()
+        finally:
+            self._detail_refresh_in_progress = False
+            if show_loading:
+                self._set_detail_loading(None)
 
     def _rebuild_layer_list(self, select_key: Optional[str] = None) -> None:
         if select_key is None:
@@ -1570,7 +1956,7 @@ class MainWindow(QMainWindow):
 
         selected = self._selected_layer()
         has_session = self.s is not None
-        row = self.layer_list.currentRow()
+        row = self._selected_layer_row()
 
         can_move_up = has_session and selected is not None and row > 0
         can_move_down = has_session and selected is not None and 0 <= row < (len(self.layers) - 1)
@@ -1607,7 +1993,7 @@ class MainWindow(QMainWindow):
         menu.exec(global_pos)
 
     def _set_selected_layer_visible(self, visible: bool) -> None:
-        row = self.layer_list.currentRow()
+        row = self._selected_layer_row()
         if row < 0:
             return
         item = self.layer_list.item(row)
@@ -1624,7 +2010,7 @@ class MainWindow(QMainWindow):
 
         self.btn_add_layer.setEnabled(has_session)
 
-        row = self.layer_list.currentRow()
+        row = self._selected_layer_row()
         can_move_up = has_session and selected is not None and row > 0
         can_move_down = has_session and selected is not None and 0 <= row < (len(self.layers) - 1)
         self.btn_layer_up.setEnabled(can_move_up)
@@ -1660,6 +2046,7 @@ class MainWindow(QMainWindow):
             return
         layer.visible = item.checkState() == Qt.CheckState.Checked
         layer.item.setVisible(layer.visible)
+        self._sync_detail_layer_state()
 
     def _on_layer_selection_changed(self, _row: int) -> None:
         if self._layers_updating_ui:
@@ -1675,9 +2062,10 @@ class MainWindow(QMainWindow):
         selected.opacity = opacity
         selected.item.setOpacity(opacity)
         self.layer_opacity_value.setText(f"%{value}")
+        self._sync_detail_layer_state()
 
     def move_selected_layer_up(self) -> None:
-        row = self.layer_list.currentRow()
+        row = self._selected_layer_row()
         if row <= 0:
             return
         layer = self.layers.pop(row)
@@ -1686,7 +2074,7 @@ class MainWindow(QMainWindow):
         self._rebuild_layer_list(select_key=layer.key)
 
     def move_selected_layer_down(self) -> None:
-        row = self.layer_list.currentRow()
+        row = self._selected_layer_row()
         if row < 0 or row >= len(self.layers) - 1:
             return
         layer = self.layers.pop(row)
@@ -1714,7 +2102,9 @@ class MainWindow(QMainWindow):
         try:
             with rasterio.open(layer_path) as ds:
                 bands = parse_bands(bands_raw, ds.count)
-            rgb = read_preview_rgb(layer_path, bands, self.s.preview_w, self.s.preview_h)
+                rgb, stretch_bounds = _read_rgb_preview(ds, bands, self.s.preview_w, self.s.preview_h)
+                full_w = int(ds.width)
+                full_h = int(ds.height)
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Katman okunamadi:\n{exc}")
             return
@@ -1723,6 +2113,10 @@ class MainWindow(QMainWindow):
         item.setTransformationMode(Qt.TransformationMode.FastTransformation)
         item.setPixmap(QPixmap.fromImage(qimage_from_rgb(rgb)))
         self.scene.addItem(item)
+        detail_item = QGraphicsPixmapItem()
+        detail_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        detail_item.setVisible(False)
+        self.scene.addItem(detail_item)
 
         self._extra_layer_counter += 1
         key = f"extra_{self._extra_layer_counter}"
@@ -1734,15 +2128,21 @@ class MainWindow(QMainWindow):
             source_path=layer_path,
             opacity=1.0,
             visible=True,
+            bands=bands,
+            preview_stretch_bounds=stretch_bounds,
+            detail_item=detail_item,
+            full_w=full_w,
+            full_h=full_h,
         )
 
         insert_idx = 1 if self.layers and self.layers[0].key == LAYER_KEY_MASK else 0
         self.layers.insert(insert_idx, layer)
         self._apply_layer_order()
         self._rebuild_layer_list(select_key=key)
+        self._schedule_detail_refresh()
 
     def remove_selected_layer(self) -> None:
-        row = self.layer_list.currentRow()
+        row = self._selected_layer_row()
         if row < 0 or row >= len(self.layers):
             return
         layer = self.layers[row]
@@ -1750,6 +2150,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_TITLE, "Ana goruntu ve maske katmani silinemez.")
             return
         self.scene.removeItem(layer.item)
+        if layer.detail_item is not None:
+            self.scene.removeItem(layer.detail_item)
         self.layers.pop(row)
         self._apply_layer_order()
         if self.layers:
@@ -1757,6 +2159,7 @@ class MainWindow(QMainWindow):
             self._rebuild_layer_list(select_key=self.layers[next_row].key)
         else:
             self._rebuild_layer_list()
+        self._schedule_detail_refresh()
 
     def _apply_mask_values(self, positive: int, negative: int) -> None:
         pos = max(1, min(int(positive), 255))
@@ -1974,6 +2377,12 @@ class MainWindow(QMainWindow):
         self._status_wheel = QLabel()
         sb.addWidget(self._status_wheel)
 
+        # Detail loading label
+        self._status_detail = QLabel()
+        self._status_detail.setStyleSheet("color: #0f766e; font-weight: 600;")
+        self._status_detail.setVisible(False)
+        sb.addWidget(self._status_detail)
+
         # Spacer
         spacer = QWidget()
         spacer.setFixedWidth(30)
@@ -1986,6 +2395,15 @@ class MainWindow(QMainWindow):
         # Undo count
         self._status_undo = QLabel()
         sb.addPermanentWidget(self._status_undo)
+
+    def _set_detail_loading(self, text: Optional[str], *, flush: bool = False) -> None:
+        if not hasattr(self, "_status_detail"):
+            return
+        clean = str(text).strip() if text else ""
+        self._status_detail.setVisible(bool(clean))
+        self._status_detail.setText(f"  {clean}  " if clean else "")
+        if flush:
+            QApplication.processEvents()
 
     def _show_busy_indicator(
         self,
@@ -2057,6 +2475,65 @@ class MainWindow(QMainWindow):
         self.update_status()
         return True
 
+    def _dataset_export_input_issue(
+        self,
+        input_path: Path,
+        bands_raw: str,
+    ) -> Optional[str]:
+        try:
+            band_idx = parse_int_csv(str(bands_raw), expected_len=5)
+        except Exception as exc:
+            return f"Model bantlari okunamadi: {exc}"
+
+        try:
+            with rasterio.open(input_path) as src:
+                if src.count < max(band_idx):
+                    return f"Raster {src.count} bant iceriyor ama model bantlari {band_idx} istiyor."
+                dsm_dtype = np.dtype(src.dtypes[int(band_idx[3]) - 1])
+                dtm_dtype = np.dtype(src.dtypes[int(band_idx[4]) - 1])
+                if (
+                    np.issubdtype(dsm_dtype, np.integer)
+                    and np.issubdtype(dtm_dtype, np.integer)
+                    and dsm_dtype.itemsize <= 1
+                    and dtm_dtype.itemsize <= 1
+                ):
+                    return (
+                        "Secilen DSM/DTM bantlari 8-bit gorunuyor "
+                        f"({dsm_dtype}/{dtm_dtype}).\n\n"
+                        "Bu durumda yukseklik verisi 0-255'e ezilmis olabilir; "
+                        "SVF, Openness, Slope ve benzeri topografik bantlar guvenilir uretilemez.\n\n"
+                        "Float32 DSM/DTM iceren dogru 5-band GeoTIFF ile tekrar deneyin."
+                    )
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    def _warn_dataset_export_input_if_needed(self, input_path: Path) -> None:
+        issue = self._dataset_export_input_issue(input_path, self.model_bands_raw)
+        if not issue:
+            return
+        warning_key = (str(input_path.resolve()), str(self.model_bands_raw))
+        if warning_key in self._shown_dataset_input_warnings:
+            return
+        self._shown_dataset_input_warnings.add(warning_key)
+        QMessageBox.warning(
+            self,
+            APP_TITLE,
+            "Bu raster acildi ancak mevcut model bant ayariyla tile dataset export sorunlu olabilir.\n\n"
+            f"Girdi:\n{input_path}\n\n"
+            f"Model bantlari:\n{self.model_bands_raw}\n\n"
+            f"Detay:\n{issue}",
+        )
+
+    def _preflight_dataset_export(self, options: dict[str, object]) -> bool:
+        if self.s is None:
+            return False
+        issue = self._dataset_export_input_issue(self.s.cfg.input_path, str(options["bands_raw"]))
+        if issue:
+            QMessageBox.critical(self, APP_TITLE, f"Dataset export on kontrolu basarisiz:\n{issue}")
+            return False
+        return True
+
     def _build_dataset_export_command(self, options: dict[str, object]) -> list[str]:
         if self.s is None:
             raise RuntimeError("Aktif oturum yok")
@@ -2114,6 +2591,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
             return
         if not self._ensure_mask_saved_for_export():
+            return
+        if not self._preflight_dataset_export(options):
             return
 
         try:
@@ -2317,6 +2796,7 @@ class MainWindow(QMainWindow):
             return False
 
         self.set_session(new_session)
+        self._warn_dataset_export_input_if_needed(input_path)
         return True
 
     def set_session(self, session: Session) -> None:
@@ -2355,11 +2835,13 @@ class MainWindow(QMainWindow):
             return
         self.base_item.setPixmap(QPixmap.fromImage(qimage_from_rgb(self.s.preview_rgb)))
         self.scene.setSceneRect(QRectF(0, 0, self.s.preview_w, self.s.preview_h))
+        self._schedule_detail_refresh()
 
     def refresh_overlay(self) -> None:
         if self.s is None:
             return
         self.mask_item.setPixmap(QPixmap.fromImage(qimage_from_rgba(self.s.overlay_rgba)))
+        self._schedule_detail_refresh()
         self.update_status()
 
     def set_mode(self, mode: str) -> None:
@@ -2536,7 +3018,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", "-o", type=str, default="")
     p.add_argument("--existing-mask", type=str, default="")
     p.add_argument("--existing-labels", type=str, default="")
-    p.add_argument("--preview-max-size", type=int, default=0)
+    p.add_argument("--preview-max-size", type=int, default=DEFAULT_PREVIEW_MAX_SIZE)
     p.add_argument("--bands", type=str, default="1,2,3")
     p.add_argument("--positive-value", type=int, default=1)
     p.add_argument("--negative-value", type=int, default=0)

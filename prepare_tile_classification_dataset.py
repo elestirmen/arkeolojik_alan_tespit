@@ -114,18 +114,68 @@ def parse_int_csv(raw: str, expected_len: Optional[int] = None) -> Tuple[int, ..
     return parts
 
 
-def positive_ratio_from_mask(mask: np.ndarray) -> float:
+def positive_ratio_from_mask(
+    mask: np.ndarray,
+    valid_mask: Optional[np.ndarray] = None,
+) -> tuple[float, int, int]:
     if mask.size <= 0:
-        return 0.0
-    mask_bin = np.where(np.isfinite(mask) & (mask > 0), 1.0, 0.0).astype(np.float32)
-    return float(mask_bin.mean())
+        return 0.0, 0, 0
+    if valid_mask is None:
+        valid = np.isfinite(mask)
+    else:
+        if valid_mask.shape != mask.shape:
+            raise ValueError(
+                f"valid_mask shape {valid_mask.shape} ile mask shape {mask.shape} uyusmuyor."
+            )
+        valid = valid_mask & np.isfinite(mask)
+    valid_pixels = int(np.count_nonzero(valid))
+    if valid_pixels <= 0:
+        return 0.0, 0, 0
+    positive_pixels = int(np.count_nonzero(valid & (mask > 0)))
+    ratio = float(positive_pixels / valid_pixels)
+    return ratio, positive_pixels, valid_pixels
 
 
-def valid_ratio_from_window(
+def _declared_nodata_mask(
+    src: rasterio.DatasetReader,
+    band_idx: Sequence[int],
+    data: np.ndarray,
+) -> np.ndarray:
+    nodata_mask = np.zeros(data.shape[1:], dtype=bool)
+    for arr_idx, band_i in enumerate(band_idx):
+        band_pos = int(band_i) - 1
+        if band_pos < 0 or band_pos >= len(src.nodatavals):
+            continue
+        nodata_value = src.nodatavals[band_pos]
+        if nodata_value is None:
+            continue
+        nodata_mask |= np.isclose(data[arr_idx], float(nodata_value), atol=1e-6, rtol=0.0)
+    return nodata_mask
+
+
+def _implicit_invalid_mask(data: np.ndarray) -> np.ndarray:
+    if data.ndim != 3:
+        raise ValueError(f"Beklenen (C,H,W) veri, alinan shape={data.shape}")
+    tol = 1e-6
+    all_zero = np.all(np.isclose(data, 0.0, atol=tol, rtol=0.0), axis=0)
+    if data.shape[0] < 4:
+        return all_zero
+
+    rgb_zero = np.all(np.isclose(data[:3], 0.0, atol=tol, rtol=0.0), axis=0)
+    aux = data[3:]
+    aux_zero = np.all(np.isclose(aux, 0.0, atol=tol, rtol=0.0), axis=0)
+    aux_constant_extreme = (
+        np.all(np.isclose(aux, aux[:1], atol=tol, rtol=0.0), axis=0)
+        & (np.abs(aux[0]) >= 9999.0)
+    )
+    return all_zero | (rgb_zero & (aux_zero | aux_constant_extreme))
+
+
+def read_window_data(
     src: rasterio.DatasetReader,
     band_idx: Sequence[int],
     window: Window,
-) -> float:
+) -> tuple[np.ndarray, np.ndarray]:
     data = src.read(indexes=list(band_idx), window=window).astype(np.float32)
     masks = src.read_masks(indexes=list(band_idx), window=window)
     if masks.ndim == 2:
@@ -133,6 +183,19 @@ def valid_ratio_from_window(
     else:
         valid = np.all(masks > 0, axis=0)
     valid &= np.all(np.isfinite(data), axis=0)
+    valid &= ~_declared_nodata_mask(src, band_idx, data)
+    valid &= ~_implicit_invalid_mask(data)
+    if np.any(~valid):
+        data[:, ~valid] = np.nan
+    return data, valid
+
+
+def valid_ratio_from_window(
+    src: rasterio.DatasetReader,
+    band_idx: Sequence[int],
+    window: Window,
+) -> float:
+    _, valid = read_window_data(src, band_idx, window)
     return float(valid.mean()) if valid.size > 0 else 0.0
 
 
@@ -142,6 +205,31 @@ def build_windows(width: int, height: int, tile_size: int, stride: int) -> List[
     rows = list(range(0, height - tile_size + 1, stride))
     cols = list(range(0, width - tile_size + 1, stride))
     return [(row_off, col_off) for row_off in rows for col_off in cols]
+
+
+def validate_source_raster(
+    src: rasterio.DatasetReader,
+    band_idx: Sequence[int],
+    raster_path: Path,
+) -> None:
+    if src.count < max(band_idx):
+        raise ValueError(
+            f"Raster {raster_path} icinde {src.count} bant var ama {band_idx} istendi."
+        )
+
+    dsm_dtype = np.dtype(src.dtypes[int(band_idx[3]) - 1])
+    dtm_dtype = np.dtype(src.dtypes[int(band_idx[4]) - 1])
+    if (
+        np.issubdtype(dsm_dtype, np.integer)
+        and np.issubdtype(dtm_dtype, np.integer)
+        and dsm_dtype.itemsize <= 1
+        and dtm_dtype.itemsize <= 1
+    ):
+        raise ValueError(
+            "DSM/DTM bantlari 8-bit gorunuyor "
+            f"({dsm_dtype}/{dtm_dtype}) -> {raster_path}. "
+            "Bu durumda rakim verisi 0-255'e ezilmis olabilir; float32 DSM/DTM iceren bir 5-band GeoTIFF kullanin."
+        )
 
 
 def split_window_by_rows(
@@ -468,10 +556,7 @@ def collect_tile_records(
                     f"Raster/mask boyutu uyusmuyor: {pair.name} -> "
                     f"{src.width}x{src.height} vs {mask_src.width}x{mask_src.height}"
                 )
-            if src.count < max(band_idx):
-                raise ValueError(
-                    f"Raster {pair.raster_path} icinde {src.count} bant var ama {band_idx} istendi."
-                )
+            validate_source_raster(src, band_idx, pair.raster_path)
             windows = build_windows(src.width, src.height, tile_size, stride)
             if not windows:
                 raise ValueError(
@@ -501,14 +586,13 @@ def collect_tile_records(
                     boundary_discarded += 1
                     continue
                 window = Window(col_off=col_off, row_off=row_off, width=tile_size, height=tile_size)
-                valid_ratio = valid_ratio_from_window(src, band_idx, window)
+                _, valid_mask = read_window_data(src, band_idx, window)
+                valid_ratio = float(valid_mask.mean()) if valid_mask.size > 0 else 0.0
                 if valid_ratio < float(args.valid_ratio_threshold):
                     invalid_discarded += 1
                     continue
                 mask = mask_src.read(1, window=window).astype(np.float32)
-                pos_ratio = positive_ratio_from_mask(mask)
-                positive_pixels = int(np.count_nonzero(np.isfinite(mask) & (mask > 0)))
-                total_pixels = int(mask.size)
+                pos_ratio, positive_pixels, total_pixels = positive_ratio_from_mask(mask, valid_mask=valid_mask)
                 label = LABEL_POSITIVE if pos_ratio >= float(args.positive_ratio_threshold) else LABEL_NEGATIVE
                 all_records.append(
                     TileRecord(
@@ -578,11 +662,10 @@ def compute_tile_stack(
     tpi_radii: Sequence[int],
     normalize: bool,
 ) -> np.ndarray:
-    def read_band(band_i: int) -> np.ndarray:
-        return src.read(int(band_i), window=window).astype(np.float32)
-    rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-    dsm = read_band(band_idx[3])
-    dtm = read_band(band_idx[4])
+    data, _ = read_window_data(src, band_idx, window)
+    rgb = data[:3]
+    dsm = data[3]
+    dtm = data[4]
     pixel_size = float((abs(src.transform.a) + abs(src.transform.e)) / 2.0)
     ndsm = compute_ndsm(dsm, dtm)
     svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(

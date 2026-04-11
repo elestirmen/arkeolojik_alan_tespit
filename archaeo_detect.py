@@ -1416,6 +1416,10 @@ def compute_derivatives_with_rvt(
             pass
         raise TypeError(f"RVT '{name}' returned unsupported type: {type(result_obj)}")
 
+    def _radius_to_cells(radius_val: float) -> int:
+        pixel = max(float(pixel_size), 1e-6)
+        return max(1, int(round(float(radius_val) / pixel)))
+
     def _call_with_radius(func, radius_val: float) -> np.ndarray:
         # try different keyword names for radius and nodata
         radius_keys = ("max_radius", "radius", "r_max", "search_radius", "max_search_radius")
@@ -1443,6 +1447,64 @@ def compute_derivatives_with_rvt(
                 raise last_err
             raise e
 
+    def _call_sky_view_factor(
+        *,
+        dem_arr: np.ndarray,
+        radius_val: float,
+        compute_svf: bool,
+        compute_opns: bool,
+    ):
+        radius_px = _radius_to_cells(radius_val)
+        candidates = (
+            {
+                "dem": dem_arr,
+                "resolution": pixel_size,
+                "compute_svf": compute_svf,
+                "compute_asvf": False,
+                "compute_opns": compute_opns,
+                "svf_r_max": radius_px,
+                "svf_noise": 0,
+                "no_data": None,
+            },
+            {
+                "dem": dem_arr,
+                "resolution": pixel_size,
+                "compute_svf": compute_svf,
+                "compute_asvf": False,
+                "compute_opns": compute_opns,
+                "svf_r_max": radius_px,
+                "svf_noise": 0,
+            },
+            {
+                "dem": dem_arr,
+                "resolution": pixel_size,
+                "compute_svf": compute_svf,
+                "compute_opns": compute_opns,
+                "svf_r_max": radius_px,
+                "svf_noise": 0,
+            },
+        )
+        last_err: Optional[Exception] = None
+        for kwargs in candidates:
+            try:
+                return rvt_vis.sky_view_factor(**kwargs)
+            except TypeError as exc:
+                last_err = exc
+                continue
+        try:
+            return rvt_vis.sky_view_factor(dem=dem_arr, resolution=pixel_size)
+        except Exception as exc:
+            if last_err is not None:
+                raise last_err
+            raise exc
+
+    def _extract_named_array(result_obj, keys: Sequence[str], name: str) -> np.ndarray:
+        if isinstance(result_obj, dict):
+            for key in keys:
+                if key in result_obj:
+                    return _as_float32_array(result_obj[key], name)
+        return _as_float32_array(result_obj, name)
+
     svf_layers: List[np.ndarray] = []
     log_fn("  → SVF (Sky View Factor) hesaplanıyor...")
     radii_iter: Iterable[float]
@@ -1456,8 +1518,13 @@ def compute_derivatives_with_rvt(
     else:
         radii_iter = radii
     for radius in radii_iter:
-        svf_res = _call_with_radius(rvt_vis.sky_view_factor, float(radius))
-        svf = _as_float32_array(svf_res, "sky_view_factor")
+        svf_res = _call_sky_view_factor(
+            dem_arr=dtm_filled,
+            radius_val=float(radius),
+            compute_svf=True,
+            compute_opns=False,
+        )
+        svf = _extract_named_array(svf_res, ("svf", "SVF"), "sky_view_factor")
         svf_layers.append(svf)
     svf_avg = np.mean(np.stack(svf_layers, axis=0), axis=0)
     # Openness variants differ across rvt versions; compute both pos/neg robustly
@@ -1522,6 +1589,33 @@ def compute_derivatives_with_rvt(
                 return arr, arr
             except Exception:
                 LOGGER.warning("RVT openness desteklenmeyen tip döndürdü; sıfır kullanılıyor.")
+        if hasattr(rvt_vis, "sky_view_factor"):
+            try:
+                pos_res = _call_sky_view_factor(
+                    dem_arr=dtm_filled,
+                    radius_val=radius_val,
+                    compute_svf=False,
+                    compute_opns=True,
+                )
+                neg_res = _call_sky_view_factor(
+                    dem_arr=-dtm_filled,
+                    radius_val=radius_val,
+                    compute_svf=False,
+                    compute_opns=True,
+                )
+                pos_arr = _extract_named_array(
+                    pos_res,
+                    ("opns", "positive_openness", "openness_positive", "pos_open", "pos"),
+                    "positive_openness",
+                )
+                neg_arr = _extract_named_array(
+                    neg_res,
+                    ("opns", "negative_openness", "openness_negative", "neg_open", "neg"),
+                    "negative_openness",
+                )
+                return pos_arr, neg_arr
+            except Exception:
+                LOGGER.warning("RVT sky_view_factor ile openness hesabi basarisiz; sifir kullaniliyor.")
         # fallback if no openness available
         zeros = np.zeros_like(dtm_filled, dtype=np.float32)
         return zeros, zeros

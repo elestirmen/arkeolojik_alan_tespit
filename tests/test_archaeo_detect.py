@@ -24,6 +24,7 @@ from archaeo_detect import (
     PipelineDefaults,
     apply_trained_only_metadata_locks,
     build_config_from_args,
+    compute_derivatives_with_rvt,
     export_candidate_locations_table,
     percentile_clip,
     compute_ndsm,
@@ -266,6 +267,76 @@ class TestComputeNDSM:
 # ============================================================================
 # Otsu Eşikleme Testleri
 # ============================================================================
+
+def test_compute_derivatives_with_rvt_uses_sky_view_factor_for_openness(monkeypatch) -> None:
+    import archaeo_detect as module
+
+    class FakeRvtVis:
+        def __init__(self) -> None:
+            self.sky_calls = []
+
+        def sky_view_factor(
+            self,
+            dem,
+            resolution,
+            compute_svf=True,
+            compute_asvf=False,
+            compute_opns=False,
+            svf_r_max=10,
+            svf_noise=0,
+            no_data=None,
+        ):
+            self.sky_calls.append(
+                {
+                    "compute_svf": bool(compute_svf),
+                    "compute_opns": bool(compute_opns),
+                    "svf_r_max": int(svf_r_max),
+                    "dem_mean": float(np.nanmean(dem)),
+                }
+            )
+            out = {}
+            if compute_svf:
+                out["svf"] = np.full(dem.shape, float(svf_r_max), dtype=np.float32)
+            if compute_opns:
+                fill = float(svf_r_max) if float(np.nanmean(dem)) >= 0 else float(svf_r_max) + 7.0
+                out["opns"] = np.full(dem.shape, fill, dtype=np.float32)
+            return out
+
+        def slrm(self, dem, radius_cell=20, no_data=None):
+            return np.full(dem.shape, float(radius_cell), dtype=np.float32)
+
+        def slope_aspect(
+            self,
+            dem,
+            resolution_x=1,
+            resolution_y=1,
+            output_units="degree",
+            no_data=None,
+        ):
+            return {
+                "slope": np.full(dem.shape, 3.0, dtype=np.float32),
+                "aspect": np.zeros(dem.shape, dtype=np.float32),
+            }
+
+    fake_rvt = FakeRvtVis()
+    monkeypatch.setattr(module, "rvt_vis", fake_rvt)
+
+    dtm = np.arange(9, dtype=np.float32).reshape(3, 3)
+    svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+        dtm,
+        pixel_size=2.0,
+        radii=(10.0,),
+        show_progress=False,
+        log_steps=False,
+    )
+
+    assert np.allclose(svf, 5.0)
+    assert np.allclose(pos_open, 5.0)
+    assert np.allclose(neg_open, 12.0)
+    assert np.allclose(lrm, 10.0)
+    assert np.allclose(slope, 3.0)
+    assert any(call["compute_opns"] and call["dem_mean"] < 0 for call in fake_rvt.sky_calls)
+
 
 class TestOtsuThreshold:
     """Otsu eşikleme testleri."""
