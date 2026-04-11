@@ -753,7 +753,11 @@ def prepare_derivative_cache_for_source(
                     precomputed=precomputed,
                 )
         elif reason:
-            print(f"BILGI: {reason}", flush=True)
+            print(
+                "BILGI: Tam-raster NPZ cache bu veri icin uygun degil. "
+                f"Detay: {reason} Raster-cache denenecek.",
+                flush=True,
+            )
 
     cache_tif_path, cache_meta_path = get_derivative_raster_cache_paths(pair.raster_path, str(cache_dir))
     raster_info = None
