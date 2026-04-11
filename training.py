@@ -1062,6 +1062,9 @@ class TrainingConfig:
     train_neg_sample_seed: int = 42
     val_keep_ratio: float = 1.0
     val_sample_seed: int = 42
+    auto_val_from_train: bool = False
+    auto_val_ratio: float = 0.2
+    auto_val_reason: str = ""
     deterministic_rotate_step_deg: float = 0.0
     
     # Çıktı
@@ -1086,6 +1089,9 @@ def _build_training_metadata_payload(config: TrainingConfig) -> Dict[str, Any]:
             "in_channels": int(config.in_channels),
             "channel_names": list(config.channel_names),
             "data_dir": str(config.data_dir),
+            "auto_val_from_train": bool(config.auto_val_from_train),
+            "auto_val_ratio": float(config.auto_val_ratio),
+            "auto_val_reason": str(config.auto_val_reason),
         }
     )
     return payload
@@ -1142,7 +1148,7 @@ def _detect_split_file_format(images_dir: Path) -> Optional[str]:
     return _detect_file_format_in_dirs([images_dir])
 
 
-def _infer_file_format(data_dir: Path) -> str:
+def _infer_file_format(data_dir: Path, *, allow_missing_val: bool = False) -> str:
     """Egitim verisindeki dosya formatini (npz/npy) tespit eder."""
     layout = _detect_dataset_layout(data_dir)
     if layout == "classification_folders":
@@ -1164,11 +1170,11 @@ def _infer_file_format(data_dir: Path) -> str:
         raise ValueError(
             f"Desteklenen egitim dosyasi bulunamadi: {train_target} (*.npz / *.npy)"
         )
-    if val_format is None:
+    if val_format is None and not allow_missing_val:
         raise ValueError(
             f"Desteklenen dogrulama dosyasi bulunamadi: {val_target} (*.npz / *.npy)"
         )
-    if train_format != val_format:
+    if val_format is not None and train_format != val_format:
         raise ValueError(
             "Train ve val klasorlerinde farkli dosya formati bulundu: "
             f"train={train_format}, val={val_format}"
@@ -1271,6 +1277,7 @@ def _select_train_indices_by_neg_pos_ratio(
     train_dataset: ArchaeologyDataset,
     neg_to_pos_ratio: Optional[float],
     seed: int,
+    allowed_base_indices: Optional[Sequence[int]] = None,
 ) -> Tuple[List[int], Dict[str, int]]:
     """Train setinde negatif tile'lari pozitiflere gore alt-ornekle."""
     ratio: Optional[float] = None
@@ -1282,6 +1289,11 @@ def _select_train_indices_by_neg_pos_ratio(
             )
     if int(seed) < 0:
         raise ValueError(f"train_neg_sample_seed negatif olamaz, verilen: {seed}")
+    allowed_base_set = (
+        None if allowed_base_indices is None else {int(idx) for idx in allowed_base_indices}
+    )
+    if allowed_base_set is not None and len(allowed_base_set) == 0:
+        raise ValueError("allowed_base_indices bos olamaz.")
 
     positive_indices: List[int] = []
     negative_indices: List[int] = []
@@ -1289,6 +1301,8 @@ def _select_train_indices_by_neg_pos_ratio(
     base_positive_cache: Dict[int, bool] = {}
     for idx in range(len(train_dataset)):
         base_idx, _ = train_dataset._resolve_sample_index(idx)
+        if allowed_base_set is not None and int(base_idx) not in allowed_base_set:
+            continue
         cached_positive = base_positive_cache.get(base_idx)
         if cached_positive is not None:
             is_positive = cached_positive
@@ -1333,7 +1347,7 @@ def _select_train_indices_by_neg_pos_ratio(
 
     selected_indices = sorted(positive_indices + selected_negative_indices)
     stats = {
-        "total_samples": len(train_dataset),
+        "total_samples": len(positive_indices) + len(negative_indices),
         "positive_samples": len(positive_indices),
         "negative_samples": len(negative_indices),
         "target_negative_keep": int(target_negative_keep),
@@ -1395,6 +1409,128 @@ def _compute_val_target_samples(
     target = int(round(int(train_selected_samples) * float(val_keep_ratio)))
     target = max(1, min(int(val_total_samples), int(target)))
     return int(target)
+
+
+def _resolve_auto_val_holdout_ratio(
+    source_metadata: Dict[str, Any],
+    *,
+    default_ratio: float = 0.2,
+) -> float:
+    """Qt export metadata'sindaki train/val oranindan holdout oranini cikar."""
+    fallback = float(default_ratio)
+    if not 0.0 < fallback < 1.0:
+        raise ValueError(
+            f"default_ratio 0-1 araliginda olmali (uclar haric), verilen: {default_ratio}"
+        )
+    if not isinstance(source_metadata, dict):
+        return fallback
+
+    try:
+        train_ratio = float(source_metadata.get("train_ratio", 0.0))
+        val_ratio = float(source_metadata.get("val_ratio", 0.0))
+    except (TypeError, ValueError):
+        return fallback
+
+    total_ratio = train_ratio + val_ratio
+    if train_ratio <= 0.0 or val_ratio <= 0.0 or total_ratio <= 0.0:
+        return fallback
+
+    holdout_ratio = val_ratio / total_ratio
+    if not 0.0 < holdout_ratio < 1.0:
+        return fallback
+    return float(holdout_ratio)
+
+
+def _build_auto_val_holdout_indices(
+    tile_labels: Sequence[float],
+    *,
+    holdout_ratio: float,
+    seed: int,
+) -> Tuple[List[int], List[int], Dict[str, int]]:
+    """Train icindeki explicit tile etiketlerinden stratified validation holdout uret."""
+    if not 0.0 < float(holdout_ratio) < 1.0:
+        raise ValueError(
+            f"holdout_ratio 0-1 araliginda olmali (uclar haric), verilen: {holdout_ratio}"
+        )
+    if int(seed) < 0:
+        raise ValueError(f"seed negatif olamaz, verilen: {seed}")
+
+    labels = [float(value) for value in tile_labels]
+    total_samples = len(labels)
+    if total_samples < 2:
+        raise ValueError(
+            "Otomatik validation holdout icin en az 2 tile gerekir."
+        )
+
+    positive_indices = [idx for idx, value in enumerate(labels) if value > 0.5]
+    negative_indices = [idx for idx, value in enumerate(labels) if value <= 0.5]
+    if not positive_indices:
+        raise ValueError(
+            "Otomatik validation holdout icin train split icinde en az bir pozitif tile gerekir."
+        )
+    if len(positive_indices) < 2:
+        raise ValueError(
+            "Pozitifsiz validation split yerine train'den holdout uretmek icin "
+            "en az 2 pozitif tile gerekir."
+        )
+
+    rng = np.random.RandomState(int(seed))
+
+    def _split_class_indices(indices: Sequence[int]) -> Tuple[List[int], List[int]]:
+        raw_indices = [int(idx) for idx in indices]
+        if not raw_indices:
+            return [], []
+        if len(raw_indices) == 1:
+            return list(raw_indices), []
+
+        target_holdout = int(round(len(raw_indices) * float(holdout_ratio)))
+        target_holdout = max(1, min(len(raw_indices) - 1, target_holdout))
+        selected = rng.choice(raw_indices, size=target_holdout, replace=False)
+        holdout_set = {int(idx) for idx in selected.tolist()}
+        holdout_indices = sorted(holdout_set)
+        train_indices = sorted(idx for idx in raw_indices if idx not in holdout_set)
+        return train_indices, holdout_indices
+
+    train_positive, val_positive = _split_class_indices(positive_indices)
+    train_negative, val_negative = _split_class_indices(negative_indices)
+
+    train_indices = sorted(train_positive + train_negative)
+    val_indices = sorted(val_positive + val_negative)
+
+    if not train_indices:
+        raise ValueError("Otomatik validation holdout sonrasi train split bos kaldi.")
+    if not val_indices:
+        raise ValueError("Otomatik validation holdout validation split olusturamadi.")
+
+    stats = {
+        "total_samples": int(total_samples),
+        "train_samples": int(len(train_indices)),
+        "val_samples": int(len(val_indices)),
+        "positive_samples": int(len(positive_indices)),
+        "negative_samples": int(len(negative_indices)),
+        "train_positive_samples": int(len(train_positive)),
+        "train_negative_samples": int(len(train_negative)),
+        "val_positive_samples": int(len(val_positive)),
+        "val_negative_samples": int(len(val_negative)),
+    }
+    return train_indices, val_indices, stats
+
+
+def _expand_base_indices_to_dataset_indices(
+    dataset: ArchaeologyDataset,
+    base_indices: Sequence[int],
+) -> List[int]:
+    """Augment carpani olan dataset icin base indeksleri sample indekslerine acar."""
+    if dataset._augmentation_multiplier <= 1:
+        return sorted(int(idx) for idx in base_indices)
+
+    selected_base = sorted({int(idx) for idx in base_indices})
+    expanded: List[int] = []
+    multiplier = int(dataset._augmentation_multiplier)
+    for base_idx in selected_base:
+        start = int(base_idx) * multiplier
+        expanded.extend(range(start, start + multiplier))
+    return expanded
 
 
 class TileClassifier(nn.Module):
@@ -1736,6 +1872,11 @@ def train(config: TrainingConfig) -> Path:
         )
     if int(config.val_sample_seed) < 0:
         raise ValueError(f"val_sample_seed negatif olamaz, verilen: {config.val_sample_seed}")
+    if config.auto_val_from_train and not 0.0 < float(config.auto_val_ratio) < 1.0:
+        raise ValueError(
+            "auto_val_ratio 0-1 araliginda olmali (uclar haric), "
+            f"verilen: {config.auto_val_ratio}"
+        )
     if not 0.0 <= float(config.deterministic_rotate_step_deg) < 360.0:
         raise ValueError(
             "deterministic_rotate_step_deg 0-360 araliginda olmali "
@@ -1758,7 +1899,10 @@ def train(config: TrainingConfig) -> Path:
         epoch_checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
     # Dataset ve DataLoader
-    file_format = _infer_file_format(config.data_dir)
+    file_format = _infer_file_format(
+        config.data_dir,
+        allow_missing_val=bool(config.auto_val_from_train),
+    )
     train_dataset = ArchaeologyDataset(
         config.data_dir / "train",
         augment=True,
@@ -1767,14 +1911,39 @@ def train(config: TrainingConfig) -> Path:
         tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
         deterministic_rotate_step_deg=float(config.deterministic_rotate_step_deg),
     )
-    val_dataset = ArchaeologyDataset(
-        config.data_dir / "val",
-        augment=False,
-        file_format=file_format,
-        task_type=config.task_type,
-        tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
-        deterministic_rotate_step_deg=0.0,
-    )
+    auto_val_holdout_stats: Optional[Dict[str, int]] = None
+    train_base_indices_for_holdout: Optional[List[int]] = None
+    if config.auto_val_from_train:
+        if train_dataset.task_type != "tile_classification" or train_dataset.tile_labels is None:
+            raise ValueError(
+                "auto_val_from_train yalnizca explicit tile etiketi olan "
+                "tile_classification veri setlerinde kullanilabilir."
+            )
+        train_base_indices_for_holdout, val_base_indices, auto_val_holdout_stats = (
+            _build_auto_val_holdout_indices(
+                train_dataset.tile_labels,
+                holdout_ratio=float(config.auto_val_ratio),
+                seed=int(config.val_sample_seed),
+            )
+        )
+        val_source_dataset = ArchaeologyDataset(
+            config.data_dir / "train",
+            augment=False,
+            file_format=file_format,
+            task_type=config.task_type,
+            tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
+            deterministic_rotate_step_deg=0.0,
+        )
+        val_dataset: Dataset = Subset(val_source_dataset, val_base_indices)
+    else:
+        val_dataset = ArchaeologyDataset(
+            config.data_dir / "val",
+            augment=False,
+            file_format=file_format,
+            task_type=config.task_type,
+            tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
+            deterministic_rotate_step_deg=0.0,
+        )
     if train_dataset._use_deterministic_rotation:
         LOGGER.info(
             "Deterministik train rotasyonu aktif: adim=%.2f°, carpim=%dx",
@@ -1783,12 +1952,19 @@ def train(config: TrainingConfig) -> Path:
         )
     
     train_loader_dataset: Dataset = train_dataset
+    if train_base_indices_for_holdout is not None:
+        train_indices = _expand_base_indices_to_dataset_indices(
+            train_dataset,
+            train_base_indices_for_holdout,
+        )
+        train_loader_dataset = Subset(train_dataset, train_indices)
     train_sampling_stats: Optional[Dict[str, int]] = None
     if config.train_neg_to_pos_ratio is not None:
         selected_indices, train_sampling_stats = _select_train_indices_by_neg_pos_ratio(
             train_dataset=train_dataset,
             neg_to_pos_ratio=config.train_neg_to_pos_ratio,
             seed=config.train_neg_sample_seed,
+            allowed_base_indices=train_base_indices_for_holdout,
         )
         if len(selected_indices) == 0:
             raise ValueError(
@@ -1830,13 +2006,19 @@ def train(config: TrainingConfig) -> Path:
         num_workers=config.num_workers,
         pin_memory=True,
     )
-    if train_sampling_stats is None and val_sampling_stats is None:
-        LOGGER.info(f"E?itim: {len(train_dataset)} ?rnek, Do?rulama: {len(val_dataset)} ?rnek")
+    if (
+        train_sampling_stats is None
+        and val_sampling_stats is None
+        and auto_val_holdout_stats is None
+    ):
+        LOGGER.info(
+            f"Eğitim: {len(train_loader_dataset)} örnek, Doğrulama: {len(val_dataset)} örnek"
+        )
     else:
         train_count = (
             int(train_sampling_stats["selected_total_samples"])
             if train_sampling_stats is not None
-            else len(train_dataset)
+            else len(train_loader_dataset)
         )
         val_count = (
             int(val_sampling_stats["selected_total_samples"])
@@ -1850,6 +2032,17 @@ def train(config: TrainingConfig) -> Path:
             val_count,
             len(val_dataset),
         )
+        if auto_val_holdout_stats is not None:
+            LOGGER.info(
+                "  Otomatik val holdout -> train=%d (poz=%d, neg=%d) | val=%d (poz=%d, neg=%d) | oran=%.3f",
+                int(auto_val_holdout_stats["train_samples"]),
+                int(auto_val_holdout_stats["train_positive_samples"]),
+                int(auto_val_holdout_stats["train_negative_samples"]),
+                int(auto_val_holdout_stats["val_samples"]),
+                int(auto_val_holdout_stats["val_positive_samples"]),
+                int(auto_val_holdout_stats["val_negative_samples"]),
+                float(config.auto_val_ratio),
+            )
         if train_sampling_stats is not None:
             LOGGER.info(
                 "  Train alt-ornekleme -> pozitif=%d, negatif=%d, secilen_negatif=%d, oran=%.3f",
@@ -1952,6 +2145,12 @@ def train(config: TrainingConfig) -> Path:
         float(config.val_keep_ratio),
         int(config.val_sample_seed),
     )
+    if config.auto_val_from_train:
+        LOGGER.info(
+            "Validation holdout kaynagi: train split icinden stratified ayrim (oran=%.3f, neden=%s)",
+            float(config.auto_val_ratio),
+            str(config.auto_val_reason or "otomatik"),
+        )
     LOGGER.info(f"Epochs: {config.epochs}")
     LOGGER.info(f"Batch size: {config.batch_size}")
     LOGGER.info(f"Learning rate: {config.lr}")
@@ -2121,6 +2320,9 @@ def train(config: TrainingConfig) -> Path:
                 "train_neg_sample_seed": config.train_neg_sample_seed,
                 "val_keep_ratio": config.val_keep_ratio,
                 "val_sample_seed": config.val_sample_seed,
+                "auto_val_from_train": config.auto_val_from_train,
+                "auto_val_ratio": config.auto_val_ratio,
+                "auto_val_reason": config.auto_val_reason,
                 "metric_threshold": config.metric_threshold,
                 "val_threshold_sweep": config.val_threshold_sweep,
                 "val_threshold_min": config.val_threshold_min,
@@ -2521,6 +2723,8 @@ def main():
         in_channels = 12
         LOGGER.warning(f"Metadata bulunamadı, varsayılan kanal sayısı kullanılıyor: {in_channels}")
 
+    auto_val_ratio = _resolve_auto_val_holdout_ratio(source_metadata)
+
     if not 0.0 <= float(args.tile_label_min_positive_ratio) <= 1.0:
         print("HATA: --tile-label-min-positive-ratio 0 ile 1 arasında olmalı.")
         sys.exit(1)
@@ -2534,7 +2738,10 @@ def main():
         sys.exit(1)
 
     # Etiket dağılımını doğrula (tamamı negatif veri sessizce eğitime girmesin)
-    file_format = _infer_file_format(data_dir)
+    allow_missing_val = bool(
+        args.task == "tile_classification" and data_layout == "classification_folders"
+    )
+    file_format = _infer_file_format(data_dir, allow_missing_val=allow_missing_val)
     manifest_train_counts = None
     manifest_val_counts = None
     if args.task == "tile_classification":
@@ -2581,6 +2788,24 @@ def main():
         LOGGER.info(
             "Maske dağılımı | train: %d/%d pozitif tile | val: %d/%d pozitif tile",
             train_positive, train_total, val_positive, val_total,
+        )
+
+    auto_val_from_train = False
+    auto_val_reason = ""
+    if args.task == "tile_classification" and data_layout == "classification_folders":
+        if val_total <= 0:
+            auto_val_from_train = True
+            auto_val_reason = "val split boş"
+        elif val_positive <= 0:
+            auto_val_from_train = True
+            auto_val_reason = "val splitte pozitif tile yok"
+
+    if auto_val_from_train:
+        LOGGER.warning(
+            "Qt export dataseti için otomatik validation holdout etkinleştirildi: %s. "
+            "Train split içinden stratified val ayrımı yapılacak (oran=%.3f).",
+            auto_val_reason,
+            auto_val_ratio,
         )
 
     total_positive = train_positive + val_positive
@@ -2738,6 +2963,9 @@ def main():
         train_neg_sample_seed=int(args.train_neg_sample_seed),
         val_keep_ratio=float(args.val_keep_ratio),
         val_sample_seed=int(args.val_sample_seed),
+        auto_val_from_train=bool(auto_val_from_train),
+        auto_val_ratio=float(auto_val_ratio),
+        auto_val_reason=str(auto_val_reason),
         deterministic_rotate_step_deg=float(args.deterministic_rotate_step_deg),
         output_dir=Path(args.output),
         save_every_epoch=bool(CONFIG["save_every_epoch"]),

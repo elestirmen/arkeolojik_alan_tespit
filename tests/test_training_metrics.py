@@ -11,7 +11,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from training import (
     ArchaeologyDataset,
     BCELoss,
+    _build_auto_val_holdout_indices,
     _compute_val_target_samples,
+    _infer_file_format,
+    _resolve_auto_val_holdout_ratio,
     _select_indices_by_keep_ratio,
     _select_train_indices_by_neg_pos_ratio,
     validate,
@@ -129,6 +132,56 @@ def test_classification_folder_layout_loads_labels_without_masks(tmp_path: Path)
     assert dataset.tile_labels == [1.0, 1.0, 0.0]
 
 
+def test_infer_file_format_allows_empty_val_for_classification_layout(tmp_path: Path) -> None:
+    for rel in [
+        "train/Positive",
+        "train/Negative",
+        "val/Positive",
+        "val/Negative",
+    ]:
+        (tmp_path / rel).mkdir(parents=True, exist_ok=True)
+
+    image = np.zeros((12, 8, 8), dtype=np.float32)
+    np.savez_compressed(tmp_path / "train/Positive" / "pos_0.npz", image=image)
+    np.savez_compressed(tmp_path / "train/Negative" / "neg_0.npz", image=image)
+
+    assert _infer_file_format(tmp_path, allow_missing_val=True) == "npz"
+
+
+def test_auto_val_holdout_indices_are_stratified() -> None:
+    train_indices, val_indices, stats = _build_auto_val_holdout_indices(
+        [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        holdout_ratio=0.33,
+        seed=42,
+    )
+
+    assert set(train_indices).isdisjoint(val_indices)
+    assert sorted(train_indices + val_indices) == list(range(6))
+    assert stats["train_positive_samples"] >= 1
+    assert stats["val_positive_samples"] >= 1
+    assert stats["val_negative_samples"] >= 1
+
+
+def test_auto_val_holdout_requires_two_positive_tiles() -> None:
+    with pytest.raises(ValueError, match="en az 2 pozitif tile"):
+        _build_auto_val_holdout_indices(
+            [1.0, 0.0, 0.0],
+            holdout_ratio=0.2,
+            seed=42,
+        )
+
+
+def test_resolve_auto_val_holdout_ratio_uses_metadata_when_available() -> None:
+    ratio = _resolve_auto_val_holdout_ratio(
+        {
+            "train_ratio": 0.8,
+            "val_ratio": 0.2,
+        }
+    )
+
+    assert abs(ratio - 0.2) < 1e-9
+
+
 def test_train_negative_ratio_sampling_keeps_all_positive_and_target_negative(tmp_path: Path) -> None:
     dataset = _build_npz_train_dataset(tmp_path, positive_count=2, negative_count=5)
 
@@ -146,6 +199,22 @@ def test_train_negative_ratio_sampling_keeps_all_positive_and_target_negative(tm
     selected_names = {dataset.image_files[i].name for i in selected_indices}
     assert {"pos_0.npz", "pos_1.npz"}.issubset(selected_names)
     assert len([name for name in selected_names if name.startswith("neg_")]) == 2
+
+
+def test_train_negative_ratio_sampling_respects_allowed_base_indices(tmp_path: Path) -> None:
+    dataset = _build_npz_train_dataset(tmp_path, positive_count=2, negative_count=3)
+    allowed_names = {dataset.image_files[i].name for i in [0, 2, 4]}
+
+    selected_indices, stats = _select_train_indices_by_neg_pos_ratio(
+        train_dataset=dataset,
+        neg_to_pos_ratio=None,
+        seed=42,
+        allowed_base_indices=[0, 2, 4],
+    )
+
+    assert stats["total_samples"] == 3
+    selected_names = {dataset.image_files[i].name for i in selected_indices}
+    assert selected_names == allowed_names
 
 
 def test_train_negative_ratio_sampling_zero_ratio_keeps_only_positive(tmp_path: Path) -> None:
