@@ -31,7 +31,7 @@ import random
 import shutil
 import sys
 from collections import Counter, defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -1693,6 +1693,31 @@ def _save_tile_worker(record: TileRecord) -> str:
     return str(output_path.relative_to(output_dir)).replace("\\", "/")
 
 
+def _build_write_stage_message(
+    *,
+    source_name: str,
+    source_saved: int,
+    source_total: int,
+    worker_count: int,
+    pending_count: Optional[int] = None,
+    warmup: bool = False,
+) -> str:
+    if source_saved <= 0 or warmup:
+        base = f"Ilk tilelar hesaplaniyor: {source_saved}/{source_total} tamamlandi ({source_name})"
+    else:
+        base = f"Tilelar hesaplaniyor: {source_saved}/{source_total} tamamlandi ({source_name})"
+
+    details: List[str] = []
+    if worker_count > 0:
+        details.append(f"worker {worker_count}")
+    if pending_count is not None:
+        details.append(f"bekleyen is {pending_count}")
+
+    if not details:
+        return base
+    return f"{base} - {', '.join(details)}"
+
+
 def save_tiles(
     *,
     output_dir: Path,
@@ -1750,8 +1775,23 @@ def save_tiles(
                 "location": prepared_cache.location,
             }
         )
+        source_total_records = len(source_records)
+        source_saved_before = saved_count
 
         if prepared_cache.precomputed is not None:
+            emit_progress(
+                phase="write",
+                current=saved_count,
+                total=total_records,
+                message=_build_write_stage_message(
+                    source_name=pair.name,
+                    source_saved=0,
+                    source_total=source_total_records,
+                    worker_count=0,
+                    pending_count=source_total_records,
+                    warmup=True,
+                ),
+            )
             for record in source_records:
                 window = Window(
                     col_off=int(record.col_off),
@@ -1769,16 +1809,36 @@ def save_tiles(
                 _save_tile_array(output_path, stacked, file_ext)
                 record.output_relpath = str(output_path.relative_to(output_dir)).replace("\\", "/")
                 saved_count += 1
+                source_saved = saved_count - source_saved_before
                 if saved_count == 1 or saved_count == total_records or saved_count % 25 == 0:
                     emit_progress(
                         phase="write",
                         current=saved_count,
                         total=total_records,
-                        message=f"Tile kaydi: {saved_count}/{total_records}",
+                        message=_build_write_stage_message(
+                            source_name=pair.name,
+                            source_saved=source_saved,
+                            source_total=source_total_records,
+                            worker_count=0,
+                            pending_count=max(0, source_total_records - source_saved),
+                        ),
                     )
             continue
 
         if num_workers == 1:
+            emit_progress(
+                phase="write",
+                current=saved_count,
+                total=total_records,
+                message=_build_write_stage_message(
+                    source_name=pair.name,
+                    source_saved=0,
+                    source_total=source_total_records,
+                    worker_count=1,
+                    pending_count=source_total_records,
+                    warmup=True,
+                ),
+            )
             derivative_src = None
             if prepared_cache.raster_cache_tif is not None and prepared_cache.raster_band_map is not None:
                 derivative_src = rasterio.open(prepared_cache.raster_cache_tif)
@@ -1812,17 +1872,38 @@ def save_tiles(
                     _save_tile_array(output_path, stacked, file_ext)
                     record.output_relpath = str(output_path.relative_to(output_dir)).replace("\\", "/")
                     saved_count += 1
+                    source_saved = saved_count - source_saved_before
                     if saved_count == 1 or saved_count == total_records or saved_count % 25 == 0:
                         emit_progress(
                             phase="write",
                             current=saved_count,
                             total=total_records,
-                            message=f"Tile kaydi: {saved_count}/{total_records}",
+                            message=_build_write_stage_message(
+                                source_name=pair.name,
+                                source_saved=source_saved,
+                                source_total=source_total_records,
+                                worker_count=1,
+                                pending_count=max(0, source_total_records - source_saved),
+                            ),
                         )
             if derivative_src is not None:
                 derivative_src.close()
             continue
 
+        worker_count = max(1, min(num_workers, source_total_records))
+        emit_progress(
+            phase="write",
+            current=saved_count,
+            total=total_records,
+            message=_build_write_stage_message(
+                source_name=pair.name,
+                source_saved=0,
+                source_total=source_total_records,
+                worker_count=worker_count,
+                pending_count=source_total_records,
+                warmup=True,
+            ),
+        )
         with ProcessPoolExecutor(
             max_workers=num_workers,
             initializer=_init_save_tile_worker,
@@ -1842,16 +1923,52 @@ def save_tiles(
             future_to_record = {
                 executor.submit(_save_tile_worker, record): record for record in source_records
             }
-            for future in as_completed(future_to_record):
-                record = future_to_record[future]
-                record.output_relpath = future.result()
-                saved_count += 1
-                if saved_count == 1 or saved_count == total_records or saved_count % 25 == 0:
+            pending_futures = set(future_to_record)
+            while pending_futures:
+                done_futures, pending_futures = wait(
+                    pending_futures,
+                    timeout=5.0,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done_futures:
+                    source_saved = saved_count - source_saved_before
                     emit_progress(
                         phase="write",
                         current=saved_count,
                         total=total_records,
-                        message=f"Tile kaydi: {saved_count}/{total_records}",
+                        message=_build_write_stage_message(
+                            source_name=pair.name,
+                            source_saved=source_saved,
+                            source_total=source_total_records,
+                            worker_count=worker_count,
+                            pending_count=len(pending_futures),
+                            warmup=source_saved <= 0,
+                        ),
+                    )
+                    continue
+                for future in done_futures:
+                    record = future_to_record[future]
+                    record.output_relpath = future.result()
+                    saved_count += 1
+                source_saved = saved_count - source_saved_before
+                if (
+                    saved_count == 1
+                    or saved_count == total_records
+                    or saved_count % 25 == 0
+                    or source_saved == 1
+                    or source_saved == source_total_records
+                ):
+                    emit_progress(
+                        phase="write",
+                        current=saved_count,
+                        total=total_records,
+                        message=_build_write_stage_message(
+                            source_name=pair.name,
+                            source_saved=source_saved,
+                            source_total=source_total_records,
+                            worker_count=worker_count,
+                            pending_count=len(pending_futures),
+                        ),
                     )
     metadata["saved_tiles"] = int(saved_count)
     metadata["derivative_cache"] = cache_records
