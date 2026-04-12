@@ -115,7 +115,7 @@ CONFIG: dict[str, object] = {
     # batch_size:
     # Batch boyutu.
     # Yuksek deger daha stabil gradient verebilir; daha fazla VRAM ister.
-    "batch_size": 32,
+    "batch_size": 16,
 
     # lr:
     # Ogrenme orani (AdamW).

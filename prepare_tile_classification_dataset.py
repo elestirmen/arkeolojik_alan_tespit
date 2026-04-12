@@ -843,8 +843,18 @@ def prepare_output_dir(output_dir: Path, overwrite: bool, include_test: bool) ->
             (output_dir / split_name / label).mkdir(parents=True, exist_ok=True)
 
 
-def make_tile_name(record: TileRecord, tile_prefix: str) -> str:
+def _shape_suffix_from_array(array: np.ndarray) -> str:
+    if array.ndim < 2:
+        raise ValueError(f"Tile array shape en az 2 boyutlu olmali, alinan: {array.shape}")
+    height = int(array.shape[-2])
+    width = int(array.shape[-1])
+    return f"{height}x{width}"
+
+
+def make_tile_name(record: TileRecord, tile_prefix: str, *, shape_suffix: Optional[str] = None) -> str:
     base = f"{record.source_name}_r{record.row_off:05d}_c{record.col_off:05d}"
+    if shape_suffix:
+        base = f"{base}_{shape_suffix}"
     return f"{tile_prefix}_{base}" if tile_prefix else base
 
 
@@ -1687,7 +1697,11 @@ def _save_tile_worker(record: TileRecord) -> str:
         )
     output_dir = ctx["output_dir"]
     file_ext = str(ctx["file_ext"])
-    tile_name = make_tile_name(record, str(ctx["tile_prefix"]).strip())
+    tile_name = make_tile_name(
+        record,
+        str(ctx["tile_prefix"]).strip(),
+        shape_suffix=_shape_suffix_from_array(stacked),
+    )
     output_path = output_dir / record.split / record.label / f"{tile_name}.{file_ext}"
     _save_tile_array(output_path, stacked, file_ext)
     return str(output_path.relative_to(output_dir)).replace("\\", "/")
@@ -1804,7 +1818,11 @@ def save_tiles(
                     window=window,
                     normalize=bool(args.normalize),
                 )
-                tile_name = make_tile_name(record, str(args.tile_prefix).strip())
+                tile_name = make_tile_name(
+                    record,
+                    str(args.tile_prefix).strip(),
+                    shape_suffix=_shape_suffix_from_array(stacked),
+                )
                 output_path = output_dir / record.split / record.label / f"{tile_name}.{file_ext}"
                 _save_tile_array(output_path, stacked, file_ext)
                 record.output_relpath = str(output_path.relative_to(output_dir)).replace("\\", "/")
@@ -1867,7 +1885,11 @@ def save_tiles(
                             tpi_radii=tpi_radii,
                             normalize=bool(args.normalize),
                         )
-                    tile_name = make_tile_name(record, str(args.tile_prefix).strip())
+                    tile_name = make_tile_name(
+                        record,
+                        str(args.tile_prefix).strip(),
+                        shape_suffix=_shape_suffix_from_array(stacked),
+                    )
                     output_path = output_dir / record.split / record.label / f"{tile_name}.{file_ext}"
                     _save_tile_array(output_path, stacked, file_ext)
                     record.output_relpath = str(output_path.relative_to(output_dir)).replace("\\", "/")
