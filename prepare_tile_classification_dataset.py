@@ -1131,7 +1131,7 @@ def collect_selected_region_records(
                 if (
                     processed_positive_candidates == 1
                     or processed_positive_candidates == total_positive_candidates
-                    or processed_positive_candidates % 100 == 0
+                    or processed_positive_candidates % 25 == 0
                 ):
                     emit_progress(
                         phase="scan",
@@ -1307,7 +1307,7 @@ def collect_tile_records(
                 args=args,
             ):
                 processed_windows += 1
-                if processed_windows == 1 or processed_windows == total_windows or processed_windows % 200 == 0:
+                if processed_windows == 1 or processed_windows == total_windows or processed_windows % 50 == 0:
                     emit_progress(
                         phase="scan",
                         current=processed_windows,
@@ -1769,7 +1769,7 @@ def save_tiles(
                 _save_tile_array(output_path, stacked, file_ext)
                 record.output_relpath = str(output_path.relative_to(output_dir)).replace("\\", "/")
                 saved_count += 1
-                if saved_count == 1 or saved_count == total_records or saved_count % 50 == 0:
+                if saved_count == 1 or saved_count == total_records or saved_count % 25 == 0:
                     emit_progress(
                         phase="write",
                         current=saved_count,
@@ -1812,7 +1812,7 @@ def save_tiles(
                     _save_tile_array(output_path, stacked, file_ext)
                     record.output_relpath = str(output_path.relative_to(output_dir)).replace("\\", "/")
                     saved_count += 1
-                    if saved_count == 1 or saved_count == total_records or saved_count % 50 == 0:
+                    if saved_count == 1 or saved_count == total_records or saved_count % 25 == 0:
                         emit_progress(
                             phase="write",
                             current=saved_count,
@@ -1846,7 +1846,7 @@ def save_tiles(
                 record = future_to_record[future]
                 record.output_relpath = future.result()
                 saved_count += 1
-                if saved_count == 1 or saved_count == total_records or saved_count % 50 == 0:
+                if saved_count == 1 or saved_count == total_records or saved_count % 25 == 0:
                     emit_progress(
                         phase="write",
                         current=saved_count,
@@ -1866,6 +1866,13 @@ def write_manifests(
 ) -> None:
     manifest_path = output_dir / "tiles_manifest.csv"
     tile_labels_path = output_dir / "tile_labels.csv"
+    total_records = max(1, len(selected_records))
+    emit_progress(
+        phase="manifest",
+        current=0,
+        total=total_records,
+        message="Manifest dosyalari yaziliyor...",
+    )
     with open(manifest_path, "w", newline="", encoding="utf-8") as manifest_fp, open(
         tile_labels_path, "w", newline="", encoding="utf-8"
     ) as tile_labels_fp:
@@ -1902,7 +1909,7 @@ def write_manifests(
             ]
         )
         counts_by_split_label: Counter[str] = Counter()
-        for record in selected_records:
+        for index, record in enumerate(selected_records, start=1):
             tile_name = Path(record.output_relpath).stem
             manifest_writer.writerow(
                 [
@@ -1935,6 +1942,13 @@ def write_manifests(
                 ]
             )
             counts_by_split_label[f"{record.split}_{record.label}"] += 1
+            if index == 1 or index == len(selected_records) or index % 100 == 0:
+                emit_progress(
+                    phase="manifest",
+                    current=index,
+                    total=total_records,
+                    message=f"Manifest yaziliyor: {index}/{len(selected_records)}",
+                )
     metadata["selected_counts"] = dict(counts_by_split_label)
     metadata_path = output_dir / "metadata.json"
     metadata_path.write_text(

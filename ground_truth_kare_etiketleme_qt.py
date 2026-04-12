@@ -77,6 +77,7 @@ try:
         QMenu,
         QMessageBox,
         QProgressDialog,
+        QProgressBar,
         QPushButton,
         QSlider,
         QSpinBox,
@@ -116,6 +117,7 @@ except ImportError as exc:
             QMenu,
             QMessageBox,
             QProgressDialog,
+            QProgressBar,
             QPushButton,
             QSlider,
             QSpinBox,
@@ -154,6 +156,15 @@ DETAIL_REFRESH_DELAY_MS = 90
 DETAIL_MIN_ZOOM = 1.0
 DETAIL_MAX_OUTPUT_SIDE = 4096
 StretchBounds = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+EXPORT_PROGRESS_PHASE_LABELS: dict[str, str] = {
+    "start": "Hazirlik",
+    "scan": "Tarama",
+    "select": "Secim",
+    "cache": "Turev Cache",
+    "write": "Yazma",
+    "manifest": "Manifest",
+    "done": "Tamamlandi",
+}
 
 # ---------------------------------------------------------------------------
 # Light Fresh Theme Stylesheet
@@ -2468,7 +2479,14 @@ class MainWindow(QMainWindow):
         dlg.setCancelButton(None)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setMinimumWidth(520)
         dlg.setValue(int(value))
+        progress_bar = dlg.findChild(QProgressBar)
+        if progress_bar is not None:
+            progress_bar.setTextVisible(True)
+            progress_bar.setFormat("%v / %m  (%p%)")
         dlg.show()
         QApplication.processEvents()
         return dlg
@@ -2506,6 +2524,41 @@ class MainWindow(QMainWindow):
         if not isinstance(payload, dict):
             return None
         return payload
+
+    def _progress_phase_label(self, phase: object) -> str:
+        key = str(phase).strip().lower()
+        if not key:
+            return "Islem"
+        return EXPORT_PROGRESS_PHASE_LABELS.get(key, key.replace("_", " ").title())
+
+    def _format_export_progress_text(
+        self,
+        payload: dict[str, object],
+        *,
+        idle_seconds: Optional[int] = None,
+    ) -> str:
+        total = max(1, int(payload.get("total", 1)))
+        current = max(0, min(int(payload.get("current", 0)), total))
+        pct = int(round((100.0 * current) / total))
+        phase_label = self._progress_phase_label(payload.get("phase", ""))
+        message = str(payload.get("message", "")).strip()
+        lines = [f"{phase_label}  |  %{pct}  |  {current}/{total}"]
+        if message:
+            lines.append(message)
+        if idle_seconds is not None and idle_seconds > 0:
+            lines.append(f"Son guncellemeden beri yeni log yok: {idle_seconds} sn")
+        return "\n".join(lines)
+
+    def _format_export_progress_status(self, payload: dict[str, object]) -> str:
+        total = max(1, int(payload.get("total", 1)))
+        current = max(0, min(int(payload.get("current", 0)), total))
+        pct = int(round((100.0 * current) / total))
+        phase_label = self._progress_phase_label(payload.get("phase", ""))
+        message = str(payload.get("message", "")).strip()
+        summary = f"{phase_label}: {current}/{total} (%{pct})"
+        if not message:
+            return summary
+        return f"{summary} - {message}"
 
     def _default_dataset_output_dir(self) -> Path:
         base_dir = Path(__file__).resolve().parent
@@ -2668,7 +2721,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_TITLE, f"Export komutu hazirlanamadi:\n{exc}")
             return
 
-        busy = self._show_busy_indicator("Tile dataset hazirlaniyor...", maximum=100, value=0)
+        busy = self._show_busy_indicator("Tile dataset hazirlaniyor...", maximum=1, value=0)
         output_lines: list[str] = []
         export_env = os.environ.copy()
         export_env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -2715,6 +2768,7 @@ class MainWindow(QMainWindow):
             stream_closed = process.stdout is None
             last_output_at = time.monotonic()
             last_heartbeat_at = last_output_at
+            last_progress_payload: Optional[dict[str, object]] = None
             while True:
                 drained_any = False
                 while True:
@@ -2732,17 +2786,20 @@ class MainWindow(QMainWindow):
                     if payload is not None:
                         current = int(payload.get("current", 0))
                         total = max(1, int(payload.get("total", 1)))
-                        pct = int(round((100.0 * current) / total))
+                        current = max(0, min(current, total))
+                        last_progress_payload = dict(payload)
                         self._update_busy_indicator(
                             busy,
-                            text=str(payload.get("message", "Islem suruyor...")),
-                            value=pct,
-                            maximum=100,
+                            text=self._format_export_progress_text(payload),
+                            value=current,
+                            maximum=total,
                         )
+                        self.statusBar().showMessage(self._format_export_progress_status(payload))
                         continue
                     if line.strip():
                         output_lines.append(line)
-                        self.statusBar().showMessage(trim_process_output("\n".join(output_lines), max_lines=1))
+                        if last_progress_payload is None:
+                            self.statusBar().showMessage(trim_process_output("\n".join(output_lines), max_lines=1))
 
                 if stream_closed and process.poll() is not None:
                     break
@@ -2752,12 +2809,36 @@ class MainWindow(QMainWindow):
                     last_heartbeat_at = now
                     idle_seconds = int(max(0.0, now - last_output_at))
                     if busy is not None:
+                        if last_progress_payload is not None:
+                            heartbeat_payload = dict(last_progress_payload)
+                            heartbeat_text = self._format_export_progress_text(
+                                heartbeat_payload,
+                                idle_seconds=idle_seconds,
+                            )
+                            heartbeat_status = self._format_export_progress_status(heartbeat_payload)
+                            heartbeat_value = max(
+                                0,
+                                min(
+                                    int(heartbeat_payload.get("current", 0)),
+                                    max(1, int(heartbeat_payload.get("total", 1))),
+                                ),
+                            )
+                            heartbeat_max = max(1, int(heartbeat_payload.get("total", 1)))
+                        else:
+                            heartbeat_text = (
+                                "Hazirlik  |  %0  |  0/1\n"
+                                f"Tile dataset hazirlaniyor... Son log: {idle_seconds} sn once"
+                            )
+                            heartbeat_status = f"Tile dataset hazirlaniyor... ({idle_seconds} sn yeni log yok)"
+                            heartbeat_value = int(busy.value())
+                            heartbeat_max = max(1, int(busy.maximum()))
                         self._update_busy_indicator(
                             busy,
-                            text=f"Tile dataset hazirlaniyor... Arka planda suruyor ({idle_seconds} sn yeni log yok)",
-                            value=int(busy.value()),
-                            maximum=max(1, int(busy.maximum())),
+                            text=heartbeat_text,
+                            value=heartbeat_value,
+                            maximum=heartbeat_max,
                         )
+                        self.statusBar().showMessage(heartbeat_status)
                     else:
                         QApplication.processEvents()
                 else:
@@ -2781,6 +2862,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_TITLE, message)
             return
 
+        self.statusBar().showMessage(f"Tile dataset hazir: {output_dir}", 8000)
         message = (
             "Tile dataset hazirlandi.\n\n"
             f"Maske:\n{self.s.cfg.output_path}\n\n"
