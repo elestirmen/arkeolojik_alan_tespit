@@ -2658,6 +2658,9 @@ class MainWindow(QMainWindow):
             return
         if not self._preflight_dataset_export(options):
             return
+        import queue
+        import threading
+        import time
 
         try:
             cmd = self._build_dataset_export_command(options)
@@ -2667,23 +2670,63 @@ class MainWindow(QMainWindow):
 
         busy = self._show_busy_indicator("Tile dataset hazirlaniyor...", maximum=100, value=0)
         output_lines: list[str] = []
+        export_env = os.environ.copy()
+        export_env.setdefault("PYTHONIOENCODING", "utf-8")
+        export_env.setdefault("PYTHONUTF8", "1")
         try:
             process = subprocess.Popen(
                 cmd,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=str(Path(__file__).resolve().parent),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=1,
+                env=export_env,
             )
         except Exception as exc:
             self._hide_busy_indicator(busy)
             QMessageBox.critical(self, APP_TITLE, f"Dataset export baslatilamadi:\n{exc}")
             return
 
-        try:
-            if process.stdout is not None:
+        output_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        reader_errors: list[str] = []
+
+        def _reader() -> None:
+            try:
+                if process.stdout is None:
+                    return
                 for raw_line in process.stdout:
+                    output_queue.put(raw_line)
+            except Exception as exc:
+                reader_errors.append(str(exc))
+            finally:
+                output_queue.put(None)
+
+        reader_thread = threading.Thread(
+            target=_reader,
+            name="dataset-export-output-reader",
+            daemon=True,
+        )
+        reader_thread.start()
+
+        try:
+            stream_closed = process.stdout is None
+            last_output_at = time.monotonic()
+            last_heartbeat_at = last_output_at
+            while True:
+                drained_any = False
+                while True:
+                    try:
+                        raw_line = output_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    drained_any = True
+                    if raw_line is None:
+                        stream_closed = True
+                        break
+                    last_output_at = time.monotonic()
                     line = raw_line.rstrip()
                     payload = self._parse_export_progress_payload(line)
                     if payload is not None:
@@ -2700,11 +2743,33 @@ class MainWindow(QMainWindow):
                     if line.strip():
                         output_lines.append(line)
                         self.statusBar().showMessage(trim_process_output("\n".join(output_lines), max_lines=1))
+
+                if stream_closed and process.poll() is not None:
+                    break
+
+                now = time.monotonic()
+                if not drained_any and now - last_heartbeat_at >= 1.0:
+                    last_heartbeat_at = now
+                    idle_seconds = int(max(0.0, now - last_output_at))
+                    if busy is not None:
+                        self._update_busy_indicator(
+                            busy,
+                            text=f"Tile dataset hazirlaniyor... Arka planda suruyor ({idle_seconds} sn yeni log yok)",
+                            value=int(busy.value()),
+                            maximum=max(1, int(busy.maximum())),
+                        )
+                    else:
                         QApplication.processEvents()
+                else:
+                    QApplication.processEvents()
+                time.sleep(0.05)
             result_code = int(process.wait())
         finally:
+            reader_thread.join(timeout=1.0)
             if process.stdout is not None:
                 process.stdout.close()
+        if reader_errors:
+            output_lines.extend(f"UYARI: cikti okuyucu hatasi: {item}" for item in reader_errors)
 
         output_dir = Path(options["output_dir"]).expanduser().resolve()
         details = trim_process_output("\n".join(output_lines))

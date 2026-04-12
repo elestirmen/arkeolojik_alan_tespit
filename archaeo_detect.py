@@ -6150,6 +6150,17 @@ def build_derivative_raster_cache(
             except Exception:
                 pass
 
+    cache_tif_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_meta_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_tif_path = cache_tif_path.with_name(f"{cache_tif_path.stem}.building{cache_tif_path.suffix}")
+    temp_meta_path = cache_meta_path.with_name(f"{cache_meta_path.stem}.building{cache_meta_path.suffix}")
+    for p in (temp_tif_path, temp_meta_path):
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+
     with rasterio.open(input_path) as src:
         height = int(src.height)
         width = int(src.width)
@@ -6214,7 +6225,7 @@ def build_derivative_raster_cache(
             "band_map": {k: int(v) for k, v in band_map.items()},
         }
 
-        _json_dump(cache_meta_path, metadata)
+        _json_dump(temp_meta_path, metadata)
 
         out_meta = create_raster_metadata(
             height=height,

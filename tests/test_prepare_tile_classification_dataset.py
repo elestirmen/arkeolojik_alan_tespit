@@ -99,6 +99,27 @@ def test_positive_ratio_from_mask_ignores_invalid_pixels() -> None:
     assert total_pixels == 2
 
 
+def test_positive_ratio_from_mask_respects_mask_nodata() -> None:
+    mask = np.array(
+        [
+            [7.0, 3.0],
+            [7.0, 7.0],
+        ],
+        dtype=np.float32,
+    )
+    valid_mask = np.ones((2, 2), dtype=bool)
+
+    ratio, positive_pixels, total_pixels = positive_ratio_from_mask(
+        mask,
+        valid_mask=valid_mask,
+        negative_value=7.0,
+    )
+
+    assert ratio == 0.25
+    assert positive_pixels == 1
+    assert total_pixels == 4
+
+
 def test_validate_args_rejects_non_positive_num_workers() -> None:
     args = argparse.Namespace(
         tile_size=256,
@@ -187,3 +208,80 @@ def test_save_tiles_supports_npy_output(tmp_path: Path, monkeypatch: pytest.Monk
     loaded = np.load(saved_path)
     assert loaded.shape == (12, 4, 4)
     assert metadata["saved_tiles"] == 1
+
+
+def test_save_tiles_selected_regions_skips_derivative_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raster_path = tmp_path / "source.tif"
+    mask_path = tmp_path / "mask.tif"
+    profile = {
+        "driver": "GTiff",
+        "height": 4,
+        "width": 4,
+        "count": 5,
+        "dtype": "float32",
+        "transform": from_origin(0, 4, 1, 1),
+    }
+    raster_data = np.ones((5, 4, 4), dtype=np.float32)
+    mask_data = np.zeros((1, 4, 4), dtype=np.uint8)
+
+    with rasterio.open(raster_path, "w", **profile) as dst:
+        dst.write(raster_data)
+    mask_profile = dict(profile)
+    mask_profile["count"] = 1
+    mask_profile["dtype"] = "uint8"
+    mask_profile["nodata"] = 0
+    with rasterio.open(mask_path, "w", **mask_profile) as dst:
+        dst.write(mask_data)
+
+    output_dir = tmp_path / "dataset"
+    (output_dir / "train" / "Negative").mkdir(parents=True)
+    metadata: dict[str, object] = {}
+    pair = SourcePair(name="source", raster_path=raster_path, mask_path=mask_path)
+    record = TileRecord(
+        source_name="source",
+        split="train",
+        label="Negative",
+        row_off=0,
+        col_off=0,
+        positive_ratio=0.0,
+        valid_ratio=1.0,
+        positive_pixels=0,
+        total_pixels=16,
+    )
+
+    monkeypatch.setattr(
+        "prepare_tile_classification_dataset.compute_tile_stack",
+        lambda **_: np.ones((12, 4, 4), dtype=np.float32),
+    )
+
+    def _unexpected_cache_call(**_: object) -> None:
+        raise AssertionError("selected_regions modunda derivative cache hazirlanmamali")
+
+    monkeypatch.setattr(
+        "prepare_tile_classification_dataset.prepare_derivative_cache_for_source",
+        _unexpected_cache_call,
+    )
+
+    args = argparse.Namespace(
+        bands="1,2,3,4,5",
+        tpi_radii="5,15,30",
+        format="npy",
+        num_workers=1,
+        tile_size=4,
+        normalize=True,
+        tile_prefix="",
+        sampling_mode="selected_regions",
+    )
+
+    save_tiles(
+        output_dir=output_dir,
+        pairs=[pair],
+        selected_records=[record],
+        metadata=metadata,
+        args=args,
+    )
+
+    assert metadata["derivative_cache"][0]["mode"] == "selected_regions_direct"

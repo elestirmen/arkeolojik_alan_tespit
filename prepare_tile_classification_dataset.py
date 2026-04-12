@@ -38,7 +38,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import rasterio
-from rasterio.windows import Window
+from rasterio.windows import Window, from_bounds
 
 from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
 
@@ -104,6 +104,7 @@ SAMPLING_MODES = (
 )
 
 _SAVE_TILE_WORKER_CONTEXT: Dict[str, object] = {}
+_SCAN_TILE_WORKER_CONTEXT: Dict[str, object] = {}
 
 
 @dataclass
@@ -114,6 +115,124 @@ class PreparedDerivativeCache:
     raster_cache_tif: Optional[Path] = None
     raster_cache_meta: Optional[Path] = None
     raster_band_map: Optional[Dict[str, int]] = None
+
+
+def _close_scan_tile_worker_context() -> None:
+    global _SCAN_TILE_WORKER_CONTEXT
+    src = _SCAN_TILE_WORKER_CONTEXT.get("src")
+    mask_src = _SCAN_TILE_WORKER_CONTEXT.get("mask_src")
+    if src is not None:
+        src.close()
+    if mask_src is not None:
+        mask_src.close()
+    _SCAN_TILE_WORKER_CONTEXT = {}
+
+
+def _init_scan_tile_worker(
+    raster_path: str,
+    mask_path: str,
+    band_idx: Tuple[int, ...],
+    tile_size: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    valid_ratio_threshold: float,
+    positive_ratio_threshold: float,
+) -> None:
+    global _SCAN_TILE_WORKER_CONTEXT
+    _close_scan_tile_worker_context()
+    mask_src = rasterio.open(mask_path)
+    _SCAN_TILE_WORKER_CONTEXT = {
+        "src": rasterio.open(raster_path),
+        "mask_src": mask_src,
+        "mask_negative_value": get_mask_negative_value(mask_src),
+        "band_idx": tuple(int(v) for v in band_idx),
+        "tile_size": int(tile_size),
+        "train_ratio": float(train_ratio),
+        "val_ratio": float(val_ratio),
+        "test_ratio": float(test_ratio),
+        "valid_ratio_threshold": float(valid_ratio_threshold),
+        "positive_ratio_threshold": float(positive_ratio_threshold),
+    }
+
+
+def _scan_window(
+    *,
+    src: rasterio.DatasetReader,
+    mask_src: rasterio.DatasetReader,
+    band_idx: Sequence[int],
+    tile_size: int,
+    row_off: int,
+    col_off: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    valid_ratio_threshold: float,
+    positive_ratio_threshold: float,
+    mask_negative_value: Optional[float],
+) -> dict:
+    split_name = split_window_by_rows(
+        row_off=int(row_off),
+        tile_size=int(tile_size),
+        raster_height=int(src.height),
+        train_ratio=float(train_ratio),
+        val_ratio=float(val_ratio),
+        test_ratio=float(test_ratio),
+    )
+    if split_name is None:
+        return {
+            "status": "boundary",
+            "row_off": int(row_off),
+            "col_off": int(col_off),
+        }
+
+    window = Window(col_off=int(col_off), row_off=int(row_off), width=int(tile_size), height=int(tile_size))
+    _, valid_mask = read_window_data(src, band_idx, window)
+    valid_ratio = float(valid_mask.mean()) if valid_mask.size > 0 else 0.0
+    if valid_ratio < float(valid_ratio_threshold):
+        return {
+            "status": "invalid",
+            "row_off": int(row_off),
+            "col_off": int(col_off),
+        }
+
+    mask = mask_src.read(1, window=window).astype(np.float32)
+    pos_ratio, positive_pixels, total_pixels = positive_ratio_from_mask(
+        mask,
+        valid_mask=valid_mask,
+        negative_value=mask_negative_value,
+    )
+    label = LABEL_POSITIVE if pos_ratio >= float(positive_ratio_threshold) else LABEL_NEGATIVE
+    return {
+        "status": "ok",
+        "row_off": int(row_off),
+        "col_off": int(col_off),
+        "split": str(split_name),
+        "label": str(label),
+        "positive_ratio": float(pos_ratio),
+        "valid_ratio": float(valid_ratio),
+        "positive_pixels": int(positive_pixels),
+        "total_pixels": int(total_pixels),
+    }
+
+
+def _scan_single_window(task: Tuple[int, int]) -> dict:
+    row_off, col_off = task
+    ctx = _SCAN_TILE_WORKER_CONTEXT
+    return _scan_window(
+        src=ctx["src"],
+        mask_src=ctx["mask_src"],
+        band_idx=ctx["band_idx"],
+        tile_size=int(ctx["tile_size"]),
+        row_off=int(row_off),
+        col_off=int(col_off),
+        train_ratio=float(ctx["train_ratio"]),
+        val_ratio=float(ctx["val_ratio"]),
+        test_ratio=float(ctx["test_ratio"]),
+        valid_ratio_threshold=float(ctx["valid_ratio_threshold"]),
+        positive_ratio_threshold=float(ctx["positive_ratio_threshold"]),
+        mask_negative_value=ctx.get("mask_negative_value"),
+    )
 
 
 def emit_progress(*, phase: str, current: int, total: int, message: str) -> None:
@@ -139,9 +258,40 @@ def parse_int_csv(raw: str, expected_len: Optional[int] = None) -> Tuple[int, ..
     return parts
 
 
+def companion_gpkg_path(mask_path: Path) -> Path:
+    return mask_path.with_suffix(".gpkg")
+
+
+def get_mask_negative_value(mask_src: rasterio.DatasetReader) -> Optional[float]:
+    nodata_value = None
+    if getattr(mask_src, "nodatavals", None):
+        nodata_value = mask_src.nodatavals[0]
+    if nodata_value is None:
+        nodata_value = getattr(mask_src, "nodata", None)
+    if nodata_value is None:
+        return None
+    try:
+        value = float(nodata_value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def mask_selected_pixels(mask: np.ndarray, negative_value: Optional[float] = None) -> np.ndarray:
+    selected = np.isfinite(mask)
+    if negative_value is None:
+        selected &= mask > 0
+    else:
+        selected &= ~np.isclose(mask, float(negative_value), atol=1e-6, rtol=0.0)
+    return selected
+
+
 def positive_ratio_from_mask(
     mask: np.ndarray,
     valid_mask: Optional[np.ndarray] = None,
+    negative_value: Optional[float] = None,
 ) -> tuple[float, int, int]:
     if mask.size <= 0:
         return 0.0, 0, 0
@@ -156,7 +306,7 @@ def positive_ratio_from_mask(
     valid_pixels = int(np.count_nonzero(valid))
     if valid_pixels <= 0:
         return 0.0, 0, 0
-    positive_pixels = int(np.count_nonzero(valid & (mask > 0)))
+    positive_pixels = int(np.count_nonzero(valid & mask_selected_pixels(mask, negative_value=negative_value)))
     ratio = float(positive_pixels / valid_pixels)
     return ratio, positive_pixels, valid_pixels
 
@@ -230,6 +380,210 @@ def build_windows(width: int, height: int, tile_size: int, stride: int) -> List[
     rows = list(range(0, height - tile_size + 1, stride))
     cols = list(range(0, width - tile_size + 1, stride))
     return [(row_off, col_off) for row_off in rows for col_off in cols]
+
+
+def build_split_window_index(
+    *,
+    width: int,
+    height: int,
+    tile_size: int,
+    stride: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+) -> tuple[List[Tuple[int, int]], Dict[str, List[Tuple[int, int]]], int]:
+    windows = build_windows(width, height, tile_size, stride)
+    windows_by_split: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+    boundary_discarded = 0
+    for row_off, col_off in windows:
+        split_name = split_window_by_rows(
+            row_off=int(row_off),
+            tile_size=int(tile_size),
+            raster_height=int(height),
+            train_ratio=float(train_ratio),
+            val_ratio=float(val_ratio),
+            test_ratio=float(test_ratio),
+        )
+        if split_name is None:
+            boundary_discarded += 1
+            continue
+        windows_by_split[str(split_name)].append((int(row_off), int(col_off)))
+    return windows, windows_by_split, boundary_discarded
+
+
+def _candidate_offsets_for_extent(
+    *,
+    min_index: int,
+    max_index: int,
+    tile_size: int,
+    stride: int,
+    limit: int,
+) -> List[int]:
+    if limit < tile_size or max_index < 0 or min_index >= limit:
+        return []
+    start = max(0, int(min_index) - int(tile_size) + 1)
+    end = min(int(max_index), int(limit) - int(tile_size))
+    if end < start:
+        return []
+    first = ((start + int(stride) - 1) // int(stride)) * int(stride)
+    if first > end:
+        return []
+    return list(range(first, end + 1, int(stride)))
+
+
+def _add_candidate_windows_from_bounds(
+    candidate_windows: set[Tuple[int, int]],
+    *,
+    row_min: int,
+    row_max: int,
+    col_min: int,
+    col_max: int,
+    height: int,
+    width: int,
+    tile_size: int,
+    stride: int,
+) -> None:
+    row_offsets = _candidate_offsets_for_extent(
+        min_index=int(row_min),
+        max_index=int(row_max),
+        tile_size=int(tile_size),
+        stride=int(stride),
+        limit=int(height),
+    )
+    col_offsets = _candidate_offsets_for_extent(
+        min_index=int(col_min),
+        max_index=int(col_max),
+        tile_size=int(tile_size),
+        stride=int(stride),
+        limit=int(width),
+    )
+    for row_off in row_offsets:
+        for col_off in col_offsets:
+            candidate_windows.add((int(row_off), int(col_off)))
+
+
+def _collect_positive_candidate_windows_from_gpkg(
+    *,
+    pair: SourcePair,
+    src: rasterio.DatasetReader,
+    tile_size: int,
+    stride: int,
+) -> Optional[set[Tuple[int, int]]]:
+    gpkg_path = companion_gpkg_path(pair.mask_path)
+    if not gpkg_path.exists():
+        return None
+    try:
+        import geopandas as gpd
+
+        try:
+            gdf = gpd.read_file(gpkg_path, layer="annotations")
+        except Exception:
+            gdf = gpd.read_file(gpkg_path)
+        if gdf.empty:
+            return set()
+        if src.crs is not None and gdf.crs is not None and str(gdf.crs) != str(src.crs):
+            gdf = gdf.to_crs(src.crs)
+
+        candidate_windows: set[Tuple[int, int]] = set()
+        for geom in gdf.geometry:
+            if geom is None or geom.is_empty:
+                continue
+            bbox = from_bounds(*geom.bounds, transform=src.transform)
+            row_min = int(math.floor(float(bbox.row_off)))
+            row_max = int(math.ceil(float(bbox.row_off + bbox.height)) - 1)
+            col_min = int(math.floor(float(bbox.col_off)))
+            col_max = int(math.ceil(float(bbox.col_off + bbox.width)) - 1)
+            _add_candidate_windows_from_bounds(
+                candidate_windows,
+                row_min=row_min,
+                row_max=row_max,
+                col_min=col_min,
+                col_max=col_max,
+                height=int(src.height),
+                width=int(src.width),
+                tile_size=int(tile_size),
+                stride=int(stride),
+            )
+        return candidate_windows
+    except Exception as exc:
+        print(
+            f"BILGI: Pozitif aday pencereler GPKG'den okunamadi ({pair.name}): {exc}. Mask blok taramaya geciliyor.",
+            flush=True,
+        )
+        return None
+
+
+def _collect_positive_candidate_windows_from_mask(
+    *,
+    mask_src: rasterio.DatasetReader,
+    width: int,
+    height: int,
+    tile_size: int,
+    stride: int,
+) -> set[Tuple[int, int]]:
+    candidate_windows: set[Tuple[int, int]] = set()
+    negative_value = get_mask_negative_value(mask_src)
+    for _, block_window in mask_src.block_windows(1):
+        mask_block = mask_src.read(1, window=block_window).astype(np.float32)
+        if not np.any(mask_selected_pixels(mask_block, negative_value=negative_value)):
+            continue
+        row_min = int(block_window.row_off)
+        row_max = int(block_window.row_off + block_window.height - 1)
+        col_min = int(block_window.col_off)
+        col_max = int(block_window.col_off + block_window.width - 1)
+        _add_candidate_windows_from_bounds(
+            candidate_windows,
+            row_min=row_min,
+            row_max=row_max,
+            col_min=col_min,
+            col_max=col_max,
+            height=int(height),
+            width=int(width),
+            tile_size=int(tile_size),
+            stride=int(stride),
+        )
+    return candidate_windows
+
+
+def collect_positive_candidate_windows(
+    *,
+    pair: SourcePair,
+    src: rasterio.DatasetReader,
+    mask_src: rasterio.DatasetReader,
+    tile_size: int,
+    stride: int,
+) -> tuple[List[Tuple[int, int]], str]:
+    from_gpkg = _collect_positive_candidate_windows_from_gpkg(
+        pair=pair,
+        src=src,
+        tile_size=tile_size,
+        stride=stride,
+    )
+    if from_gpkg is not None:
+        return sorted(from_gpkg), "gpkg"
+    return sorted(
+        _collect_positive_candidate_windows_from_mask(
+            mask_src=mask_src,
+            width=int(src.width),
+            height=int(src.height),
+            tile_size=int(tile_size),
+            stride=int(stride),
+        )
+    ), "mask_blocks"
+
+
+def tile_record_from_scan_result(source_name: str, result: dict) -> TileRecord:
+    return TileRecord(
+        source_name=str(source_name),
+        split=str(result["split"]),
+        label=str(result["label"]),
+        row_off=int(result["row_off"]),
+        col_off=int(result["col_off"]),
+        positive_ratio=float(result["positive_ratio"]),
+        valid_ratio=float(result["valid_ratio"]),
+        positive_pixels=int(result["positive_pixels"]),
+        total_pixels=int(result["total_pixels"]),
+    )
 
 
 def validate_source_raster(
@@ -580,12 +934,332 @@ def select_records_for_selected_regions_mode(
     return selected_records, stats
 
 
+def iterate_scan_results(
+    *,
+    pair: SourcePair,
+    windows: Sequence[Tuple[int, int]],
+    band_idx: Sequence[int],
+    args: argparse.Namespace,
+) -> Iterable[dict]:
+    window_list = [(int(row_off), int(col_off)) for row_off, col_off in windows]
+    if not window_list:
+        return
+    num_workers = max(1, int(args.num_workers))
+    worker_init_args = (
+        str(pair.raster_path),
+        str(pair.mask_path),
+        tuple(int(v) for v in band_idx),
+        int(args.tile_size),
+        float(args.train_ratio),
+        float(args.val_ratio),
+        float(args.test_ratio),
+        float(args.valid_ratio_threshold),
+        float(args.positive_ratio_threshold),
+    )
+    if num_workers == 1:
+        _init_scan_tile_worker(*worker_init_args)
+        try:
+            for result in map(_scan_single_window, window_list):
+                yield result
+        finally:
+            _close_scan_tile_worker_context()
+        return
+
+    chunksize = max(1, min(256, len(window_list) // max(1, num_workers * 8)))
+    with ProcessPoolExecutor(
+        max_workers=num_workers,
+        initializer=_init_scan_tile_worker,
+        initargs=worker_init_args,
+    ) as executor:
+        for result in executor.map(_scan_single_window, window_list, chunksize=chunksize):
+            yield result
+
+
+def collect_random_negative_records(
+    *,
+    pair: SourcePair,
+    candidate_windows: Sequence[Tuple[int, int]],
+    split_name: str,
+    target_count: int,
+    band_idx: Sequence[int],
+    args: argparse.Namespace,
+    rng: random.Random,
+) -> Tuple[List[TileRecord], int]:
+    if target_count <= 0 or not candidate_windows:
+        return [], 0
+
+    remaining_windows = [(int(row_off), int(col_off)) for row_off, col_off in candidate_windows]
+    rng.shuffle(remaining_windows)
+    scanned_total = 0
+    selected_records: List[TileRecord] = []
+    batch_floor = max(64, int(args.num_workers) * 32)
+    cursor = 0
+
+    while cursor < len(remaining_windows) and len(selected_records) < int(target_count):
+        remaining_target = int(target_count) - len(selected_records)
+        batch_size = min(
+            len(remaining_windows) - cursor,
+            max(batch_floor, remaining_target * 6),
+        )
+        batch = remaining_windows[cursor:cursor + batch_size]
+        cursor += batch_size
+        batch_selected_before = len(selected_records)
+        for result in iterate_scan_results(
+            pair=pair,
+            windows=batch,
+            band_idx=band_idx,
+            args=args,
+        ):
+            scanned_total += 1
+            if str(result.get("status", "")) != "ok":
+                continue
+            if str(result["label"]) != LABEL_NEGATIVE or int(result["positive_pixels"]) != 0:
+                continue
+            if len(selected_records) < int(target_count):
+                selected_records.append(tile_record_from_scan_result(pair.name, result))
+        batch_selected = len(selected_records) - batch_selected_before
+        emit_progress(
+            phase="select",
+            current=len(selected_records),
+            total=max(1, int(target_count)),
+            message=(
+                f"Rastgele negatif seciliyor: "
+                f"{len(selected_records)}/{int(target_count)} "
+                f"({pair.name}/{split_name}, denenen {scanned_total}, batch +{batch_selected})"
+            ),
+        )
+
+    return selected_records, scanned_total
+
+
+def collect_selected_region_records(
+    pairs: Sequence[SourcePair],
+    args: argparse.Namespace,
+) -> Tuple[List[TileRecord], Dict[str, object], Dict[str, object]]:
+    band_idx = parse_int_csv(args.bands, expected_len=5)
+    tile_size = int(args.tile_size)
+    stride = int(args.tile_size - args.overlap)
+    negative_to_positive_ratio = float(args.negative_to_positive_ratio)
+    selection_contexts: List[Dict[str, object]] = []
+    total_positive_candidates = 0
+
+    for pair in pairs:
+        with rasterio.open(pair.raster_path) as src, rasterio.open(pair.mask_path) as mask_src:
+            if src.width != mask_src.width or src.height != mask_src.height:
+                raise ValueError(
+                    f"Raster/mask boyutu uyusmuyor: {pair.name} -> "
+                    f"{src.width}x{src.height} vs {mask_src.width}x{mask_src.height}"
+                )
+            validate_source_raster(src, band_idx, pair.raster_path)
+            all_windows, windows_by_split, boundary_discarded = build_split_window_index(
+                width=int(src.width),
+                height=int(src.height),
+                tile_size=int(tile_size),
+                stride=int(stride),
+                train_ratio=float(args.train_ratio),
+                val_ratio=float(args.val_ratio),
+                test_ratio=float(args.test_ratio),
+            )
+            if not all_windows:
+                raise ValueError(
+                    f"Raster icine tam tile sigmiyor: {pair.raster_path} (tile_size={tile_size})"
+                )
+            positive_candidate_windows, candidate_source = collect_positive_candidate_windows(
+                pair=pair,
+                src=src,
+                mask_src=mask_src,
+                tile_size=int(tile_size),
+                stride=int(stride),
+            )
+            total_positive_candidates += len(positive_candidate_windows)
+            selection_contexts.append(
+                {
+                    "pair": pair,
+                    "width": int(src.width),
+                    "height": int(src.height),
+                    "windows_total": len(all_windows),
+                    "windows_by_split": windows_by_split,
+                    "boundary_discarded": int(boundary_discarded),
+                    "positive_candidate_windows": positive_candidate_windows,
+                    "positive_candidate_source": candidate_source,
+                }
+            )
+
+    processed_positive_candidates = 0
+    total_positive_candidates = max(1, int(total_positive_candidates))
+    selected_records: List[TileRecord] = []
+    source_summaries: List[Dict[str, object]] = []
+    sampling_stats: Dict[str, object] = {
+        "mode": SAMPLING_MODE_SELECTED_REGIONS,
+        "strategy": "positive_from_annotations_random_unlabeled_negatives",
+        "negative_to_positive_ratio": float(negative_to_positive_ratio),
+        "per_split": {
+            split_name: {
+                "positive_count": 0,
+                "negative_target": 0,
+                "negative_pool_total": 0,
+                "negative_scanned": 0,
+                "negative_selected": 0,
+                "negative_shortfall": 0,
+            }
+            for split_name in SPLIT_ORDER
+        },
+    }
+
+    for source_index, context in enumerate(selection_contexts):
+        pair = context["pair"]
+        positive_candidate_windows = list(context["positive_candidate_windows"])
+        windows_by_split = {
+            str(split_name): list(items)
+            for split_name, items in dict(context["windows_by_split"]).items()
+        }
+        source_counter: Counter[str] = Counter()
+        candidate_rejected = 0
+        invalid_discarded = 0
+        boundary_discarded = int(context["boundary_discarded"])
+        negative_scanned_total = 0
+
+        with rasterio.open(pair.raster_path) as src, rasterio.open(pair.mask_path) as mask_src:
+            positive_records: List[TileRecord] = []
+            for result in iterate_scan_results(
+                pair=pair,
+                windows=positive_candidate_windows,
+                band_idx=band_idx,
+                args=args,
+            ):
+                processed_positive_candidates += 1
+                if (
+                    processed_positive_candidates == 1
+                    or processed_positive_candidates == total_positive_candidates
+                    or processed_positive_candidates % 100 == 0
+                ):
+                    emit_progress(
+                        phase="scan",
+                        current=processed_positive_candidates,
+                        total=total_positive_candidates,
+                        message=(
+                            f"Etiketli pencere taraniyor: "
+                            f"{processed_positive_candidates}/{total_positive_candidates} ({pair.name})"
+                        ),
+                    )
+                status = str(result.get("status", ""))
+                if status == "boundary":
+                    boundary_discarded += 1
+                    continue
+                if status == "invalid":
+                    invalid_discarded += 1
+                    continue
+                if status != "ok":
+                    raise ValueError(f"Bilinmeyen scan sonucu: {status}")
+                if str(result["label"]) != LABEL_POSITIVE:
+                    candidate_rejected += 1
+                    continue
+                record = tile_record_from_scan_result(pair.name, result)
+                positive_records.append(record)
+                source_counter[f"{record.split}_{record.label}"] += 1
+
+            positive_window_set = {(int(item.row_off), int(item.col_off)) for item in positive_records}
+            rng = random.Random(int(args.seed) + source_index * 1009)
+            negative_records: List[TileRecord] = []
+            for split_name in SPLIT_ORDER:
+                split_positive_count = sum(1 for item in positive_records if item.split == split_name)
+                target_negative_count = int(round(split_positive_count * float(negative_to_positive_ratio)))
+                candidate_pool = [
+                    (int(row_off), int(col_off))
+                    for row_off, col_off in windows_by_split.get(split_name, [])
+                    if (int(row_off), int(col_off)) not in positive_window_set
+                ]
+                split_negative_records, scanned_for_split = collect_random_negative_records(
+                    pair=pair,
+                    candidate_windows=candidate_pool,
+                    split_name=split_name,
+                    target_count=target_negative_count,
+                    band_idx=band_idx,
+                    args=args,
+                    rng=rng,
+                )
+                for record in split_negative_records:
+                    negative_records.append(record)
+                    source_counter[f"{record.split}_{record.label}"] += 1
+                negative_scanned_total += scanned_for_split
+                split_stats = sampling_stats["per_split"][split_name]
+                split_stats["positive_count"] += int(split_positive_count)
+                split_stats["negative_target"] += int(target_negative_count)
+                split_stats["negative_pool_total"] += int(len(candidate_pool))
+                split_stats["negative_scanned"] += int(scanned_for_split)
+                split_stats["negative_selected"] += int(len(split_negative_records))
+                split_stats["negative_shortfall"] += int(max(0, target_negative_count - len(split_negative_records)))
+
+        selected_records.extend(positive_records)
+        selected_records.extend(negative_records)
+        source_summaries.append(
+            {
+                "name": pair.name,
+                "raster_path": str(pair.raster_path),
+                "mask_path": str(pair.mask_path),
+                "width": int(context["width"]),
+                "height": int(context["height"]),
+                "windows_total": int(context["windows_total"]),
+                "boundary_discarded": int(boundary_discarded),
+                "invalid_discarded": int(invalid_discarded),
+                "positive_candidate_source": str(context["positive_candidate_source"]),
+                "positive_candidate_windows": len(positive_candidate_windows),
+                "positive_candidate_rejected": int(candidate_rejected),
+                "negative_random_scanned": int(negative_scanned_total),
+                "counts": dict(source_counter),
+            }
+        )
+        emit_progress(
+            phase="scan",
+            current=min(processed_positive_candidates, total_positive_candidates),
+            total=total_positive_candidates,
+            message=f"Secili bolge taramasi tamamlandi: {pair.name}",
+        )
+
+    selected_records = sorted(
+        selected_records,
+        key=lambda item: (SPLIT_ORDER.index(item.split), item.source_name, item.row_off, item.col_off),
+    )
+    sampling_stats["total_selected"] = len(selected_records)
+    metadata = {
+        "schema_version": METADATA_SCHEMA_VERSION,
+        "task_type": "tile_classification",
+        "dataset_layout": "classification_folders",
+        "num_channels": len(MODEL_CHANNEL_NAMES),
+        "channel_names": list(MODEL_CHANNEL_NAMES),
+        "bands": str(args.bands),
+        "tile_size": int(args.tile_size),
+        "overlap": int(args.overlap),
+        "stride": stride,
+        "tpi_radii": list(parse_int_csv(args.tpi_radii)),
+        "positive_ratio_threshold": float(args.positive_ratio_threshold),
+        "valid_ratio_threshold": float(args.valid_ratio_threshold),
+        "negative_to_positive_ratio": float(args.negative_to_positive_ratio),
+        "train_ratio": float(args.train_ratio),
+        "val_ratio": float(args.val_ratio),
+        "test_ratio": float(args.test_ratio),
+        "train_negative_keep_ratio": float(args.train_negative_keep_ratio),
+        "train_negative_max": None if args.train_negative_max is None else int(args.train_negative_max),
+        "normalize": bool(args.normalize),
+        "save_format": str(args.format),
+        "num_workers": int(args.num_workers),
+        "derivative_cache_mode": str(args.derivative_cache_mode),
+        "derivative_cache_dir": str(args.derivative_cache_dir).strip(),
+        "recalculate_derivative_cache": bool(args.recalculate_derivative_cache),
+        "sampling_mode": str(args.sampling_mode),
+        "selection_strategy": "selected_regions_direct_compute",
+        "sources": source_summaries,
+    }
+    return selected_records, metadata, sampling_stats
+
+
 def collect_tile_records(
     pairs: Sequence[SourcePair],
     args: argparse.Namespace,
 ) -> Tuple[List[TileRecord], Dict[str, object]]:
     band_idx = parse_int_csv(args.bands, expected_len=5)
     tile_size = int(args.tile_size)
+    num_workers = max(1, int(args.num_workers))
     stride = int(args.tile_size - args.overlap)
     all_records: List[TileRecord] = []
     source_summaries: List[Dict[str, object]] = []
@@ -610,7 +1284,28 @@ def collect_tile_records(
             source_counter: Counter[str] = Counter()
             boundary_discarded = 0
             invalid_discarded = 0
-            for row_off, col_off in windows:
+            def handle_scan_result(result: dict) -> None:
+                nonlocal boundary_discarded, invalid_discarded
+                status = str(result.get("status", ""))
+                if status == "boundary":
+                    boundary_discarded += 1
+                    return
+                if status == "invalid":
+                    invalid_discarded += 1
+                    return
+                if status != "ok":
+                    raise ValueError(f"Bilinmeyen scan sonucu: {status}")
+                split_name = str(result["split"])
+                label = str(result["label"])
+                all_records.append(tile_record_from_scan_result(pair.name, result))
+                source_counter[f"{split_name}_{label}"] += 1
+
+            for result in iterate_scan_results(
+                pair=pair,
+                windows=windows,
+                band_idx=band_idx,
+                args=args,
+            ):
                 processed_windows += 1
                 if processed_windows == 1 or processed_windows == total_windows or processed_windows % 200 == 0:
                     emit_progress(
@@ -619,40 +1314,7 @@ def collect_tile_records(
                         total=total_windows,
                         message=f"Taranan pencere: {processed_windows}/{total_windows} ({pair.name})",
                     )
-                split_name = split_window_by_rows(
-                    row_off=row_off,
-                    tile_size=tile_size,
-                    raster_height=int(src.height),
-                    train_ratio=float(args.train_ratio),
-                    val_ratio=float(args.val_ratio),
-                    test_ratio=float(args.test_ratio),
-                )
-                if split_name is None:
-                    boundary_discarded += 1
-                    continue
-                window = Window(col_off=col_off, row_off=row_off, width=tile_size, height=tile_size)
-                _, valid_mask = read_window_data(src, band_idx, window)
-                valid_ratio = float(valid_mask.mean()) if valid_mask.size > 0 else 0.0
-                if valid_ratio < float(args.valid_ratio_threshold):
-                    invalid_discarded += 1
-                    continue
-                mask = mask_src.read(1, window=window).astype(np.float32)
-                pos_ratio, positive_pixels, total_pixels = positive_ratio_from_mask(mask, valid_mask=valid_mask)
-                label = LABEL_POSITIVE if pos_ratio >= float(args.positive_ratio_threshold) else LABEL_NEGATIVE
-                all_records.append(
-                    TileRecord(
-                        source_name=pair.name,
-                        split=split_name,
-                        label=label,
-                        row_off=int(row_off),
-                        col_off=int(col_off),
-                        positive_ratio=float(pos_ratio),
-                        valid_ratio=float(valid_ratio),
-                        positive_pixels=positive_pixels,
-                        total_pixels=total_pixels,
-                    )
-                )
-                source_counter[f"{split_name}_{label}"] += 1
+                handle_scan_result(result)
             source_summaries.append(
                 {
                     "name": pair.name,
@@ -761,6 +1423,17 @@ def prepare_derivative_cache_for_source(
 
     cache_tif_path, cache_meta_path = get_derivative_raster_cache_paths(pair.raster_path, str(cache_dir))
     raster_info = None
+
+    def _remove_raster_cache_files() -> None:
+        temp_tif_path = cache_tif_path.with_name(f"{cache_tif_path.stem}.building{cache_tif_path.suffix}")
+        temp_meta_path = cache_meta_path.with_name(f"{cache_meta_path.stem}.building{cache_meta_path.suffix}")
+        for p in (cache_tif_path, cache_meta_path, temp_tif_path, temp_meta_path):
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+
     if not recalculate:
         raster_info = load_derivative_raster_cache_info(
             cache_tif_path,
@@ -774,32 +1447,41 @@ def prepare_derivative_cache_for_source(
             tpi_radii=tpi_radii,
         )
     if raster_info is None:
-        build_derivative_raster_cache(
-            input_path=pair.raster_path,
-            band_idx=band_idx,
-            cache_tif_path=cache_tif_path,
-            cache_meta_path=cache_meta_path,
-            recalculate=recalculate,
-            rvt_radii=None,
-            gaussian_lrm_sigma=None,
-            enable_curvature=enable_curvature,
-            enable_tpi=enable_tpi,
-            tpi_radii=tuple(int(v) for v in tpi_radii),
-            chunk_size=2048,
-            worker_count=max(1, int(args.num_workers)),
-            halo_px=None,
-        )
-        raster_info = load_derivative_raster_cache_info(
-            cache_tif_path,
-            cache_meta_path,
-            pair.raster_path,
-            band_idx,
-            rvt_radii=None,
-            gaussian_lrm_sigma=None,
-            enable_curvature=enable_curvature,
-            enable_tpi=enable_tpi,
-            tpi_radii=tpi_radii,
-        )
+        _remove_raster_cache_files()
+        try:
+            build_derivative_raster_cache(
+                input_path=pair.raster_path,
+                band_idx=band_idx,
+                cache_tif_path=cache_tif_path,
+                cache_meta_path=cache_meta_path,
+                recalculate=True,
+                rvt_radii=None,
+                gaussian_lrm_sigma=None,
+                enable_curvature=enable_curvature,
+                enable_tpi=enable_tpi,
+                tpi_radii=tuple(int(v) for v in tpi_radii),
+                chunk_size=2048,
+                worker_count=max(1, int(args.num_workers)),
+                halo_px=None,
+            )
+            raster_info = load_derivative_raster_cache_info(
+                cache_tif_path,
+                cache_meta_path,
+                pair.raster_path,
+                band_idx,
+                rvt_radii=None,
+                gaussian_lrm_sigma=None,
+                enable_curvature=enable_curvature,
+                enable_tpi=enable_tpi,
+                tpi_radii=tpi_radii,
+            )
+        except Exception as exc:
+            _remove_raster_cache_files()
+            print(
+                f"UYARI: Raster-cache yeniden olusturulamadi ({pair.name}): {exc}",
+                flush=True,
+            )
+            raster_info = None
     if raster_info is None:
         print(
             f"UYARI: Derivative cache hazirlanamadi, kayit asamasi tile-bazli hesaplamaya donecek ({pair.name}).",
@@ -1033,24 +1715,34 @@ def save_tiles(
     saved_count = 0
     cache_records: List[Dict[str, object]] = []
     total_sources = max(1, len(records_by_source))
+    direct_selected_region_mode = str(getattr(args, "sampling_mode", "")).strip().lower() == SAMPLING_MODE_SELECTED_REGIONS
     for source_name in sorted(records_by_source):
         pair = pair_by_name[source_name]
         source_records = sorted(
             records_by_source[source_name],
             key=lambda item: (SPLIT_ORDER.index(item.split), item.row_off, item.col_off),
         )
-        emit_progress(
-            phase="cache",
-            current=len(cache_records) + 1,
-            total=total_sources,
-            message=f"Turev cache hazirlaniyor: {pair.name}",
-        )
-        prepared_cache = prepare_derivative_cache_for_source(
-            pair=pair,
-            band_idx=band_idx,
-            tpi_radii=tpi_radii,
-            args=args,
-        )
+        if direct_selected_region_mode:
+            emit_progress(
+                phase="cache",
+                current=len(cache_records) + 1,
+                total=total_sources,
+                message=f"Turev cache atlandi: {pair.name} (selected_regions)",
+            )
+            prepared_cache = PreparedDerivativeCache(mode="selected_regions_direct")
+        else:
+            emit_progress(
+                phase="cache",
+                current=len(cache_records) + 1,
+                total=total_sources,
+                message=f"Turev cache hazirlaniyor: {pair.name}",
+            )
+            prepared_cache = prepare_derivative_cache_for_source(
+                pair=pair,
+                band_idx=band_idx,
+                tpi_radii=tpi_radii,
+                args=args,
+            )
         cache_records.append(
             {
                 "source_name": pair.name,
@@ -1262,14 +1954,13 @@ def main() -> int:
             include_test=float(args.test_ratio) > 0.0,
         )
         emit_progress(phase="start", current=0, total=1, message="Kaynaklar taraniyor...")
-        records, metadata = collect_tile_records(pairs, args)
         if args.sampling_mode == SAMPLING_MODE_SELECTED_REGIONS:
-            selected_records, sampling_stats = select_records_for_selected_regions_mode(
-                records,
-                negative_to_positive_ratio=float(args.negative_to_positive_ratio),
-                seed=int(args.seed),
+            selected_records, metadata, sampling_stats = collect_selected_region_records(
+                pairs,
+                args,
             )
         else:
+            records, metadata = collect_tile_records(pairs, args)
             selected_records, sampling_stats = select_train_negative_records(
                 records,
                 keep_ratio=float(args.train_negative_keep_ratio),
@@ -1282,8 +1973,12 @@ def main() -> int:
         emit_progress(
             phase="select",
             current=len(selected_records),
-            total=max(1, len(records)),
-            message=f"Secilen tile sayisi: {len(selected_records)} / {len(records)}",
+            total=max(1, len(selected_records) if args.sampling_mode == SAMPLING_MODE_SELECTED_REGIONS else len(records)),
+            message=(
+                f"Secilen tile sayisi: {len(selected_records)}"
+                if args.sampling_mode == SAMPLING_MODE_SELECTED_REGIONS
+                else f"Secilen tile sayisi: {len(selected_records)} / {len(records)}"
+            ),
         )
         save_tiles(
             output_dir=args.output_dir,
