@@ -25,8 +25,10 @@ The checked-in profile targets **tile-level classification** (`dl_task: tile_cla
 - [🎯 What It Does](#-what-it-does)
 - [🚀 Quick Start](#-quick-start)
 - [📦 Installation](#-installation)
+- [🔗 Band Merge Tool (`veri_birlestir_rgb_dsm_dtm.py`)](#-band-merge-tool-veri_birlestir_rgb_dsm_dtmpy)
 - [DSM to DTM Preprocessing (`dtm_uret.py`)](#dsm-to-dtm-preprocessing-dtm_uretpy)
 - [🏷️ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-labeling-tool-ground_truth_kare_etiketleme_qtpy)
+- [🗂️ Tile Classification Dataset Tool (`prepare_tile_classification_dataset.py`)](#%EF%B8%8F-tile-classification-dataset-tool-prepare_tile_classification_datasetpy)
 - [🎮 Usage](#-usage)
 - [⚙️ Configuration](#️-configuration)
 - [📂 Output Files](#-output-files)
@@ -238,6 +240,51 @@ print(torch.cuda.is_available())  # Should be True
 
 ---
 
+## 🔗 Band Merge Tool (`veri_birlestir_rgb_dsm_dtm.py`)
+
+`veri_birlestir_rgb_dsm_dtm.py` combines separate RGB, DSM, and DTM GeoTIFF files into a single 5-band GeoTIFF ready for the detection and training pipeline.
+
+**Band order in the output:**
+| Band | Content |
+|------|---------|
+| 1 | Red (RGB) |
+| 2 | Green (RGB) |
+| 3 | Blue (RGB) |
+| 4 | DSM |
+| 5 | DTM |
+
+### Quick Run
+
+```bash
+python veri_birlestir_rgb_dsm_dtm.py \
+  --rgb-input veri/ortofoto_rgb.tif \
+  --dsm-input veri/dsm.tif \
+  --dtm-input veri/dtm.tif \
+  --output veri/combined_5band.tif
+```
+
+### Key CLI Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--rgb-input` | _(required)_ | RGB raster (minimum 3 bands) |
+| `--dsm-input` | _(required)_ | DSM raster (1 band) |
+| `--dtm-input` | _(required)_ | DTM raster (1 band) |
+| `--output` | _(required)_ | Output 5-band GeoTIFF path |
+| `--nodata` | `-9999.0` | NoData value for output |
+| `--compression` | `LZW` | TIFF compression (`LZW` \| `DEFLATE` \| `NONE`) |
+| `--block-size` | `512` | TIFF tile/block size (rounded to nearest 16) |
+| `--log-level` | `INFO` | Logging level (`DEBUG` \| `INFO` \| `WARNING` \| `ERROR`) |
+| `--progress` / `--no-progress` | on | Progress bar toggle |
+
+### Notes
+
+- All inputs are resampled to the resolution and extent of the RGB raster.
+- The script validates that source CRS values are compatible before merging.
+- If run from an IDE without CLI arguments, set the `CONFIG` dict at the top of the script.
+
+---
+
 ## DSM to DTM Preprocessing (`dtm_uret.py`)
 
 `dtm_uret.py` converts DSM GeoTIFF or LAS/LAZ point cloud input into a DTM GeoTIFF.
@@ -435,6 +482,93 @@ pip install PySide6   # or: pip install PyQt6
 
 ---
 
+## 🗂️ Tile Classification Dataset Tool (`prepare_tile_classification_dataset.py`)
+
+Dedicated script for building an **explicit Positive/Negative tile classification dataset** from one or more raster + mask pairs. Unlike `egitim_verisi_olusturma.py` (which produces paired images/masks for segmentation or legacy tile_classification), this script outputs pre-sorted `Positive/` and `Negative/` folders directly, which is the canonical layout for `training.py --task tile_classification`.
+
+### Output Layout
+
+```
+output_dir/
+  train/
+    Positive/   ← tiles where positive_ratio >= threshold
+    Negative/
+  val/
+    Positive/
+    Negative/
+  test/          ← optional (when --test-ratio > 0)
+    Positive/
+    Negative/
+  metadata.json
+  tiles_manifest.csv
+  tile_labels.csv
+```
+
+Each tile is a 12-channel `.npz` (or `.npy`) file compatible with `training.py tile_classification` mode.
+
+### Quick Run
+
+```bash
+# Single raster + mask pair
+python prepare_tile_classification_dataset.py \
+  --pair kesif_alani.tif ground_truth.tif \
+  --output-dir training_data_cls \
+  --sampling-mode selected_regions \
+  --overwrite
+
+# Multiple sources
+python prepare_tile_classification_dataset.py \
+  --pair bolge1.tif bolge1_mask.tif \
+  --pair bolge2.tif bolge2_mask.tif \
+  --output-dir training_data_cls \
+  --train-negative-keep-ratio 0.35
+```
+
+### Sampling Modes
+
+| Mode | Description |
+|------|-------------|
+| `full_grid` | Slide over the entire raster with `tile_size` stride |
+| `selected_regions` | Only emit tiles that overlap mask-marked regions (much smaller dataset, higher positive density) |
+
+### Key CLI Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--pair RASTER MASK` | _(required)_ | Raster + mask pair; repeat for multiple sources |
+| `--output-dir` | `training_data_classification` | Output root directory |
+| `--tile-size` | `256` | Tile size in pixels |
+| `--overlap` | `128` | Sliding-window overlap in pixels |
+| `--bands` | `1,2,3,4,5` | 1-based band indices: R, G, B, DSM, DTM |
+| `--tpi-radii` | `5,15,30` | Comma-separated TPI radii (pixels) |
+| `--sampling-mode` | `full_grid` | `full_grid` or `selected_regions` |
+| `--positive-ratio-threshold` | `0.02` | Min fraction of positive pixels to call a tile Positive |
+| `--valid-ratio-threshold` | `0.70` | Min valid-pixel fraction required to keep a tile |
+| `--negative-to-positive-ratio` | `1.0` | Max negatives per positive (for `selected_regions` mode) |
+| `--train-ratio` | `0.8` | Train fraction of total tiles |
+| `--val-ratio` | `0.2` | Val fraction of total tiles |
+| `--test-ratio` | `0.0` | Optional held-out test split |
+| `--train-negative-keep-ratio` | `0.35` | Fraction of all-negative **train** tiles to keep |
+| `--train-negative-max` | `None` | Optional hard cap on kept negative train tiles |
+| `--normalize` / `--no-normalize` | on | Apply robust 2-98% normalization to stacked channels |
+| `--format` | `npz` | Output format: `npz` or `npy` |
+| `--num-workers` | auto | Parallel worker processes |
+| `--derivative-cache-mode` | `auto` | `none` \| `auto` \| `npz` \| `raster` |
+| `--derivative-cache-dir` | _(sibling `cache/`)_ | Where to store/read RVT derivative cache |
+| `--recalculate-derivative-cache` | off | Force re-computation even if cache exists |
+| `--tile-prefix` | `""` | Optional prefix for tile filenames |
+| `--seed` | `42` | Random seed for reproducible splits |
+| `--overwrite` | off | Delete and recreate output directory if it exists |
+
+### Manifest Files
+
+The script writes two companion CSV files alongside `metadata.json`:
+
+- **`tiles_manifest.csv`** — full record per tile: `tile_name`, `split`, `label`, `image_relpath`, `source_name`, `row_off`, `col_off`, `positive_ratio`, `valid_ratio`
+- **`tile_labels.csv`** — compact label index: `tile_name`, `split`, `tile_label`, `positive_ratio`, used by `training.py` for fast label counts without scanning files
+
+---
+
 ## 🎮 Usage
 
 ### Basic Usage
@@ -575,16 +709,17 @@ System behavior is controlled by the `config.yaml` file. This file is **richly d
 2. **Method Selection**: `enable_deep_learning`, `enable_classic`, `enable_yolo`, `enable_fusion`
 3. **DL task**: `dl_task` — `segmentation` (per-pixel) or `tile_classification` (tile score → risk map with overlap blending)
 4. **Trained-only mode**: `trained_model_only` — when `true`, enforces a single checkpoint + metadata (`weights`, `training_metadata`); locks tile/overlap/bands from metadata
-5. **Deep Learning**: Architecture, encoder, weights, `zero_shot_imagenet`, attention / band importance
+5. **Deep Learning**: Architecture, encoder, weights, `zero_shot_imagenet`, attention / band importance (`save_band_importance`, `band_importance_max_tiles`)
 6. **Classical Methods**: RVT, Hessian, Morphology parameters
-7. **Fusion**: Hybrid combination settings (`alpha`, …) — requires both DL and classic enabled
-8. **YOLO11** (optional): Separate RGB-only inventory / segmentation path; usually off for the tile-classification preset
-9. **Tile Processing**: Memory and performance optimization (`tile` / `overlap` documented vs metadata-locked)
-10. **Normalization**: Data preprocessing
-11. **Masking**: Filtering tall structures (`mask_talls`, `rgb_only`)
-12. **Vectorization**: GIS output (`vectorize`, `min_area`, `export_candidate_excel`, …)
-13. **Performance**: Device, `half`, `seed`, `verbose`
-14. **Cache**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster cache tuning
+7. **Advanced Topographic Analysis**: `enable_curvature` (Plan + Profile Curvature channels for ditch/ridge separation), `enable_tpi` (multi-scale TPI), `tpi_radii`
+8. **Fusion**: Hybrid combination settings (`alpha`, …) — requires both DL and classic enabled
+9. **YOLO11** (optional): Separate RGB-only inventory / segmentation path; usually off for the tile-classification preset
+10. **Tile Processing**: Memory and performance optimization (`tile` / `overlap` documented vs metadata-locked)
+11. **Normalization**: Data preprocessing
+12. **Masking**: Filtering tall structures (`mask_talls`, `rgb_only`)
+13. **Vectorization**: GIS output (`vectorize`, `min_area`, `export_candidate_excel`, …)
+14. **Performance**: Device, `half`, `seed`, `verbose`; automatic OOM guard for large rasters (full-raster derivative precompute is skipped if available RAM is insufficient)
+15. **Cache**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster cache tuning
 
 #### Quick Configuration Scenarios:
 
@@ -1888,16 +2023,32 @@ python training.py \
 
 | Parameter | Default | Options / Notes |
 |-----------|---------|-----------------|
-| `--data` | `training_data` | Path to Step 2 output |
+| `--data` | `training_data` | Path to Step 2 output (paired or Positive/Negative layout) |
+| `--task` | `tile_classification` | `segmentation` or `tile_classification` |
 | `--arch` | `Unet` | `Unet`, `UnetPlusPlus`, `DeepLabV3Plus`, `FPN` |
-| `--encoder` | `resnet34` | `resnet50`, `efficientnet-b3`, `densenet121` |
+| `--encoder` | `resnet50` | `resnet34`, `efficientnet-b3`, `densenet121` |
 | `--epochs` | `50` | More = potentially better (with early stopping) |
-| `--batch-size` | `8` | Increase if GPU memory allows |
+| `--batch-size` | `16` | Increase if GPU memory allows |
 | `--lr` | `1e-4` | Reduce if loss oscillates |
-| `--loss` | `combined` | `bce`, `dice`, `combined`, `focal` |
+| `--loss` | `bce` | `bce`, `dice`, `combined`, `focal`; `tile_classification` only supports `bce`/`focal` |
+| `--balance-mode` | `auto` | `auto` (computes pos_weight from train ratio), `manual`, `none` |
+| `--pos-weight` | `1.0` | Manual BCE positive class weight (used when `--balance-mode manual`) |
+| `--max-auto-pos-weight` | `100.0` | Clamp for auto-computed pos_weight to avoid destabilizing training |
 | `--patience` | `10` | Early stopping after N epochs without improvement |
+| `--metric-threshold` | `0.5` | Probability threshold used to compute IoU/F1/Precision/Recall metrics |
+| `--val-threshold-sweep` | on | Sweep thresholds 0.1–0.9 on val and report best IoU + threshold |
 | `--no-attention` | Off | Disable CBAM attention |
 | `--no-amp` | Off | Disable mixed precision (FP16) |
+| `--train-neg-to-pos-ratio` | `2` | Sub-sample negatives to this multiple of positives in train (`None` = keep all) |
+| `--train-neg-sample-seed` | `42` | RNG seed for negative sub-sampling |
+| `--val-keep-ratio` | `1.0` | Fraction of val tiles to keep relative to selected train count |
+| `--val-sample-seed` | `42` | RNG seed for val sub-sampling |
+| `--tile-label-min-positive-ratio` | `0.02` | Minimum positive-pixel ratio to label a tile as Positive (paired layout) |
+| `--monitor-channel-importance` | on | Track and log per-channel gradient importance during training |
+| `--channel-importance-max-batches` | `12` | Max batches for gradient-based channel importance (0 = all) |
+| `--deterministic-rotate-step-deg` | `30.0` | Augmentation rotation step (0 = disabled; 30 → 12 views per sample) |
+| `--allow-all-negative` | off | Continue training even if all labels are negative (guards against bad data) |
+| `--save-every-epoch` | on | Save a per-epoch checkpoint under `checkpoints/epochs/` |
 
 #### Choosing the Right Settings
 
@@ -2212,15 +2363,20 @@ python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumul
 arkeolojik_alan_tespit/            # project root (example name)
 ├── archaeo_detect.py              # Main detection script
 ├── archeo_shared/                 # Shared channel schema & model helpers
-│   └── channels.py                # MODEL_CHANNEL_NAMES, metadata schema version
-├── egitim_verisi_olusturma.py     # Training data generation
+│   ├── channels.py                # MODEL_CHANNEL_NAMES, metadata schema version
+│   └── modeling.py                # CBAM, ChannelAttention, SpatialAttention, AttentionWrapper
+├── egitim_verisi_olusturma.py     # Training data generation (paired images/masks)
+├── prepare_tile_classification_dataset.py  # Positive/Negative tile dataset builder
 ├── training.py                    # Model training script
 ├── evaluation.py                  # Evaluation metrics
+├── veri_birlestir_rgb_dsm_dtm.py  # Merge RGB + DSM + DTM into a single 5-band GeoTIFF
+├── dtm_uret.py                    # DSM/LAS → DTM conversion (SMRF / morphological fallback)
+├── ground_truth_kare_etiketleme_qt.py  # Qt-based GeoTIFF annotation tool
 ├── config.yaml                    # Configuration file
 ├── configs/                       # Example YAML profiles (e.g. tile classification)
 ├── requirements.txt               # Python dependencies
 ├── README.md                      # This documentation
-├── training_data/                  # Generated training tiles
+├── training_data/                  # Generated training tiles (paired layout)
 │   ├── train/
 │   │   ├── images/                 # 12-channel image tiles (.npz)
 │   │   └── masks/                  # Binary mask tiles (.npz)
@@ -2228,16 +2384,34 @@ arkeolojik_alan_tespit/            # project root (example name)
 │   │   ├── images/
 │   │   └── masks/
 │   └── metadata.json               # Dataset metadata
+├── training_data_cls/              # Tile classification dataset (Positive/Negative layout)
+│   ├── train/
+│   │   ├── Positive/
+│   │   └── Negative/
+│   ├── val/
+│   │   ├── Positive/
+│   │   └── Negative/
+│   ├── metadata.json
+│   ├── tiles_manifest.csv
+│   └── tile_labels.csv
 ├── checkpoints/                    # Trained model weights
 │   ├── active/model.pth
 │   ├── active/training_metadata.json
-│   └── training_history.json
+│   ├── active/published_from.json
+│   ├── epochs/                     # Per-epoch checkpoints (when save_every_epoch=true)
+│   ├── training_history.json
+│   └── channel_importance_history.json  # Per-epoch band importance (when enabled)
 ├── cache/                          # RVT derivatives cache
 │   └── *.<cache_hash>.derivatives.npz
 └── ciktilar/                       # Output detection results
-    ├── *_prob.tif                  # Probability maps
-    ├── *_mask.tif                  # Binary masks
-    └── *_mask.gpkg                 # Vector polygons
+    └── <session_folder>/
+        ├── run_params.txt           # Effective run parameters
+        ├── *_prob.tif               # Probability maps
+        ├── *_mask.tif               # Binary masks
+        ├── *_mask.gpkg              # Vector polygons
+        ├── *_gps.xlsx               # GPS candidate table (when export_candidate_excel=true)
+        ├── *_band_importance.txt    # Band importance report (when save_band_importance=true)
+        └── *_band_importance.json
 ```
 
 ### System Architecture
@@ -2519,6 +2693,6 @@ If you use this project in your academic work, please cite:
 <div align="center">
 
 Developer: Ahmet Ertuğrul Arık  
-Last update: March 2026
+Last update: April 2026
 
 </div>
