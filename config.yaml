@@ -956,13 +956,13 @@ cache_derivatives_mode: "auto"
 # deriv_cache_chunk: Raster-cache üretiminde blok boyutu (piksel)
 # - Büyük değer: daha az blok, daha hızlı (daha çok RAM)
 # - Küçük değer: daha az RAM, daha çok blok (daha yavaş)
-deriv_cache_chunk: 2048
+deriv_cache_chunk: 4096
 
 # deriv_cache_workers: Raster-cache üretiminde paralel worker sayısı
 # - 1: seri işleme
 # - 2-4: genelde daha hızlı (disk hızına ve RAM'e bağlı)
 # - Çok yüksek değerler: I/O ve bellek maliyeti nedeniyle verimsiz olabilir
-deriv_cache_workers: 8
+deriv_cache_workers: 4
 
 # deriv_cache_halo: Blok sınır artefaktlarını önlemek için halo (piksel)
 # - null: otomatik (rvt_radii / tpi_radii / gaussian_lrm_sigma'dan hesaplanır)
