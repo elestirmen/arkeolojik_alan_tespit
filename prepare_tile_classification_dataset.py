@@ -1407,7 +1407,16 @@ def prepare_derivative_cache_for_source(
             enable_tpi=enable_tpi,
         )
         if precompute_ok:
-            cache_path = get_cache_path(pair.raster_path, str(cache_dir))
+            cache_path = get_cache_path(
+                pair.raster_path,
+                str(cache_dir),
+                band_idx=band_idx,
+                rvt_radii=None,
+                gaussian_lrm_sigma=None,
+                enable_curvature=enable_curvature,
+                enable_tpi=enable_tpi,
+                tpi_radii=tpi_radii,
+            )
             precomputed = precompute_derivatives(
                 input_path=pair.raster_path,
                 band_idx=band_idx,
@@ -1431,7 +1440,16 @@ def prepare_derivative_cache_for_source(
                 flush=True,
             )
 
-    cache_tif_path, cache_meta_path = get_derivative_raster_cache_paths(pair.raster_path, str(cache_dir))
+    cache_tif_path, cache_meta_path = get_derivative_raster_cache_paths(
+        pair.raster_path,
+        str(cache_dir),
+        band_idx=band_idx,
+        rvt_radii=None,
+        gaussian_lrm_sigma=None,
+        enable_curvature=enable_curvature,
+        enable_tpi=enable_tpi,
+        tpi_radii=tpi_radii,
+    )
     raster_info = None
 
     def _remove_raster_cache_files() -> None:

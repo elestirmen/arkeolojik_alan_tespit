@@ -578,6 +578,7 @@ class ArchaeologyDataset(Dataset):
             if self.augment:
                 if self._use_deterministic_rotation:
                     image = self._apply_rotation_image(image, rotation_angle)
+                    image = self._apply_random_flips_image(image)
                 else:
                     image = self._augment_image(image)
             image = torch.from_numpy(image.copy()).float()
@@ -602,6 +603,7 @@ class ArchaeologyDataset(Dataset):
         if self.augment:
             if self._use_deterministic_rotation:
                 image, mask = self._apply_rotation_pair(image, mask, rotation_angle)
+                image, mask = self._apply_random_flips_pair(image, mask)
             else:
                 image, mask = self._augment(image, mask)
         
@@ -649,6 +651,34 @@ class ArchaeologyDataset(Dataset):
             prefilter=False,
         )
         return rotated_image, _mask_to_binary(rotated_mask)
+
+    def _apply_random_flips_image(self, image: np.ndarray) -> np.ndarray:
+        """Deterministic rotation ile birlikte rastgele yatay/dikey flip uygula."""
+
+        if np.random.random() > 0.5:
+            image = np.flip(image, axis=2).copy()
+
+        if np.random.random() > 0.5:
+            image = np.flip(image, axis=1).copy()
+
+        return image
+
+    def _apply_random_flips_pair(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Deterministic rotation ile birlikte image+mask flip uygula."""
+
+        if np.random.random() > 0.5:
+            image = np.flip(image, axis=2).copy()
+            mask = np.flip(mask, axis=1).copy()
+
+        if np.random.random() > 0.5:
+            image = np.flip(image, axis=1).copy()
+            mask = np.flip(mask, axis=0).copy()
+
+        return image, mask
 
     def _augment_image(self, image: np.ndarray) -> np.ndarray:
         """Tile-level classification icin yalnizca goruntu augmentasyonu."""
@@ -1946,7 +1976,7 @@ def train(config: TrainingConfig) -> Path:
         )
     if train_dataset._use_deterministic_rotation:
         LOGGER.info(
-            "Deterministik train rotasyonu aktif: adim=%.2f°, carpim=%dx",
+            "Deterministik train rotasyonu aktif: adim=%.2f°, carpim=%dx, rastgele flip=acik",
             float(config.deterministic_rotate_step_deg),
             int(train_dataset._augmentation_multiplier),
         )

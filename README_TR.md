@@ -651,8 +651,8 @@ kesif_alani_fused_resnet34_mask.gpkg → Füzyon vektör çokgenleri
 **Önbellek Dizin Yapısı:**
 ```
 cache/
-├── kesif_alani.derivatives.npz    → RVT türevleri önbelleği
-└── karlik_vadi.derivatives.npz   → RVT türevleri önbelleği
+├── kesif_alani.a1b2c3d4e5f6.derivatives.npz    → RVT türevleri önbelleği
+└── karlik_vadi.f6e5d4c3b2a1.derivatives.npz   → RVT türevleri önbelleği
 ```
 
 **Önbellek Sistemi:**
@@ -1196,13 +1196,13 @@ python archaeo_detect.py --overlap 512 --feather
    ```
 
 2. Önbellek dosya adlandırmasını doğrulayın:
-   - NPZ önbellek (küçük/orta rasterlar için varsayılan): `<giriş_adı>.derivatives.npz`
+   - NPZ önbellek (küçük/orta rasterlar için varsayılan): `<giriş_adı>.<cache_hash>.derivatives.npz`
    - Raster önbellek (blok tabanlı; çok büyük rasterlar veya `cache_derivatives_mode: "raster"` ile otomatik kullanılır):
-     - `<giriş_adı>.derivatives_raster.tif`
-     - `<giriş_adı>.derivatives_raster.json`
+     - `<giriş_adı>.<cache_hash>.derivatives_raster.tif`
+     - `<giriş_adı>.<cache_hash>.derivatives_raster.json`
    - `kesif_alani.tif` girişi için örnek:
-     - `kesif_alani.derivatives.npz`
-     - `kesif_alani.derivatives_raster.tif`
+     - `kesif_alani.a1b2c3d4e5f6.derivatives.npz`
+     - `kesif_alani.a1b2c3d4e5f6.derivatives_raster.tif`
 
 3. Önbellek doğrulamasını kontrol edin:
    - Önbellek doğrulaması dosya adı ve değişiklik zamanını kontrol eder
@@ -2141,7 +2141,7 @@ arkeolojik_alan_tespit/            # proje kökü (örnek ad)
 │   ├── active/training_metadata.json
 │   └── training_history.json
 ├── cache/                          # RVT türevleri önbelleği
-│   └── *.derivatives.npz
+│   └── *.<cache_hash>.derivatives.npz
 └── ciktilar/                       # Çıktı tespit sonuçları
     ├── *_prob.tif                  # Olasılık haritaları
     ├── *_mask.tif                  # İkili maskeler

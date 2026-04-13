@@ -737,8 +737,8 @@ When `export_candidate_excel: true` in `config.yaml`, companion `*_gps.xlsx` fil
 **Cache Directory Structure:**
 ```
 cache/
-├── kesif_alani.derivatives.npz    → RVT derivatives cache
-└── karlik_vadi.derivatives.npz   → RVT derivatives cache
+├── kesif_alani.a1b2c3d4e5f6.derivatives.npz    → RVT derivatives cache
+└── karlik_vadi.f6e5d4c3b2a1.derivatives.npz   → RVT derivatives cache
 ```
 
 **Cache System:**
@@ -1282,13 +1282,13 @@ python archaeo_detect.py --overlap 512 --feather
    ```
 
 2. Verify cache file naming:
-   - NPZ cache (default for small/medium rasters): `<input_name>.derivatives.npz`
+   - NPZ cache (default for small/medium rasters): `<input_name>.<cache_hash>.derivatives.npz`
    - Raster cache (block-based; used automatically for very large rasters or with `cache_derivatives_mode: "raster"`):
-     - `<input_name>.derivatives_raster.tif`
-     - `<input_name>.derivatives_raster.json`
+     - `<input_name>.<cache_hash>.derivatives_raster.tif`
+     - `<input_name>.<cache_hash>.derivatives_raster.json`
    - Example for input `kesif_alani.tif`:
-     - `kesif_alani.derivatives.npz`
-     - `kesif_alani.derivatives_raster.tif`
+     - `kesif_alani.a1b2c3d4e5f6.derivatives.npz`
+     - `kesif_alani.a1b2c3d4e5f6.derivatives_raster.tif`
 
 3. Check cache validation:
    - Cache validation checks file name and modification time
@@ -2233,7 +2233,7 @@ arkeolojik_alan_tespit/            # project root (example name)
 │   ├── active/training_metadata.json
 │   └── training_history.json
 ├── cache/                          # RVT derivatives cache
-│   └── *.derivatives.npz
+│   └── *.<cache_hash>.derivatives.npz
 └── ciktilar/                       # Output detection results
     ├── *_prob.tif                  # Probability maps
     ├── *_mask.tif                  # Binary masks

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import gc
+import hashlib
 import json
 import logging
 import math
@@ -5759,30 +5760,142 @@ def build_filename_with_params(
     return "_".join(parts)
 
 
-def get_cache_path(input_path: Path, cache_dir: Optional[str] = None) -> Path:
+def _stat_mtime_ns(stat_result: os.stat_result) -> int:
+    raw = getattr(stat_result, "st_mtime_ns", None)
+    if raw is not None:
+        return int(raw)
+    return int(round(float(stat_result.st_mtime) * 1_000_000_000.0))
+
+
+def _input_cache_identity(input_path: Path) -> Dict[str, Any]:
+    path = Path(input_path)
+    stat_result = path.stat()
+    identity: Dict[str, Any] = {
+        "name": path.name,
+        "size": int(stat_result.st_size),
+        "mtime_ns": _stat_mtime_ns(stat_result),
+    }
+    try:
+        with rasterio.open(path) as src:
+            identity.update(
+                {
+                    "width": int(src.width),
+                    "height": int(src.height),
+                    "count": int(src.count),
+                    "crs": src.crs.to_string() if src.crs is not None else None,
+                    "transform": [
+                        round(float(src.transform.a), 12),
+                        round(float(src.transform.b), 12),
+                        round(float(src.transform.c), 12),
+                        round(float(src.transform.d), 12),
+                        round(float(src.transform.e), 12),
+                        round(float(src.transform.f), 12),
+                    ],
+                }
+            )
+    except Exception as exc:
+        LOGGER.debug("Cache kimligi icin raster metadata okunamadi (%s): %s", path, exc)
+    return identity
+
+
+def build_derivative_cache_key(
+    input_path: Path,
+    band_idx: Sequence[int],
+    *,
+    rvt_radii: Optional[Sequence[float]] = None,
+    gaussian_lrm_sigma: Optional[float] = None,
+    enable_curvature: bool = True,
+    enable_tpi: bool = True,
+    tpi_radii: Optional[Sequence[int]] = None,
+) -> str:
+    """Cache dosya adlari icin dosya+parametre duyarli kisa anahtar uret."""
+    resolved_radii = DEFAULTS.rvt_radii if rvt_radii is None else rvt_radii
+    resolved_sigma = float(
+        DEFAULTS.gaussian_lrm_sigma if gaussian_lrm_sigma is None else gaussian_lrm_sigma
+    )
+    resolved_tpi_radii = DEFAULTS.tpi_radii if tpi_radii is None else tpi_radii
+    payload = {
+        "schema": 2,
+        "input": _input_cache_identity(Path(input_path)),
+        "bands": [int(v) for v in band_idx],
+        "rvt_radii": [round(float(v), 6) for v in resolved_radii],
+        "gaussian_lrm_sigma": round(float(resolved_sigma), 6),
+        "enable_curvature": bool(enable_curvature),
+        "enable_tpi": bool(enable_tpi),
+        "tpi_radii": [int(v) for v in resolved_tpi_radii],
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def get_cache_path(
+    input_path: Path,
+    cache_dir: Optional[str] = None,
+    *,
+    band_idx: Sequence[int] = (),
+    rvt_radii: Optional[Sequence[float]] = None,
+    gaussian_lrm_sigma: Optional[float] = None,
+    enable_curvature: bool = True,
+    enable_tpi: bool = True,
+    tpi_radii: Optional[Sequence[int]] = None,
+) -> Path:
     """RVT türevleri için cache dosya yolunu oluştur."""
+    cache_key = build_derivative_cache_key(
+        input_path,
+        band_idx,
+        rvt_radii=rvt_radii,
+        gaussian_lrm_sigma=gaussian_lrm_sigma,
+        enable_curvature=enable_curvature,
+        enable_tpi=enable_tpi,
+        tpi_radii=tpi_radii,
+    )
+    filename = f"{input_path.stem}.{cache_key}.derivatives.npz"
     if cache_dir:
         cache_path = Path(cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
         # Dosya adını uzantısız al ve .derivatives.npz ekle
         # Örn: kesif_alani.tif -> kesif_alani.derivatives.npz
-        return cache_path / f"{input_path.stem}.derivatives.npz"
-    return input_path.with_suffix(".derivatives.npz")
+        return cache_path / filename
+    return input_path.with_name(filename)
 
 
 def get_derivative_raster_cache_paths(
-    input_path: Path, cache_dir: Optional[str] = None
+    input_path: Path,
+    cache_dir: Optional[str] = None,
+    *,
+    band_idx: Sequence[int] = (),
+    rvt_radii: Optional[Sequence[float]] = None,
+    gaussian_lrm_sigma: Optional[float] = None,
+    enable_curvature: bool = True,
+    enable_tpi: bool = True,
+    tpi_radii: Optional[Sequence[int]] = None,
 ) -> Tuple[Path, Path]:
     """Blok bazl RVT trev raster-cache (GeoTIFF) yolu + metadata JSON yolu."""
     if cache_dir:
         cache_root = Path(cache_dir)
         cache_root.mkdir(parents=True, exist_ok=True)
-        tif_path = cache_root / f"{input_path.stem}.derivatives_raster.tif"
-        meta_path = cache_root / f"{input_path.stem}.derivatives_raster.json"
+        tif_path = cache_root / (
+            f"{input_path.stem}."
+            f"{build_derivative_cache_key(input_path, band_idx, rvt_radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma, enable_curvature=enable_curvature, enable_tpi=enable_tpi, tpi_radii=tpi_radii)}"
+            ".derivatives_raster.tif"
+        )
+        meta_path = cache_root / (
+            f"{input_path.stem}."
+            f"{build_derivative_cache_key(input_path, band_idx, rvt_radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma, enable_curvature=enable_curvature, enable_tpi=enable_tpi, tpi_radii=tpi_radii)}"
+            ".derivatives_raster.json"
+        )
         return tif_path, meta_path
     return (
-        input_path.with_suffix(".derivatives_raster.tif"),
-        input_path.with_suffix(".derivatives_raster.json"),
+        input_path.with_name(
+            f"{input_path.stem}."
+            f"{build_derivative_cache_key(input_path, band_idx, rvt_radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma, enable_curvature=enable_curvature, enable_tpi=enable_tpi, tpi_radii=tpi_radii)}"
+            ".derivatives_raster.tif"
+        ),
+        input_path.with_name(
+            f"{input_path.stem}."
+            f"{build_derivative_cache_key(input_path, band_idx, rvt_radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma, enable_curvature=enable_curvature, enable_tpi=enable_tpi, tpi_radii=tpi_radii)}"
+            ".derivatives_raster.json"
+        ),
     )
 
 
@@ -5835,6 +5948,20 @@ def validate_derivative_raster_cache_metadata(
     ]
     if not all(k in metadata for k in required_keys):
         LOGGER.warning("Raster-cache metadata eksik anahtarlar var; cache gecersiz")
+        return False
+
+    expected_cache_key = build_derivative_cache_key(
+        input_path,
+        band_idx,
+        rvt_radii=rvt_radii,
+        gaussian_lrm_sigma=gaussian_lrm_sigma,
+        enable_curvature=enable_curvature,
+        enable_tpi=enable_tpi,
+        tpi_radii=tpi_radii,
+    )
+    cached_cache_key = str(metadata.get("cache_key", "")).strip()
+    if cached_cache_key and cached_cache_key != expected_cache_key:
+        LOGGER.warning("Raster-cache anahtari uyusmuyor; cache gecersiz")
         return False
 
     if not bool(metadata.get("complete", False)):
@@ -6206,6 +6333,15 @@ def build_derivative_raster_cache(
         stat = input_path.stat()
         metadata: Dict[str, Any] = {
             "version": 1,
+            "cache_key": build_derivative_cache_key(
+                input_path,
+                band_idx,
+                rvt_radii=rvt_radii,
+                gaussian_lrm_sigma=gaussian_lrm_sigma,
+                enable_curvature=enable_curvature,
+                enable_tpi=enable_tpi,
+                tpi_radii=tpi_radii,
+            ),
             "complete": False,
             "input_path": str(input_path),
             "input_name": input_path.name,
@@ -6440,6 +6576,20 @@ def validate_cache(
     
     if not all(key in metadata for key in required_keys):
         LOGGER.warning("Cache metadata eksik")
+        return False
+
+    expected_cache_key = build_derivative_cache_key(
+        input_path,
+        bands,
+        rvt_radii=rvt_radii,
+        gaussian_lrm_sigma=gaussian_lrm_sigma,
+        enable_curvature=enable_curvature,
+        enable_tpi=enable_tpi,
+        tpi_radii=tpi_radii,
+    )
+    cached_cache_key = str(metadata.get("cache_key", "")).strip()
+    if cached_cache_key and cached_cache_key != expected_cache_key:
+        LOGGER.warning("Cache anahtari uyusmuyor, cache gecersiz")
         return False
     
     # Dosya adi kontrolu (yol degisse bile dosya adi ayni olmali)
@@ -6784,6 +6934,15 @@ def precompute_derivatives(
                 "tpi": tpi if tpi is not None else np.array([]),
             }
             metadata = {
+                "cache_key": build_derivative_cache_key(
+                    input_path,
+                    band_idx,
+                    rvt_radii=rvt_radii,
+                    gaussian_lrm_sigma=gaussian_lrm_sigma,
+                    enable_curvature=enable_curvature,
+                    enable_tpi=enable_tpi,
+                    tpi_radii=tpi_radii,
+                ),
                 "input_path": str(input_path),
                 "input_mtime": input_path.stat().st_mtime,
                 "input_size": input_path.stat().st_size,
@@ -7445,7 +7604,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             LOGGER.info("=" * 70)
             LOGGER.info("CACHE MODU (npz): RVT türevleri bir kez hesaplanacak ve diskten okunacak")
             LOGGER.info("=" * 70)
-            cache_path = get_cache_path(input_path, config.cache_dir)
+            cache_path = get_cache_path(
+                input_path,
+                config.cache_dir,
+                band_idx=bands,
+                rvt_radii=config.rvt_radii,
+                gaussian_lrm_sigma=config.gaussian_lrm_sigma,
+                enable_curvature=config.enable_curvature,
+                enable_tpi=config.enable_tpi,
+                tpi_radii=config.tpi_radii,
+            )
             precomputed_deriv = precompute_derivatives(
                 input_path=input_path,
                 band_idx=bands,
@@ -7472,7 +7640,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             LOGGER.info("CACHE MODU (raster): RVT türevleri blok blok diske yazılacak ve tekrar çalıştırmalarda buradan okunacak")
             LOGGER.info("=" * 70)
 
-            derivative_cache_tif, derivative_cache_meta = get_derivative_raster_cache_paths(input_path, config.cache_dir)
+            derivative_cache_tif, derivative_cache_meta = get_derivative_raster_cache_paths(
+                input_path,
+                config.cache_dir,
+                band_idx=bands,
+                rvt_radii=config.rvt_radii,
+                gaussian_lrm_sigma=config.gaussian_lrm_sigma,
+                enable_curvature=config.enable_curvature,
+                enable_tpi=config.enable_tpi,
+                tpi_radii=config.tpi_radii,
+            )
             raster_info = None
             if not config.recalculate_cache:
                 raster_info = load_derivative_raster_cache_info(

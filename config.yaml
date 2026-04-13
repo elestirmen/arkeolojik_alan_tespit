@@ -33,7 +33,7 @@
 # Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
 #input: "gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
 #input: "karlik_vadi.tif"
-input: "on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif"
+input: "on_veri/karlik_dag_rgb_dtm_dsm_5band.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
 # - null ise: Girdi dosya adından otomatik üretilir
@@ -193,7 +193,7 @@ encoders: "none"
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "checkpoints/active/epoch_011_TileClassifier_resnet50_12ch_attention.pth"
+weights: "checkpoints/best_loss_TileClassifier_resnet50_12ch_attention.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.

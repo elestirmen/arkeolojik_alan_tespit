@@ -32,7 +32,9 @@ import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.features import rasterize, shapes
-from rasterio.windows import Window
+from rasterio.transform import Affine
+from rasterio.vrt import WarpedVRT
+from rasterio.windows import Window, transform as window_transform
 
 QT_BACKEND = ""
 _pyside_import_error: Optional[Exception] = None
@@ -300,10 +302,16 @@ def compute_stretch_bounds(
     low: float = 2.0,
     high: float = 98.0,
 ) -> tuple[float, float]:
-    valid = np.isfinite(arr)
+    arr_f32 = np.asarray(arr, dtype=np.float32)
+    if np.ma.isMaskedArray(arr):
+        mask = np.ma.getmaskarray(arr)
+        if np.any(mask):
+            arr_f32 = arr_f32.copy()
+            arr_f32[mask] = np.nan
+    valid = np.isfinite(arr_f32)
     if not np.any(valid):
         return 0.0, 255.0
-    vals = arr[valid].astype(np.float32, copy=False)
+    vals = arr_f32[valid]
     lo = float(np.percentile(vals, low))
     hi = float(np.percentile(vals, high))
     if not np.isfinite(lo) or not np.isfinite(hi):
@@ -313,17 +321,49 @@ def compute_stretch_bounds(
 
 def stretch_to_uint8(arr: np.ndarray, low: float, high: float) -> np.ndarray:
     out = np.zeros(arr.shape, dtype=np.uint8)
-    valid = np.isfinite(arr)
+    arr_f32 = np.asarray(arr, dtype=np.float32)
+    if np.ma.isMaskedArray(arr):
+        mask = np.ma.getmaskarray(arr)
+        if np.any(mask):
+            arr_f32 = arr_f32.copy()
+            arr_f32[mask] = np.nan
+    valid = np.isfinite(arr_f32)
     if not np.any(valid):
         return out
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
-        clipped = np.clip(arr.astype(np.float32, copy=False), 0.0, 255.0)
+        clipped = np.clip(arr_f32, 0.0, 255.0)
         out[valid] = clipped[valid].astype(np.uint8)
         return out
-    scaled = (arr.astype(np.float32) - float(low)) / float(high - low)
+    scaled = (arr_f32 - float(low)) / float(high - low)
     scaled = np.clip(scaled, 0.0, 1.0)
     out[valid] = (scaled[valid] * 255.0).astype(np.uint8)
     return out
+
+
+def scaled_transform(
+    src_transform: Affine,
+    src_w: int,
+    src_h: int,
+    dst_w: int,
+    dst_h: int,
+) -> Affine:
+    if dst_w <= 0 or dst_h <= 0:
+        raise ValueError("Hedef boyutlar pozitif olmali")
+    return src_transform * Affine.scale(float(src_w) / float(dst_w), float(src_h) / float(dst_h))
+
+
+def resampled_window_transform(
+    src_transform: Affine,
+    window: Window,
+    out_w: int,
+    out_h: int,
+) -> Affine:
+    if out_w <= 0 or out_h <= 0:
+        raise ValueError("Hedef boyutlar pozitif olmali")
+    return window_transform(window, src_transform) * Affine.scale(
+        float(window.width) / float(out_w),
+        float(window.height) / float(out_h),
+    )
 
 
 def sanitize_name(value: str) -> str:
@@ -381,6 +421,7 @@ def _read_rgb(
         out_shape=(len(unique_bands), out_h, out_w),
         window=window,
         resampling=Resampling.bilinear,
+        masked=True,
     )
 
     rgb = np.zeros((out_h, out_w, 3), dtype=np.uint8)
@@ -405,6 +446,28 @@ def _read_rgb_preview(
 ) -> tuple[np.ndarray, StretchBounds]:
     """Seçilen bantlardan hedef boyutta RGB preview üret."""
     return _read_rgb(ds, bands, out_w, out_h)
+
+
+def _read_rgb_aligned_to_grid(
+    ds,
+    bands: tuple[int, int, int],
+    out_w: int,
+    out_h: int,
+    *,
+    dst_transform: Affine,
+    dst_crs,
+    stretch_bounds: Optional[StretchBounds] = None,
+) -> tuple[np.ndarray, StretchBounds]:
+    vrt_kwargs: dict[str, object] = {
+        "transform": dst_transform,
+        "width": int(out_w),
+        "height": int(out_h),
+        "resampling": Resampling.bilinear,
+    }
+    if dst_crs is not None:
+        vrt_kwargs["crs"] = dst_crs
+    with WarpedVRT(ds, **vrt_kwargs) as vrt:
+        return _read_rgb(vrt, bands, out_w, out_h, stretch_bounds=stretch_bounds)
 
 
 def read_preview_rgb(path: Path, bands: tuple[int, int, int], out_w: int, out_h: int) -> np.ndarray:
@@ -553,8 +616,6 @@ class LayerState:
     bands: Optional[tuple[int, int, int]] = None
     preview_stretch_bounds: Optional[StretchBounds] = None
     detail_item: Optional[QGraphicsPixmapItem] = None
-    full_w: Optional[int] = None
-    full_h: Optional[int] = None
 
 
 @dataclass
@@ -582,6 +643,13 @@ class Session:
             self.scale_y,
         ) = self._build_preview(cfg.preview_max_size, cfg.bands)
         self.preview_h, self.preview_w = self.preview_rgb.shape[:2]
+        self.preview_transform = scaled_transform(
+            self.src.transform,
+            self.full_w,
+            self.full_h,
+            self.preview_w,
+            self.preview_h,
+        )
 
         pos_val = np.uint8(cfg.positive_value)
         neg_val = np.uint8(cfg.negative_value)
@@ -700,17 +768,15 @@ class Session:
         target_w: int,
         target_h: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        full_x0, full_y0, full_x1, full_y1 = self.visible_preview_rect_to_full(preview_rect)
-        full_window_w = max(1, full_x1 - full_x0)
-        full_window_h = max(1, full_y1 - full_y0)
-        out_w = max(1, min(int(target_w), int(full_window_w), DETAIL_MAX_OUTPUT_SIDE))
-        out_h = max(1, min(int(target_h), int(full_window_h), DETAIL_MAX_OUTPUT_SIDE))
-        window = Window(
-            col_off=int(full_x0),
-            row_off=int(full_y0),
-            width=int(full_window_w),
-            height=int(full_window_h),
+        window, out_w, out_h, _detail_transform = self.resolve_detail_request(
+            preview_rect,
+            target_w,
+            target_h,
         )
+        full_x0 = int(window.col_off)
+        full_y0 = int(window.row_off)
+        full_x1 = full_x0 + int(window.width)
+        full_y1 = full_y0 + int(window.height)
         rgb, _ = _read_rgb(
             self.src,
             self.cfg.bands,
@@ -725,6 +791,26 @@ class Session:
             mask_patch = cv2.resize(mask_patch, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
         rgba = mask_to_rgba(mask_patch.astype(np.uint8, copy=False), int(self.cfg.negative_value))
         return rgb, rgba
+
+    def resolve_detail_request(
+        self,
+        preview_rect: tuple[int, int, int, int],
+        target_w: int,
+        target_h: int,
+    ) -> tuple[Window, int, int, Affine]:
+        full_x0, full_y0, full_x1, full_y1 = self.visible_preview_rect_to_full(preview_rect)
+        full_window_w = max(1, full_x1 - full_x0)
+        full_window_h = max(1, full_y1 - full_y0)
+        out_w = max(1, min(int(target_w), int(full_window_w), DETAIL_MAX_OUTPUT_SIDE))
+        out_h = max(1, min(int(target_h), int(full_window_h), DETAIL_MAX_OUTPUT_SIDE))
+        window = Window(
+            col_off=int(full_x0),
+            row_off=int(full_y0),
+            width=int(full_window_w),
+            height=int(full_window_h),
+        )
+        detail_transform = resampled_window_transform(self.src.transform, window, out_w, out_h)
+        return window, out_w, out_h, detail_transform
 
     def apply_box(self, box: tuple[int, int, int, int], mode: str) -> None:
         px0, py0, px1, py1 = box
@@ -1830,36 +1916,27 @@ class MainWindow(QMainWindow):
             or layer.source_path is None
             or layer.bands is None
             or layer.preview_stretch_bounds is None
-            or layer.full_w is None
-            or layer.full_h is None
         ):
             return None
 
-        full_x0, full_y0, full_x1, full_y1 = preview_to_full_box(
-            (preview_rect[0], preview_rect[1], preview_rect[2] - 1, preview_rect[3] - 1),
-            float(layer.full_w) / float(self.s.preview_w),
-            float(layer.full_h) / float(self.s.preview_h),
-            int(layer.full_w),
-            int(layer.full_h),
-        )
-        full_window_w = max(1, full_x1 - full_x0)
-        full_window_h = max(1, full_y1 - full_y0)
-        out_w = max(1, min(int(target_w), int(full_window_w), DETAIL_MAX_OUTPUT_SIDE))
-        out_h = max(1, min(int(target_h), int(full_window_h), DETAIL_MAX_OUTPUT_SIDE))
+        try:
+            _window, out_w, out_h, detail_transform = self.s.resolve_detail_request(
+                preview_rect,
+                target_w,
+                target_h,
+            )
+        except Exception:
+            return None
 
         try:
             with rasterio.open(layer.source_path) as ds:
-                rgb, _ = _read_rgb(
+                rgb, _ = _read_rgb_aligned_to_grid(
                     ds,
                     layer.bands,
                     out_w,
                     out_h,
-                    window=Window(
-                        col_off=int(full_x0),
-                        row_off=int(full_y0),
-                        width=int(full_window_w),
-                        height=int(full_window_h),
-                    ),
+                    dst_transform=detail_transform,
+                    dst_crs=self.s.src.crs,
                     stretch_bounds=layer.preview_stretch_bounds,
                 )
         except Exception:
@@ -2164,9 +2241,14 @@ class MainWindow(QMainWindow):
         try:
             with rasterio.open(layer_path) as ds:
                 bands = parse_bands(bands_raw, ds.count)
-                rgb, stretch_bounds = _read_rgb_preview(ds, bands, self.s.preview_w, self.s.preview_h)
-                full_w = int(ds.width)
-                full_h = int(ds.height)
+                rgb, stretch_bounds = _read_rgb_aligned_to_grid(
+                    ds,
+                    bands,
+                    self.s.preview_w,
+                    self.s.preview_h,
+                    dst_transform=self.s.preview_transform,
+                    dst_crs=self.s.src.crs,
+                )
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Katman okunamadi:\n{exc}")
             return
@@ -2193,8 +2275,6 @@ class MainWindow(QMainWindow):
             bands=bands,
             preview_stretch_bounds=stretch_bounds,
             detail_item=detail_item,
-            full_w=full_w,
-            full_h=full_h,
         )
 
         insert_idx = 1 if self.layers and self.layers[0].key == LAYER_KEY_MASK else 0
