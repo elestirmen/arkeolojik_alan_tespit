@@ -137,36 +137,186 @@ except ImportError as exc:
             "Kurulum: pip install PySide6 (veya pip install PyQt6)"
         ) from exc
 
-APP_TITLE = "Ground Truth Kare Etiketleme (Qt)"
-OVERLAY_ALPHA = 96
-LAYER_KEY_BASE = "__base__"
-LAYER_KEY_MASK = "__mask__"
-ANNOTATIONS_LAYER_NAME = "annotations"
-DATASET_EXPORT_SCRIPT = "prepare_tile_classification_dataset.py"
-DATASET_DEFAULT_TILE_SIZE = 256
-DATASET_DEFAULT_OVERLAP = 128
-DATASET_DEFAULT_POSITIVE_RATIO = 0.02
-DATASET_DEFAULT_VALID_RATIO = 0.7
-DATASET_DEFAULT_TRAIN_NEG_KEEP = 0.35
-DATASET_DEFAULT_NEG_TO_POS_RATIO = 1.0
-DATASET_DEFAULT_FORMAT = "npz"
-DATASET_DEFAULT_NUM_WORKERS = max(1, min(8, (os.cpu_count() or 1) // 2))
-DATASET_DEFAULT_DERIVATIVE_CACHE_MODE = "auto"
-DATASET_DEFAULT_DERIVATIVE_CACHE_DIR = ""
-DEFAULT_PREVIEW_MAX_SIZE = 4096
-DETAIL_REFRESH_DELAY_MS = 90
-DETAIL_MIN_ZOOM = 1.0
-DETAIL_MAX_OUTPUT_SIDE = 4096
-StretchBounds = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
-EXPORT_PROGRESS_PHASE_LABELS: dict[str, str] = {
-    "start": "Hazirlik",
-    "scan": "Tarama",
-    "select": "Secim",
-    "cache": "Turev Cache",
-    "write": "Yazma",
-    "manifest": "Manifest",
-    "done": "Tamamlandi",
+# ==================== CONFIG ====================
+# Bu bolum, aracin duzenlenebilir varsayilanlarini tek yerde toplar.
+# Amac: davranisi kodun icine dagitmak yerine burada merkezi ve okunur tutmak.
+# Buradaki degerleri degistirince hem arayuz varsayilanlari hem de bazi CLI
+# varsayilanlari birlikte etkilenir.
+CONFIG: dict[str, object] = {
+    # app_title:
+    # Uygulama penceresinin basliginda gorunen ad.
+    # Windows gorev cubugunda ve bilgi/uyari pencerelerinde de bu metin kullanilir.
+    "app_title": "Ground Truth Kare Etiketleme (Qt)",
+    # overlay_alpha:
+    # Maske katmaninin goruntu ustundeki saydamlik seviyesi.
+    # 0 tamamen gorunmez, 255 ise maskeyi neredeyse tamamen opak yapar.
+    # 80-120 araligi genelde alttaki goruntuyu gormeye devam ederken maskeyi de belirgin tutar.
+    "overlay_alpha": 96,
+    # layer_key_base:
+    # Ana raster katmani icin dahili kimlik.
+    # Katman listesi ve detay gorunumu icinde "ana goruntu"yu bulmak icin kullanilir.
+    "layer_key_base": "__base__",
+    # layer_key_mask:
+    # Maske katmani icin dahili kimlik.
+    # Kod icinde secim overlay'ini diger ek raster katmanlardan ayirmaya yarar.
+    "layer_key_mask": "__mask__",
+    # annotations_layer_name:
+    # GeoPackage icine polygon anotasyonlar yazildiginda kullanilan katman adi.
+    # Disarida QGIS vb. ile acarken bu isim gorunur.
+    "annotations_layer_name": "annotations",
+    # dataset_export_script:
+    # "Tile Dataset Export" aksiyonunda arka planda calistirilan script dosyasi.
+    # Farkli bir export scripti varsa burada degistirilebilir.
+    "dataset_export_script": "prepare_tile_classification_dataset.py",
+    # dataset_default_tile_size:
+    # Export dialogunda ilk acilista gelen tile boyutu.
+    # Buyuk deger daha fazla baglam verir ama secilen bolgenin disina tasan pozitif tile sayisini artirabilir.
+    "dataset_default_tile_size": 256,
+    # dataset_default_overlap:
+    # Ard ardina gelen tile'lar arasindaki ortusme miktari.
+    # Overlap arttikca daha yogun sampling olur; veri miktari ve disk kullanimi da artar.
+    "dataset_default_overlap": 128,
+    # dataset_default_sampling_mode:
+    # Export dialogunda varsayilan uretim stratejisi.
+    # "selected_regions": secili alanlari merkez alip pozitifleri uretir, negatifleri ayrica ornekler.
+    # "full_grid": tum rasteri kayan pencere gibi tarar.
+    "dataset_default_sampling_mode": "selected_regions",
+    
+    # dataset_default_positive_ratio:
+    # Bir tile'in Positive etiket alabilmesi icin maskeyle ortusmesi gereken minimum oran.
+    # Ornek: 0.02 -> tile alaninin yalnizca %2'si seciliyse bile Positive olabilir.
+    # "Yanlis yerden tile gelmis gibi" hissi olursa ilk bakilacak ayarlardan biri budur.
+    "dataset_default_positive_ratio": 0.1,
+    
+    # dataset_default_valid_ratio:
+    # Girdi rasterinde gecerli veri iceren piksellerin minimum orani.
+    # Kenarlarda bos/nodata alan coksa bu esik altinda kalan tile'lar tamamen elenir.
+    "dataset_default_valid_ratio": 0.9,
+
+    # dataset_default_train_negative_keep:
+    # Sadece full_grid modunda kullanilir.
+    # Uretilen train negatiflerinin ne kadarinin tutulacagini belirler; veri dengesini ve toplam dataset boyutunu etkiler.
+    "dataset_default_train_negative_keep": 0.35,
+
+    # dataset_default_neg_to_pos_ratio:
+    # selected_regions modunda hedeflenen negatif / pozitif tile orani.
+    # 1.0 -> pozitif sayisi kadar negatif secmeye calisir; 2.0 -> iki kati negatif hedefler.
+    "dataset_default_neg_to_pos_ratio": 1.0,
+    # dataset_default_format:
+    # Tile'larin diske hangi formatta kaydedilecegi.
+    # "npz" daha kucuk dosya uretir, "npy" ise sikistirmasiz oldugu icin bazi sistemlerde daha hizli olabilir.
+    "dataset_default_format": "npz",
+    # dataset_default_num_workers:
+    # Export sirasinda ayni anda kullanilacak is parcacigi / process sayisi.
+    # Yuksek deger CPU ve disk yukunu artirir; yavas disklerde her zaman daha hizli olmayabilir.
+    "dataset_default_num_workers": max(1, min(8, (os.cpu_count() or 1) // 2)),
+    
+    # dataset_default_derivative_cache_mode:
+    # Turev raster cache davranisinin varsayilan modu.
+    # "auto" genelde en guvenli secenektir; veri boyutuna gore uygun strateji secmeye calisir.
+    "dataset_default_derivative_cache_mode": "auto",
+    # dataset_default_derivative_cache_dir:
+    # Turev cache'in yazilacagi klasor.
+    # Bos birakilirsa ilgili girdi rasterinin yaninda "cache/" klasoru kullanilir.
+    "dataset_default_derivative_cache_dir": "",
+    # dataset_default_overwrite:
+    # Cikti klasoru doluysa nasil davranilacaginin varsayilani.
+    # True ise eski klasor temizlenip yeniden yazilir; False ise kullanicidan bos klasor beklenir.
+    "dataset_default_overwrite": True,
+    # default_window_width:
+    # Uygulama ilk acildiginda ana pencerenin genisligi.
+    # Sadece ilk boyutu belirler; kullanici sonradan pencereyi istedigi gibi buyutup kucultebilir.
+    "default_window_width": 1500,
+    # default_window_height:
+    # Uygulama ilk acildiginda ana pencerenin yuksekligi.
+    "default_window_height": 950,
+    # default_preview_max_size:
+    # Onizleme rasterinin maksimum kenar boyu.
+    # 0 verilirse preview icin downsample yapilmaz; buyuk rasterlerde bellek ve acilis suresi ciddi artabilir.
+    "default_preview_max_size": 4096,
+    # default_preview_bands_raw:
+    # Ilk acilista goruntuleme icin kullanilacak bant kombinasyonu.
+    # Ornek "1,2,3" -> RGB. Tek bantli dosyalarda CLI ile farkli kombinasyon verilebilir.
+    "default_preview_bands_raw": "1,2,3",
+    # default_model_bands_raw:
+    # Tile export ve model tarafinda beklenen bant sirasi.
+    # Format: R,G,B,DSM,DTM. Ozellikle cok bantli rasterlerde yanlis siralama model kalitesini direkt bozar.
+    "default_model_bands_raw": "1,2,3,4,5",
+    # default_positive_value:
+    # Maske rasterine secili alan yazilirken kullanilan piksel degeri.
+    # Genelde 1 yeterlidir; baska sistemlerle uyum gerekiyorsa degistirilebilir.
+    "default_positive_value": 1,
+    # default_negative_value:
+    # Maske rasterinde secilmemis / arkaplan alanlarin degeri.
+    # Bu deger ayni zamanda GeoTIFF nodata olarak da yazildigi icin export akisini etkiler.
+    "default_negative_value": 0,
+    # default_square_mode:
+    # Cizim yaparken dikdortgenin zorunlu kare olup olmayacaginin varsayilani.
+    # True ise baslangictan itibaren kare kilidi acik gelir.
+    "default_square_mode": False,
+    # detail_refresh_delay_ms:
+    # Kullanici zoom/pan yaptiktan sonra detay gorunumu olusturmadan once beklenecek sure.
+    # Dusuk deger daha canli hissettirir, ama cok dusuk olursa gereksiz yeniden hesaplama artar.
+    "detail_refresh_delay_ms": 90,
+    # detail_min_zoom:
+    # Detay gorunumune gecmek icin gereken minimum zoom seviyesi.
+    # Kullanici yeterince yakinlasmadiysa pahali detay patch hesaplamasi yapilmaz.
+    "detail_min_zoom": 1.0,
+    # detail_native_scale_threshold:
+    # Preview olcegi zaten neredeyse bire bir ise detay patch'e gecmemek icin kullanilan esik.
+    # Boyut farki cok azsa ikinci bir detay katmani uretmenin faydasi yoktur.
+    "detail_native_scale_threshold": 1.01,
+    # detail_max_output_side:
+    # Tek seferde uretilen detay patch'inin maksimum genislik/yuksekligi.
+    # Asiri buyuk patch'lerin RAM tuketimini ve gecikmesini kontrol altinda tutar.
+    "detail_max_output_side": 4096,
+    # export_progress_phase_labels:
+    # Arka plandaki export script'inden gelen faz adlarinin arayuzde nasil gorunecegi.
+    # Gerekirse teknik isimleri degistirmeden sadece kullaniciya gorunen etiketler burada duzenlenebilir.
+    "export_progress_phase_labels": {
+        "start": "Hazirlik",
+        "scan": "Tarama",
+        "select": "Secim",
+        "cache": "Turev Cache",
+        "write": "Yazma",
+        "manifest": "Manifest",
+        "done": "Tamamlandi",
+    },
 }
+# ===============================================
+
+APP_TITLE = str(CONFIG["app_title"])
+OVERLAY_ALPHA = int(CONFIG["overlay_alpha"])
+LAYER_KEY_BASE = str(CONFIG["layer_key_base"])
+LAYER_KEY_MASK = str(CONFIG["layer_key_mask"])
+ANNOTATIONS_LAYER_NAME = str(CONFIG["annotations_layer_name"])
+DATASET_EXPORT_SCRIPT = str(CONFIG["dataset_export_script"])
+DATASET_DEFAULT_TILE_SIZE = int(CONFIG["dataset_default_tile_size"])
+DATASET_DEFAULT_OVERLAP = int(CONFIG["dataset_default_overlap"])
+DATASET_DEFAULT_SAMPLING_MODE = str(CONFIG["dataset_default_sampling_mode"])
+DATASET_DEFAULT_POSITIVE_RATIO = float(CONFIG["dataset_default_positive_ratio"])
+DATASET_DEFAULT_VALID_RATIO = float(CONFIG["dataset_default_valid_ratio"])
+DATASET_DEFAULT_TRAIN_NEG_KEEP = float(CONFIG["dataset_default_train_negative_keep"])
+DATASET_DEFAULT_NEG_TO_POS_RATIO = float(CONFIG["dataset_default_neg_to_pos_ratio"])
+DATASET_DEFAULT_FORMAT = str(CONFIG["dataset_default_format"])
+DATASET_DEFAULT_NUM_WORKERS = int(CONFIG["dataset_default_num_workers"])
+DATASET_DEFAULT_DERIVATIVE_CACHE_MODE = str(CONFIG["dataset_default_derivative_cache_mode"])
+DATASET_DEFAULT_DERIVATIVE_CACHE_DIR = str(CONFIG["dataset_default_derivative_cache_dir"])
+DATASET_DEFAULT_OVERWRITE = bool(CONFIG["dataset_default_overwrite"])
+DEFAULT_WINDOW_WIDTH = int(CONFIG["default_window_width"])
+DEFAULT_WINDOW_HEIGHT = int(CONFIG["default_window_height"])
+DEFAULT_PREVIEW_MAX_SIZE = int(CONFIG["default_preview_max_size"])
+DEFAULT_PREVIEW_BANDS_RAW = str(CONFIG["default_preview_bands_raw"])
+DEFAULT_MODEL_BANDS_RAW = str(CONFIG["default_model_bands_raw"])
+DEFAULT_POSITIVE_VALUE = int(CONFIG["default_positive_value"])
+DEFAULT_NEGATIVE_VALUE = int(CONFIG["default_negative_value"])
+DEFAULT_SQUARE_MODE = bool(CONFIG["default_square_mode"])
+DETAIL_REFRESH_DELAY_MS = int(CONFIG["detail_refresh_delay_ms"])
+DETAIL_MIN_ZOOM = float(CONFIG["detail_min_zoom"])
+DETAIL_NATIVE_SCALE_THRESHOLD = float(CONFIG["detail_native_scale_threshold"])
+DETAIL_MAX_OUTPUT_SIDE = int(CONFIG["detail_max_output_side"])
+StretchBounds = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+EXPORT_PROGRESS_PHASE_LABELS: dict[str, str] = dict(CONFIG["export_progress_phase_labels"])
 
 # ---------------------------------------------------------------------------
 # Light Fresh Theme Stylesheet
@@ -711,6 +861,19 @@ class Session:
     ) -> np.ndarray:
         neg_val = np.uint8(self.cfg.negative_value)
         pos_val = np.uint8(self.cfg.positive_value)
+        if mask_path is not None and mask_path.exists():
+            with rasterio.open(mask_path) as ds:
+                if ds.width != self.full_w or ds.height != self.full_h:
+                    raise ValueError("Mevcut maske boyutu raster ile ayni olmali")
+                mask = ds.read(1)
+            # GeoTIFF maske varsa oturumda onu esas aliyoruz; export da ayni rasteri kullanacak.
+            if np.any(mask == neg_val):
+                selected = mask != neg_val
+            else:
+                selected = mask > 0
+            out = np.full((self.full_h, self.full_w), neg_val, dtype=np.uint8)
+            out[selected] = pos_val
+            return out
         if labels_path is not None and labels_path.exists():
             return load_mask_from_annotations_gpkg(
                 gpkg_path=labels_path,
@@ -721,20 +884,7 @@ class Session:
                 positive_value=int(pos_val),
                 negative_value=int(neg_val),
             )
-        if mask_path is None:
-            return np.full((self.full_h, self.full_w), neg_val, dtype=np.uint8)
-        with rasterio.open(mask_path) as ds:
-            if ds.width != self.full_w or ds.height != self.full_h:
-                raise ValueError("Mevcut maske boyutu raster ile ayni olmali")
-            mask = ds.read(1)
-        # Öncelik: eğer maskede mevcut negative değer varsa onu arkaplan kabul et.
-        if np.any(mask == neg_val):
-            selected = mask != neg_val
-        else:
-            selected = mask > 0
-        out = np.full((self.full_h, self.full_w), neg_val, dtype=np.uint8)
-        out[selected] = pos_val
-        return out
+        return np.full((self.full_h, self.full_w), neg_val, dtype=np.uint8)
 
     # --- Overlay helpers ---
     def _rebuild_overlay_full(self) -> None:
@@ -1338,7 +1488,7 @@ class TileDatasetExportDialog(QDialog):
         form.addRow("Cikti klasoru:", output_wrap)
 
         self.edit_model_bands = QLineEdit(default_bands_raw)
-        self.edit_model_bands.setPlaceholderText("1,2,3,4,5")
+        self.edit_model_bands.setPlaceholderText(DEFAULT_MODEL_BANDS_RAW)
         self.edit_model_bands.setToolTip("Model bantlari: R,G,B,DSM,DTM")
         form.addRow("Model bantlari:", self.edit_model_bands)
 
@@ -1356,6 +1506,8 @@ class TileDatasetExportDialog(QDialog):
         self.combo_sampling_mode = QComboBox(self)
         self.combo_sampling_mode.addItem("Secimlerden tile + rastgele negatif", "selected_regions")
         self.combo_sampling_mode.addItem("Tum rasterda kayan pencere", "full_grid")
+        default_sampling_index = self.combo_sampling_mode.findData(DATASET_DEFAULT_SAMPLING_MODE)
+        self.combo_sampling_mode.setCurrentIndex(max(0, default_sampling_index))
         form.addRow("Uretim modu:", self.combo_sampling_mode)
 
         self.spin_positive_ratio = QDoubleSpinBox(self)
@@ -1425,12 +1577,16 @@ class TileDatasetExportDialog(QDialog):
         self.combo_overwrite = QComboBox(self)
         self.combo_overwrite.addItem("Evet - klasoru temizle", True)
         self.combo_overwrite.addItem("Hayir - klasor bos olmali", False)
+        default_overwrite_index = self.combo_overwrite.findData(DATASET_DEFAULT_OVERWRITE)
+        self.combo_overwrite.setCurrentIndex(max(0, default_overwrite_index))
         form.addRow("Uzerine yaz:", self.combo_overwrite)
 
         layout.addLayout(form)
 
         hint = QLabel(
             "Onerilen baslangic: tile=256, overlap=128, pozitif esigi=0.02.\n"
+            "Not: 0.02 esigi, tile'in sadece %2'si secili olsa bile Positive yazabilir; "
+            "buyuk tile boyutlarinda secim tile'in kenarinda kalmis gibi gorunebilir.\n"
             "Derivative cache varsayilan olarak <girdi_raster_klasoru>/cache altina yazilir.\n"
             "Hiz onemliyse NPY + auto cache + orta seviye worker sayisi iyi baslangictir."
         )
@@ -1539,7 +1695,7 @@ class MainWindow(QMainWindow):
         self.square_mode = bool(square_mode)
         self.preview_max_size = int(preview_max_size)
         self.bands_raw = bands_raw
-        self.model_bands_raw = "1,2,3,4,5"
+        self.model_bands_raw = DEFAULT_MODEL_BANDS_RAW
         self._shown_dataset_input_warnings: set[tuple[str, str]] = set()
         self.positive_value = int(positive_value)
         self.negative_value = int(negative_value)
@@ -1547,7 +1703,7 @@ class MainWindow(QMainWindow):
         # --- Apply light theme ---
         self.setStyleSheet(APP_STYLE)
 
-        self.resize(1500, 950)
+        self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
         self.setAcceptDrops(True)
 
         self.scene = QGraphicsScene(self)
@@ -1951,7 +2107,7 @@ class MainWindow(QMainWindow):
             return
 
         zoom = float(self.view.transform().m11())
-        if max(self.s.scale_x, self.s.scale_y) <= 1.01 or zoom < DETAIL_MIN_ZOOM:
+        if max(self.s.scale_x, self.s.scale_y) <= DETAIL_NATIVE_SCALE_THRESHOLD or zoom < DETAIL_MIN_ZOOM:
             self._clear_detail_view()
             return
 
@@ -2650,9 +2806,9 @@ class MainWindow(QMainWindow):
         if self.s is None:
             return False
         try:
-            gpkg_path = companion_gpkg_path(self.s.cfg.output_path)
-            if self.s.dirty or not self.s.cfg.output_path.exists() or not gpkg_path.exists():
-                self.s.save(self.s.cfg.output_path)
+            # Export script'i GeoTIFF maskeyi okurken aday pencereler icin GPKG'yi de kullanabiliyor.
+            # Bu ikisini export oncesi her zaman ayni oturum verisinden yeniden yazarak senkron tutuyoruz.
+            self.s.save(self.s.cfg.output_path)
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Export oncesi etiketler kaydedilemedi:\n{exc}")
             return False
@@ -3310,10 +3466,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--existing-mask", type=str, default="")
     p.add_argument("--existing-labels", type=str, default="")
     p.add_argument("--preview-max-size", type=int, default=DEFAULT_PREVIEW_MAX_SIZE)
-    p.add_argument("--bands", type=str, default="1,2,3")
-    p.add_argument("--positive-value", type=int, default=1)
-    p.add_argument("--negative-value", type=int, default=0)
-    p.add_argument("--square-mode", action="store_true")
+    p.add_argument("--bands", type=str, default=DEFAULT_PREVIEW_BANDS_RAW)
+    p.add_argument("--positive-value", type=int, default=DEFAULT_POSITIVE_VALUE)
+    p.add_argument("--negative-value", type=int, default=DEFAULT_NEGATIVE_VALUE)
+    p.add_argument(
+        "--square-mode",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_SQUARE_MODE,
+    )
     return p
 
 

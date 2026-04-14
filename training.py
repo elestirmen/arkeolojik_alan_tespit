@@ -106,7 +106,7 @@ CONFIG: dict[str, object] = {
     # no_attention:
     # True ise giristeki CBAM attention katmani kapatilir.
     # False iken attention aktiftir.
-    "no_attention": False,
+    "no_attention": True,
 
     # epochs:
     # Toplam egitim epoch sayisi.

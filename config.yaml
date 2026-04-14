@@ -193,7 +193,7 @@ encoders: "none"
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "checkpoints/best_loss_TileClassifier_resnet50_12ch_attention.pth"
+weights: "checkpoints/best_iou_TileClassifier_resnet50_12ch.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
@@ -458,7 +458,7 @@ tpi_radii: [5, 15, 30]
 #   - Çok hafif performans kaybı (~%5 yavaşlama)
 #   - Eğitilmiş model yoksa sınırlı fayda (zero-shot modunda)
 # ÖNERİ: true yapın, genel olarak performansı artırır
-enable_attention: true
+enable_attention: False
 
 # attention_reduction: Attention için kanal azaltma oranı
 # - Değer: 2, 4, 8 gibi pozitif tam sayı

@@ -16,16 +16,27 @@ class NPZViewerApp:
         self.root.title("Gelişmiş NPZ Görüntüleyici ve Gezgini")
         # Pencere boyutunu daha büyük ayarlayalım ki 3 panel sığsın
         self.root.geometry("1600x850")
+        self.root.bind("<Configure>", self.on_window_resize)
         
         self.current_dir = initial_dir
         self.files = []
+
+        self.current_file_label = ttk.Label(
+            self.root,
+            text="Se\u00e7ili dosya: -",
+            anchor=tk.W,
+            justify=tk.LEFT,
+            font=("Segoe UI", 10, "bold"),
+            wraplength=1500,
+        )
+        self.current_file_label.pack(fill=tk.X, padx=8, pady=(8, 0))
         
         # Ana Bölme (Sol: Liste, Orta: RGB Önizleme, Sağ: Bant Grid)
         self.paned_window = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         self.paned_window.pack(fill=tk.BOTH, expand=True)
         
         # --------- 1. SOL PANEL (Arama ve Seçim) ---------
-        self.left_frame = ttk.Frame(self.paned_window, width=280)
+        self.left_frame = ttk.Frame(self.paned_window, width=380)
         self.paned_window.add(self.left_frame, weight=1)
         
         self.btn_frame = ttk.Frame(self.left_frame)
@@ -33,7 +44,7 @@ class NPZViewerApp:
         self.btn_select_dir = ttk.Button(self.btn_frame, text="Klasör Seç / Değiştir", command=self.select_directory)
         self.btn_select_dir.pack(fill=tk.X, expand=True)
         
-        self.info_label = ttk.Label(self.left_frame, text="Bekleniyor...", wraplength=250, font=("Segoe UI", 10))
+        self.info_label = ttk.Label(self.left_frame, text="Bekleniyor...", wraplength=350, font=("Segoe UI", 10))
         self.info_label.pack(fill=tk.X, padx=8, pady=8)
         
         self.nav_frame = ttk.Frame(self.left_frame)
@@ -62,10 +73,19 @@ class NPZViewerApp:
         
         self.scrollbar = ttk.Scrollbar(self.listbox_frame)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.scrollbar_x = ttk.Scrollbar(self.listbox_frame, orient=tk.HORIZONTAL)
+        self.scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
         
-        self.listbox = tk.Listbox(self.listbox_frame, yscrollcommand=self.scrollbar.set, font=("Segoe UI", 10))
+        self.listbox = tk.Listbox(
+            self.listbox_frame,
+            yscrollcommand=self.scrollbar.set,
+            xscrollcommand=self.scrollbar_x.set,
+            font=("Consolas", 10),
+        )
         self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.scrollbar.config(command=self.listbox.yview)
+        self.scrollbar_x.config(command=self.listbox.xview)
         self.listbox.bind("<<ListboxSelect>>", self.on_select)
         self.listbox.bind("<Delete>", self.delete_current_file)
         self.root.bind("<Delete>", self.delete_current_file)
@@ -102,6 +122,13 @@ class NPZViewerApp:
         if d:
             self.load_directory(d)
             
+    def on_window_resize(self, event=None):
+        width = max(self.root.winfo_width() - 40, 300)
+        self.current_file_label.config(wraplength=width)
+
+        left_width = max(self.left_frame.winfo_width() - 30, 180)
+        self.info_label.config(wraplength=left_width)
+
     def load_directory(self, d, select_file=None):
         self.current_dir = d
         self.files = sorted(glob.glob(os.path.join(d, "*.npz")))
@@ -160,6 +187,7 @@ class NPZViewerApp:
 
     def show_empty_directory_message(self):
         self.info_label.config(text=f"Klasör: {self.current_dir}\n\nHiç .npz dosyası bulunamadı!")
+        self.current_file_label.config(text="Se\u00e7ili dosya: -")
         self.clear_canvases()
         self.update_action_buttons()
 
@@ -280,9 +308,11 @@ class NPZViewerApp:
             keys = list(data.keys())
             key = 'image' if 'image' in keys else keys[0]
             img = data[key].astype(np.float32) # Güvenlik için float32 formatı
-            
+            file_name = os.path.basename(file_path)
+            self.current_file_label.config(text=f"Seçili dosya: {file_name}")
+
             # Bilgi Metni
-            info_text = f"AÇIK:\n{os.path.basename(file_path)}\n\n"
+            info_text = f"AÇIK:\n{file_name}\n\n"
             info_text += f"Bant Sayısı / Boyut:\n{img.shape}\n\n"
             info_text += f"Tip: {img.dtype}\n\n"
             info_text += f"Min Değer: {np.min(img):.3f}\n"
@@ -363,6 +393,7 @@ class NPZViewerApp:
             self.canvas_rgb.draw()
             
         except Exception as e:
+            self.current_file_label.config(text="Seçili dosya: -")
             self.info_label.config(text=f"Hata oluştu:\n{e}")
 
 if __name__ == '__main__':
