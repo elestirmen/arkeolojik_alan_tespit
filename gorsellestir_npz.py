@@ -1,9 +1,10 @@
 import sys
 import os
 import glob
+import shutil
 import numpy as np
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
@@ -42,6 +43,20 @@ class NPZViewerApp:
         self.btn_next = ttk.Button(self.nav_frame, text="Sonraki >", command=self.next_file)
         self.btn_next.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
+        self.btn_delete = ttk.Button(
+            self.left_frame,
+            text="Seçili Dosyayı Sil (Del)",
+            command=self.delete_current_file,
+        )
+        self.btn_delete.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+        self.btn_move = ttk.Button(
+            self.left_frame,
+            text="Karşı Sınıfa Taşı (M)",
+            command=self.move_current_file_to_other_class,
+        )
+        self.btn_move.pack(fill=tk.X, padx=5, pady=(0, 5))
+
         self.listbox_frame = ttk.Frame(self.left_frame)
         self.listbox_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
@@ -52,6 +67,10 @@ class NPZViewerApp:
         self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.scrollbar.config(command=self.listbox.yview)
         self.listbox.bind("<<ListboxSelect>>", self.on_select)
+        self.listbox.bind("<Delete>", self.delete_current_file)
+        self.root.bind("<Delete>", self.delete_current_file)
+        self.root.bind("<Key-m>", self.move_current_file_to_other_class)
+        self.root.bind("<Key-M>", self.move_current_file_to_other_class)
         
         # --------- 2. ORTA PANEL (Önizleme - RGB Kompozit) ---------
         self.middle_frame = ttk.Frame(self.paned_window, width=600)
@@ -86,6 +105,7 @@ class NPZViewerApp:
     def load_directory(self, d, select_file=None):
         self.current_dir = d
         self.files = sorted(glob.glob(os.path.join(d, "*.npz")))
+        self.update_action_buttons()
         
         self.listbox.delete(0, tk.END)
         for f in self.files:
@@ -96,35 +116,23 @@ class NPZViewerApp:
             if select_file and select_file in self.files:
                 target_idx = self.files.index(select_file)
                 
-            self.listbox.selection_set(target_idx)
-            self.listbox.see(target_idx)
-            self.visualize(self.files[target_idx])
+            self.select_index(target_idx)
         else:
-            self.info_label.config(text=f"Klasör: {d}\n\nHiç .npz dosyası bulunamadı!")
-            self.fig_bands.clear()
-            self.fig_rgb.clear()
-            self.canvas_bands.draw()
-            self.canvas_rgb.draw()
+            self.show_empty_directory_message()
             
     def prev_file(self):
         sel = self.listbox.curselection()
         if sel:
             idx = sel[0]
             if idx > 0:
-                self.listbox.selection_clear(0, tk.END)
-                self.listbox.selection_set(idx - 1)
-                self.listbox.see(idx - 1)
-                self.visualize(self.files[idx - 1])
+                self.select_index(idx - 1)
 
     def next_file(self):
         sel = self.listbox.curselection()
         if sel:
             idx = sel[0]
             if idx < len(self.files) - 1:
-                self.listbox.selection_clear(0, tk.END)
-                self.listbox.selection_set(idx + 1)
-                self.listbox.see(idx + 1)
-                self.visualize(self.files[idx + 1])
+                self.select_index(idx + 1)
                 
     def on_select(self, event):
         selection = self.listbox.curselection()
@@ -132,6 +140,136 @@ class NPZViewerApp:
             return
         idx = selection[0]
         self.visualize(self.files[idx])
+
+    def select_index(self, idx):
+        if not self.files:
+            self.show_empty_directory_message()
+            return
+
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(idx)
+        self.listbox.activate(idx)
+        self.listbox.see(idx)
+        self.visualize(self.files[idx])
+
+    def clear_canvases(self):
+        self.fig_bands.clear()
+        self.fig_rgb.clear()
+        self.canvas_bands.draw()
+        self.canvas_rgb.draw()
+
+    def show_empty_directory_message(self):
+        self.info_label.config(text=f"Klasör: {self.current_dir}\n\nHiç .npz dosyası bulunamadı!")
+        self.clear_canvases()
+        self.update_action_buttons()
+
+    def update_action_buttons(self):
+        has_files = bool(self.files)
+        self.btn_delete.config(state=tk.NORMAL if has_files else tk.DISABLED)
+
+        target_dir, action_text = self.get_other_class_target()
+        if has_files and target_dir:
+            self.btn_move.config(state=tk.NORMAL, text=f"{action_text} (M)")
+        else:
+            self.btn_move.config(state=tk.DISABLED, text="Karşı Sınıfa Taşı (M)")
+
+    def get_other_class_target(self):
+        current_name = os.path.basename(os.path.normpath(self.current_dir)).lower()
+        if current_name == "positive":
+            target_name = "negative"
+            action_text = "Negatife Taşı"
+        elif current_name == "negative":
+            target_name = "positive"
+            action_text = "Pozitife Taşı"
+        else:
+            return None, None
+
+        parent_dir = os.path.dirname(os.path.normpath(self.current_dir))
+        for entry in os.scandir(parent_dir):
+            if entry.is_dir() and entry.name.lower() == target_name:
+                return entry.path, action_text
+        return None, None
+
+    def remove_selected_file_from_list(self, idx):
+        self.files.pop(idx)
+        self.listbox.delete(idx)
+
+        if self.files:
+            next_idx = min(idx, len(self.files) - 1)
+            self.select_index(next_idx)
+        else:
+            self.show_empty_directory_message()
+            self.listbox.selection_clear(0, tk.END)
+
+        self.update_action_buttons()
+
+    def delete_current_file(self, event=None):
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+
+        idx = selection[0]
+        file_path = self.files[idx]
+        file_name = os.path.basename(file_path)
+
+        confirm = messagebox.askyesno(
+            "NPZ Dosyasını Sil",
+            f"{file_name} dosyası silinsin mi?\n\nBu işlem geri alınamaz.",
+            icon=messagebox.WARNING,
+        )
+        if not confirm:
+            return
+
+        try:
+            os.remove(file_path)
+        except FileNotFoundError:
+            messagebox.showwarning("Dosya Bulunamadı", f"{file_name} zaten silinmiş görünüyor.")
+        except OSError as exc:
+            messagebox.showerror("Silme Hatası", f"{file_name} silinemedi.\n\n{exc}")
+            return
+
+        self.remove_selected_file_from_list(idx)
+
+    def move_current_file_to_other_class(self, event=None):
+        selection = self.listbox.curselection()
+        if not selection:
+            return
+
+        target_dir, action_text = self.get_other_class_target()
+        if not target_dir:
+            messagebox.showwarning(
+                "Hedef Klasör Bulunamadı",
+                "Bu klasör Positive/Negative yapısında görünmüyor ya da karşı klasör bulunamadı.",
+            )
+            return
+
+        idx = selection[0]
+        file_path = self.files[idx]
+        file_name = os.path.basename(file_path)
+        target_path = os.path.join(target_dir, file_name)
+
+        confirm = messagebox.askyesno(
+            "Sınıf Değiştir",
+            f"{file_name} dosyası\n\n{action_text.lower()}?\n\nHedef: {target_dir}",
+            icon=messagebox.QUESTION,
+        )
+        if not confirm:
+            return
+
+        if os.path.exists(target_path):
+            messagebox.showerror(
+                "Hedefte Dosya Var",
+                f"Hedef klasörde aynı isimli dosya zaten var:\n\n{target_path}",
+            )
+            return
+
+        try:
+            shutil.move(file_path, target_path)
+        except OSError as exc:
+            messagebox.showerror("Taşıma Hatası", f"{file_name} taşınamadı.\n\n{exc}")
+            return
+
+        self.remove_selected_file_from_list(idx)
         
     def visualize(self, file_path):
         self.fig_bands.clear()
