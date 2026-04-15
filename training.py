@@ -1258,6 +1258,29 @@ def _count_positive_tile_labels_from_manifest(data_dir: Path) -> Optional[Tuple[
     return total, int(positive)
 
 
+def _resolve_classification_folder_split_counts(
+    split_dir: Path,
+    file_format: str,
+) -> Tuple[Tuple[int, int], str]:
+    """Classification split count'larinda fiziksel klasorleri kaynak dogrulama olarak kullan."""
+    manifest_counts = _count_positive_tile_labels_from_manifest(split_dir)
+    dir_counts = _count_positive_tiles_from_class_dirs(split_dir, file_format)
+    if manifest_counts is not None and manifest_counts != dir_counts:
+        LOGGER.warning(
+            "tile_labels.csv ile %s splitindeki Positive/Negative klasor sayilari uyusmuyor "
+            "(manifest: %d/%d pozitif, klasor: %d/%d pozitif). Fiziksel klasor sayilari kullanilacak.",
+            split_dir.name,
+            int(manifest_counts[1]),
+            int(manifest_counts[0]),
+            int(dir_counts[1]),
+            int(dir_counts[0]),
+        )
+        return dir_counts, "class_dirs"
+    if manifest_counts is not None:
+        return manifest_counts, "manifest"
+    return dir_counts, "class_dirs"
+
+
 def _count_positive_mask_files(
     mask_dir: Path,
     file_format: str,
@@ -2774,11 +2797,35 @@ def main():
     file_format = _infer_file_format(data_dir, allow_missing_val=allow_missing_val)
     manifest_train_counts = None
     manifest_val_counts = None
+    class_folder_train_counts = None
+    class_folder_val_counts = None
+    class_folder_count_source = None
     if args.task == "tile_classification":
-        manifest_train_counts = _count_positive_tile_labels_from_manifest(data_dir / "train")
-        manifest_val_counts = _count_positive_tile_labels_from_manifest(data_dir / "val")
+        if data_layout == "classification_folders":
+            class_folder_train_counts, train_count_source = (
+                _resolve_classification_folder_split_counts(
+                    data_dir / "train",
+                    file_format,
+                )
+            )
+            class_folder_val_counts, val_count_source = (
+                _resolve_classification_folder_split_counts(
+                    data_dir / "val",
+                    file_format,
+                )
+            )
+            class_folder_count_source = (
+                "manifest"
+                if train_count_source == "manifest" and val_count_source == "manifest"
+                else "class_dirs"
+            )
+        else:
+            manifest_train_counts = _count_positive_tile_labels_from_manifest(data_dir / "train")
+            manifest_val_counts = _count_positive_tile_labels_from_manifest(data_dir / "val")
 
-    if manifest_train_counts is not None:
+    if class_folder_train_counts is not None:
+        train_total, train_positive = class_folder_train_counts
+    elif manifest_train_counts is not None:
         train_total, train_positive = manifest_train_counts
     elif data_layout == "classification_folders" and args.task == "tile_classification":
         train_total, train_positive = _count_positive_tiles_from_class_dirs(
@@ -2792,7 +2839,9 @@ def main():
             tile_label_min_positive_ratio=float(args.tile_label_min_positive_ratio),
         )
 
-    if manifest_val_counts is not None:
+    if class_folder_val_counts is not None:
+        val_total, val_positive = class_folder_val_counts
+    elif manifest_val_counts is not None:
         val_total, val_positive = manifest_val_counts
     elif data_layout == "classification_folders" and args.task == "tile_classification":
         val_total, val_positive = _count_positive_tiles_from_class_dirs(
@@ -2806,10 +2855,12 @@ def main():
             tile_label_min_positive_ratio=float(args.tile_label_min_positive_ratio),
         )
     if args.task == "tile_classification":
-        if manifest_train_counts is not None and manifest_val_counts is not None:
+        if class_folder_count_source == "manifest":
             LOGGER.info("Tile label sayaclari tile_labels.csv manifestinden okundu.")
         elif data_layout == "classification_folders":
             LOGGER.info("Tile etiket sayaclari Positive/Negative klasorlerinden okundu.")
+        elif manifest_train_counts is not None and manifest_val_counts is not None:
+            LOGGER.info("Tile label sayaclari tile_labels.csv manifestinden okundu.")
         LOGGER.info(
             "Tile etiket dağılımı | train: %d/%d pozitif tile | val: %d/%d pozitif tile",
             train_positive, train_total, val_positive, val_total,

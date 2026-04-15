@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,7 @@ from training import (
     _build_auto_val_holdout_indices,
     _compute_val_target_samples,
     _infer_file_format,
+    _resolve_classification_folder_split_counts,
     _resolve_auto_val_holdout_ratio,
     _select_indices_by_keep_ratio,
     _select_train_indices_by_neg_pos_ratio,
@@ -146,6 +148,67 @@ def test_infer_file_format_allows_empty_val_for_classification_layout(tmp_path: 
     np.savez_compressed(tmp_path / "train/Negative" / "neg_0.npz", image=image)
 
     assert _infer_file_format(tmp_path, allow_missing_val=True) == "npz"
+
+
+def test_resolve_classification_folder_split_counts_prefers_real_files_over_stale_manifest(
+    tmp_path: Path,
+) -> None:
+    for rel in [
+        "train/Positive",
+        "train/Negative",
+        "val/Positive",
+        "val/Negative",
+    ]:
+        (tmp_path / rel).mkdir(parents=True, exist_ok=True)
+
+    image = np.zeros((12, 8, 8), dtype=np.float32)
+    np.savez_compressed(tmp_path / "train/Positive" / "pos_0.npz", image=image)
+    np.savez_compressed(tmp_path / "train/Negative" / "neg_0.npz", image=image)
+
+    with open(tmp_path / "tile_labels.csv", "w", newline="", encoding="utf-8") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=["tile_name", "split", "tile_label", "positive_ratio"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "tile_name": "pos_0",
+                "split": "train",
+                "tile_label": "1",
+                "positive_ratio": "1.0",
+            }
+        )
+        writer.writerow(
+            {
+                "tile_name": "neg_0",
+                "split": "train",
+                "tile_label": "0",
+                "positive_ratio": "0.0",
+            }
+        )
+        writer.writerow(
+            {
+                "tile_name": "ghost_val_pos",
+                "split": "val",
+                "tile_label": "1",
+                "positive_ratio": "1.0",
+            }
+        )
+
+    train_counts, train_source = _resolve_classification_folder_split_counts(
+        tmp_path / "train",
+        "npz",
+    )
+    val_counts, val_source = _resolve_classification_folder_split_counts(
+        tmp_path / "val",
+        "npz",
+    )
+
+    assert train_counts == (1, 1)
+    assert train_source == "manifest"
+    assert val_counts == (0, 0)
+    assert val_source == "class_dirs"
 
 
 def test_auto_val_holdout_indices_are_stratified() -> None:
