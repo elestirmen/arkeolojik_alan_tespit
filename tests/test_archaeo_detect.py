@@ -20,6 +20,7 @@ from rasterio.crs import CRS as RasterioCRS
 # Proje kök dizinini path'e ekle
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
 from archaeo_detect import (
     PipelineDefaults,
     apply_trained_only_metadata_locks,
@@ -322,7 +323,7 @@ def test_compute_derivatives_with_rvt_uses_sky_view_factor_for_openness(monkeypa
     monkeypatch.setattr(module, "rvt_vis", fake_rvt)
 
     dtm = np.arange(9, dtype=np.float32).reshape(3, 3)
-    svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+    svf, slrm = compute_derivatives_with_rvt(
         dtm,
         pixel_size=2.0,
         radii=(10.0,),
@@ -331,11 +332,7 @@ def test_compute_derivatives_with_rvt_uses_sky_view_factor_for_openness(monkeypa
     )
 
     assert np.allclose(svf, 5.0)
-    assert np.allclose(pos_open, 5.0)
-    assert np.allclose(neg_open, 12.0)
-    assert np.allclose(lrm, 10.0)
-    assert np.allclose(slope, 3.0)
-    assert any(call["compute_opns"] and call["dem_mean"] < 0 for call in fake_rvt.sky_calls)
+    assert slrm.shape == dtm.shape
 
 
 class TestOtsuThreshold:
@@ -601,7 +598,7 @@ class TestWeightLoadingCompatibility:
     """load_weights fonksiyonu icin uyumluluk testleri."""
 
     @staticmethod
-    def _dummy_base_model(in_channels: int = 12) -> torch.nn.Module:
+    def _dummy_base_model(in_channels: int = 5) -> torch.nn.Module:
         class DummyBaseModel(torch.nn.Module):
             def __init__(self, channels: int):
                 super().__init__()
@@ -615,7 +612,7 @@ class TestWeightLoadingCompatibility:
 
     def test_load_weights_accepts_model_state_dict_checkpoint(self):
         """Egitim checkpoint formatindaki model_state_dict yuklenebilmeli."""
-        model = self._dummy_base_model(in_channels=12)
+        model = self._dummy_base_model(in_channels=5)
         tmp_dir = Path("cache") / f"weight_loading_{uuid4().hex}"
         tmp_dir.mkdir(parents=True, exist_ok=False)
         try:
@@ -628,7 +625,7 @@ class TestWeightLoadingCompatibility:
 
     def test_load_weights_accepts_attention_wrapper_model(self):
         """AttentionWrapper iceren modellerde encoder kanali dogru cozulmeli."""
-        model = AttentionWrapper(self._dummy_base_model(in_channels=12), in_channels=12)
+        model = AttentionWrapper(self._dummy_base_model(in_channels=5), in_channels=5)
         tmp_dir = Path("cache") / f"weight_loading_{uuid4().hex}"
         tmp_dir.mkdir(parents=True, exist_ok=False)
         try:
@@ -727,24 +724,11 @@ class TestTrainedOnlyMetadataLocks:
 
     def _make_metadata(self, **kwargs):
         metadata = {
-            "schema_version": 2,
+            "schema_version": METADATA_SCHEMA_VERSION,
             "tile_size": 256,
             "overlap": 64,
             "bands": "1,2,3,4,5",
-            "channel_names": [
-                "R",
-                "G",
-                "B",
-                "DSM",
-                "DTM",
-                "SVF",
-                "Pos_Openness",
-                "Neg_Openness",
-                "LRM",
-                "Slope",
-                "nDSM",
-                "TPI",
-            ],
+            "channel_names": list(MODEL_CHANNEL_NAMES),
         }
         metadata.update(kwargs)
         return metadata

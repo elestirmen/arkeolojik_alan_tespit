@@ -181,7 +181,7 @@ def test_save_tiles_supports_npy_output(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(
         "prepare_tile_classification_dataset.compute_tile_stack",
-        lambda **_: np.ones((12, 4, 4), dtype=np.float32),
+        lambda **_: np.ones((5, 4, 4), dtype=np.float32),
     )
 
     args = argparse.Namespace(
@@ -206,7 +206,7 @@ def test_save_tiles_supports_npy_output(tmp_path: Path, monkeypatch: pytest.Monk
     assert saved_path.exists()
     assert saved_path.suffix == ".npy"
     loaded = np.load(saved_path)
-    assert loaded.shape == (12, 4, 4)
+    assert loaded.shape == (5, 4, 4)
     assert metadata["saved_tiles"] == 1
 
 
@@ -254,7 +254,7 @@ def test_save_tiles_selected_regions_skips_derivative_cache(
 
     monkeypatch.setattr(
         "prepare_tile_classification_dataset.compute_tile_stack",
-        lambda **_: np.ones((12, 4, 4), dtype=np.float32),
+        lambda **_: np.ones((5, 4, 4), dtype=np.float32),
     )
 
     def _unexpected_cache_call(**_: object) -> None:

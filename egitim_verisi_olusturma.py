@@ -1,22 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Arkeolojik Alan Tespiti - 12 Kanallı Eğitim Verisi Oluşturma Scripti
+Arkeolojik Alan Tespiti - 5 Kanallı Eğitim Verisi Oluşturma Scripti
 
 Bu script, çok bantlı GeoTIFF dosyalarından ve karşılık gelen ground truth 
-maskelerinden 12 kanallı eğitim tile'ları oluşturur.
+maskelerinden 5 kanallı eğitim tile'ları oluşturur.
 
-Kanal Yapısı (12 kanal):
-    [0-2]: RGB
-    [3]: DSM
-    [4]: DTM
-    [5]: SVF (Sky-View Factor)
-    [6]: Positive Openness
-    [7]: Negative Openness
-    [8]: LRM (Local Relief Model)
-    [9]: Slope
-    [10]: nDSM (normalize edilmiş DSM)
-    [11]: TPI (Topographic Position Index)
+Kanal Yapısı (5 kanal):
+    [0-2]: RGB (R, G, B)
+    [3]: SVF (Sky-View Factor)
+    [4]: SLRM (Simplified Local Relief Model)
 
 Kullanım:
     python egitim_verisi_olusturma.py --input kesif_alani.tif --mask ground_truth.tif --output training_data
@@ -52,8 +45,6 @@ from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
 try:
     from archaeo_detect import (
         compute_derivatives_with_rvt,
-        compute_ndsm,
-        compute_tpi_multiscale,
         stack_channels,
         robust_norm,
     )
@@ -106,11 +97,6 @@ CONFIG: dict[str, object] = {
     # Girdi rasterindaki bant sirasi: "R,G,B,DSM,DTM".
     # GeoTIFF bant indeksleri 1 tabanlidir (1,2,3,...).
     "bands": "1,2,3,4,5",
-
-    # tpi_radii:
-    # TPI hesaplamasinda kullanilan coklu olcek yaricaplari (piksel).
-    # Farkli yaricaplar mikro ve makro topografik desenleri birlikte yakalamaya yardimci olur.
-    "tpi_radii": (5, 15, 30),
 
     # min_positive:
     # Tile'in kabul edilmesi icin gereken minimum pozitif piksel orani.
@@ -342,10 +328,9 @@ def _validate_append_compatibility(
     *,
     tile_size: int,
     bands: str,
-    tpi_radii: Tuple[int, ...],
     normalize: bool,
     save_format: str,
-    expected_channels: int = 12,
+    expected_channels: int = 5,
 ) -> None:
     """
     Ensure append mode does not silently mix incompatible tile datasets.
@@ -439,15 +424,6 @@ def _validate_append_compatibility(
             except ValueError:
                 mismatches.append(
                     f"bands degeri parse edilemedi (mevcut: {metadata.get('bands')}, yeni: {bands})"
-                )
-        if metadata.get("tpi_radii") is not None:
-            try:
-                old_tpi = _parse_csv_int_tuple(metadata["tpi_radii"])
-                new_tpi = tuple(int(r) for r in tpi_radii)
-                _check("tpi_radii", old_tpi, new_tpi)
-            except ValueError:
-                mismatches.append(
-                    f"tpi_radii parse edilemedi (mevcut: {metadata.get('tpi_radii')}, yeni: {tpi_radii})"
                 )
     elif image_shape is not None or mask_shape is not None:
         LOGGER.warning(
@@ -681,7 +657,6 @@ def _init_tile_worker(
     band_idx: Tuple[int, ...],
     tile_size: int,
     pixel_size: float,
-    tpi_radii: Tuple[int, ...],
     min_positive_ratio: float,
     max_nodata_ratio: float,
     normalize: bool,
@@ -700,7 +675,6 @@ def _init_tile_worker(
         "band_idx": tuple(int(b) for b in band_idx),
         "tile_size": int(tile_size),
         "pixel_size": float(pixel_size),
-        "tpi_radii": tuple(int(r) for r in tpi_radii),
         "min_positive_ratio": float(min_positive_ratio),
         "max_nodata_ratio": float(max_nodata_ratio),
         "normalize": bool(normalize),
@@ -765,14 +739,12 @@ def _process_single_tile(task: Tuple[int, int, str]) -> dict:
         }
 
     try:
-        ndsm = compute_ndsm(dsm, dtm)
-        svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+        svf, slrm = compute_derivatives_with_rvt(
             dtm,
             pixel_size=float(ctx["pixel_size"]),
             show_progress=False,
             log_steps=False,
         )
-        tpi = compute_tpi_multiscale(dtm, radii=ctx["tpi_radii"])
     except Exception as exc:
         return {
             "status": "skipped_nodata",
@@ -781,18 +753,7 @@ def _process_single_tile(task: Tuple[int, int, str]) -> dict:
             "error": str(exc),
         }
 
-    stacked = stack_channels(
-        rgb=rgb,
-        dsm=dsm,
-        dtm=dtm,
-        svf=svf,
-        pos_open=pos_open,
-        neg_open=neg_open,
-        lrm=lrm,
-        slope=slope,
-        ndsm=ndsm,
-        tpi=tpi,
-    )
+    stacked = stack_channels(rgb, svf, slrm)
 
     if bool(ctx["normalize"]):
         stacked = robust_norm(stacked)
@@ -844,7 +805,6 @@ def create_training_tiles(
     tile_size: int = 256,
     overlap: int = 128,
     bands: str = "1,2,3,4,5",
-    tpi_radii: Tuple[int, ...] = (5, 15, 30),
     min_positive_ratio: float = 0.0,
     tile_label_min_positive_ratio: float = 0.0,
     max_nodata_ratio: float = 0.3,
@@ -859,7 +819,7 @@ def create_training_tiles(
     clean_output: bool = True,
 ) -> dict:
     """
-    GeoTIFF'ten 12 kanallı eğitim tile'ları oluşturur.
+    GeoTIFF'ten 5 kanallı eğitim tile'ları oluşturur (R, G, B, SVF, SLRM).
     
     Args:
         input_tif: Çok bantlı GeoTIFF (RGB + DSM + DTM)
@@ -868,7 +828,6 @@ def create_training_tiles(
         tile_size: Tile boyutu (piksel)
         overlap: Örtüşme miktarı
         bands: Bant indeksleri "R,G,B,DSM,DTM" formatında
-        tpi_radii: TPI yarıçapları
         min_positive_ratio: Dataset'e dahil etmek için minimum pozitif piksel oranı (0-1)
         tile_label_min_positive_ratio: Tile-level classification etiketi için minimum
             pozitif piksel oranı (0-1)
@@ -922,10 +881,9 @@ def create_training_tiles(
             output_dir=output_dir,
             tile_size=int(tile_size),
             bands=str(bands),
-            tpi_radii=tuple(int(r) for r in tpi_radii),
             normalize=bool(normalize),
             save_format=str(save_format),
-            expected_channels=12,
+            expected_channels=len(MODEL_CHANNEL_NAMES),
         )
 
     # Dizin yapısı oluştur
@@ -974,7 +932,6 @@ def create_training_tiles(
     LOGGER.info(f"Örtüşme: {overlap}")
     LOGGER.info(f"Bölme modu: {split_mode}")
     LOGGER.info(f"Bant sırası: {bands}")
-    LOGGER.info(f"TPI yarıçapları: {tpi_radii}")
     LOGGER.info(
         "Tile label eşiği (classification): %.4f",
         float(tile_label_min_positive_ratio),
@@ -1231,7 +1188,6 @@ def create_training_tiles(
                 tuple(int(b) for b in band_idx),
                 int(tile_size),
                 float(pixel_size),
-                tuple(int(r) for r in tpi_radii),
                 float(min_positive_ratio),
                 float(max_nodata_ratio),
                 bool(normalize),
@@ -1330,7 +1286,6 @@ def create_training_tiles(
         "tile_size": tile_size,
         "overlap": overlap,
         "bands": bands,
-        "tpi_radii": list(tpi_radii),
         "min_positive_ratio": float(min_positive_ratio),
         "tile_label_min_positive_ratio": float(tile_label_min_positive_ratio),
         "normalize": normalize,
@@ -1475,11 +1430,6 @@ def main():
     config_input = str(CONFIG.get("input", "")).strip()
     config_mask = str(CONFIG.get("mask", "")).strip()
     config_output = str(CONFIG.get("output", "training_data")).strip() or "training_data"
-    config_tpi_radii = CONFIG.get("tpi_radii", (5, 15, 30))
-    if isinstance(config_tpi_radii, (list, tuple)):
-        tpi_default = ",".join(str(int(r)) for r in config_tpi_radii)
-    else:
-        tpi_default = str(config_tpi_radii).strip() or "5,15,30"
 
     config_train_negative_keep_ratio = float(CONFIG.get("train_negative_keep_ratio", 1.0))
     config_train_negative_max = CONFIG.get("train_negative_max", None)
@@ -1493,7 +1443,7 @@ def main():
     config_append = bool(CONFIG.get("append", False))
 
     parser = argparse.ArgumentParser(
-        description="12 kanalli arkeolojik tespit egitim verisi olusturma",
+        description="5 kanalli arkeolojik tespit egitim verisi olusturma",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -1532,12 +1482,6 @@ def main():
         type=str,
         default=str(CONFIG.get("bands", "1,2,3,4,5")),
         help="Bant sirasi (R,G,B,DSM,DTM)",
-    )
-    parser.add_argument(
-        "--tpi-radii",
-        type=str,
-        default=tpi_default,
-        help="TPI yaricaplari (virgulle ayrilmis)",
     )
     parser.add_argument(
         "--min-positive",
@@ -1643,16 +1587,6 @@ def main():
     if not args.mask:
         parser.error("Maske dosyasi icin CONFIG['mask'] veya --mask belirtin.")
 
-    try:
-        tpi_radii = tuple(
-            int(r.strip()) for r in str(args.tpi_radii).split(",") if r.strip()
-        )
-    except ValueError:
-        parser.error(f"Gecersiz --tpi-radii degeri: {args.tpi_radii}")
-
-    if not tpi_radii:
-        parser.error("TPI yaricaplari bos olamaz. Ornek: 5,15,30")
-
     input_path = Path(args.input)
     mask_path = Path(args.mask)
 
@@ -1672,7 +1606,6 @@ def main():
             tile_size=args.tile_size,
             overlap=args.overlap,
             bands=args.bands,
-            tpi_radii=tpi_radii,
             min_positive_ratio=args.min_positive,
             tile_label_min_positive_ratio=args.tile_label_min_positive_ratio,
             max_nodata_ratio=args.max_nodata,

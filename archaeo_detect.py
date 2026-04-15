@@ -260,21 +260,17 @@ def estimate_precompute_derivatives_bytes(
     pixels: int,
     *,
     has_dsm: bool,
-    enable_curvature: bool,
-    enable_tpi: bool,
+    enable_curvature: bool = False,
+    enable_tpi: bool = False,
 ) -> int:
     """
     Rough upper-bound estimate of RAM needed by `precompute_derivatives`.
 
     The function currently materializes full-raster arrays for:
-    - RGB (3), DTM (1), optional DSM (1)
-    - RVT outputs (SVF, pos/neg openness, LRM, slope) (5)
-    - nDSM (1)
-    - optional TPI (1)
+    - RGB (3), DTM (1)
+    - RVT outputs: SVF (1), SLRM (1)
     """
-    float_arrays = 3 + 1 + (1 if has_dsm else 0) + 5 + 1
-    if enable_tpi:
-        float_arrays += 1
+    float_arrays = 3 + 1 + 2  # RGB + DTM + SVF + SLRM
     return int(float_arrays * pixels * np.dtype(np.float32).itemsize)
 
 
@@ -523,8 +519,8 @@ class PipelineDefaults:
         metadata={"help": "Morfolojik filtreleme için yapısal eleman yarıçapları"},
     )
     rvt_radii: Tuple[float, ...] = field(
-        default=(5.0, 10.0, 20.0, 30.0, 50.0),
-        metadata={"help": "RVT hesaplamaları (SVF, openness) için arama yarıçapları (metre)"},
+        default=(10.0,),
+        metadata={"help": "SVF hesaplaması için arama yarıçapları (metre). Tek değer önerilir."},
     )
     local_variance_window: int = field(
         default=7,
@@ -1345,6 +1341,45 @@ def compute_tpi_multiscale(
     return tpi_combined.astype(np.float32)
 
 
+def _rvt_as_float32(result_obj, name: str) -> np.ndarray:
+    """Best-effort conversion of various RVT return types to float32 ndarray."""
+    if isinstance(result_obj, np.ndarray):
+        return result_obj.astype(np.float32)
+    if isinstance(result_obj, np.ma.MaskedArray):
+        return np.ma.filled(result_obj, np.nan).astype(np.float32)
+    if isinstance(result_obj, dict):
+        preferred_keys = ("svf", "SVF", "slrm", "SLRM", "lrm", "LRM",
+                          "positive_openness", "pos_open", "negative_openness",
+                          "neg_open", "slope", "Slope")
+        for k in preferred_keys:
+            if k in result_obj and isinstance(result_obj[k], (np.ndarray, np.ma.MaskedArray)):
+                return _rvt_as_float32(result_obj[k], name)
+        for v in result_obj.values():
+            try:
+                arr = _rvt_as_float32(v, name)
+                if isinstance(arr, np.ndarray):
+                    return arr
+            except Exception:
+                continue
+        raise TypeError(f"RVT '{name}' returned dict without ndarray values.")
+    if isinstance(result_obj, (list, tuple)):
+        for v in result_obj:
+            try:
+                arr = _rvt_as_float32(v, name)
+                if isinstance(arr, np.ndarray):
+                    return arr
+            except Exception:
+                continue
+        raise TypeError(f"RVT '{name}' returned a sequence without ndarray values.")
+    try:
+        arr = np.asarray(result_obj)
+        if isinstance(arr, np.ndarray):
+            return arr.astype(np.float32)
+    except Exception:
+        pass
+    raise TypeError(f"RVT '{name}' returned unsupported type: {type(result_obj)}")
+
+
 def compute_derivatives_with_rvt(
     dtm: np.ndarray,
     pixel_size: float,
@@ -1353,137 +1388,37 @@ def compute_derivatives_with_rvt(
     *,
     show_progress: bool = True,
     log_steps: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """RVT rutinlerini kullanarak SVF, açıklık, LRM ve eğim hesapla."""
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute SVF and SLRM from a DTM tile (5-band schema).
+
+    Returns
+    -------
+    svf : np.ndarray (H, W)  – multi-radius averaged Sky-View Factor
+    slrm : np.ndarray (H, W) – Simple Local Relief Model (ADAF strategy)
+    """
     if rvt_vis is None:
         raise ImportError("Install rvt-py: pip install rvt")
     if radii is None:
         radii = DEFAULTS.rvt_radii
     dtm_filled, valid_mask = fill_nodata(dtm)
     log_fn = LOGGER.info if log_steps else LOGGER.debug
-    # Compatibility helpers for rvt-py API differences across versions
-    def _as_float32_array(result_obj, name: str) -> np.ndarray:
-        """Best-effort conversion of various RVT return types to float32 ndarray."""
-        # Direct ndarray
-        if isinstance(result_obj, np.ndarray):
-            return result_obj.astype(np.float32)
-        # Masked array
-        if isinstance(result_obj, np.ma.MaskedArray):
-            return np.ma.filled(result_obj, np.nan).astype(np.float32)
-        # Dict of outputs (pick most relevant or first ndarray)
-        if isinstance(result_obj, dict):
-            preferred_keys = (
-                "svf",
-                "SVF",
-                "positive_openness",
-                "pos_open",
-                "openness_positive",
-                "negative_openness",
-                "neg_open",
-                "openness_negative",
-                "lrm",
-                "LRM",
-                "slope",
-                "Slope",
-            )
-            for k in preferred_keys:
-                if k in result_obj and isinstance(result_obj[k], (np.ndarray, np.ma.MaskedArray)):
-                    return _as_float32_array(result_obj[k], name)
-            # fallback: first ndarray-looking value
-            for v in result_obj.values():
-                try:
-                    arr = _as_float32_array(v, name)
-                    if isinstance(arr, np.ndarray):
-                        return arr
-                except Exception:
-                    continue
-            raise TypeError(f"RVT '{name}' returned dict without ndarray values.")
-        # Sequence of outputs: take first array-like
-        if isinstance(result_obj, (list, tuple)):
-            for v in result_obj:
-                try:
-                    arr = _as_float32_array(v, name)
-                    if isinstance(arr, np.ndarray):
-                        return arr
-                except Exception:
-                    continue
-            raise TypeError(f"RVT '{name}' returned a sequence without ndarray values.")
-        # Generic coercion
-        try:
-            arr = np.asarray(result_obj)
-            if isinstance(arr, np.ndarray):
-                return arr.astype(np.float32)
-        except Exception:
-            pass
-        raise TypeError(f"RVT '{name}' returned unsupported type: {type(result_obj)}")
 
     def _radius_to_cells(radius_val: float) -> int:
         pixel = max(float(pixel_size), 1e-6)
         return max(1, int(round(float(radius_val) / pixel)))
 
-    def _call_with_radius(func, radius_val: float) -> np.ndarray:
-        # try different keyword names for radius and nodata
-        radius_keys = ("max_radius", "radius", "r_max", "search_radius", "max_search_radius")
-        nodata_keys = ("no_data", "nodata")
-        last_err: Optional[Exception] = None
-        for rk in radius_keys:
-            for nk in nodata_keys:
-                try:
-                    return func(dem=dtm_filled, resolution=pixel_size, **{rk: float(radius_val), nk: None})
-                except TypeError as e:
-                    last_err = e
-                    continue
-        # try without nodata keyword
-        for rk in radius_keys:
-            try:
-                return func(dem=dtm_filled, resolution=pixel_size, **{rk: float(radius_val)})
-            except TypeError as e:
-                last_err = e
-                continue
-        # final fallback: minimal signature
-        try:
-            return func(dem=dtm_filled, resolution=pixel_size)
-        except Exception as e:  # pragma: no cover - defensive
-            if last_err is not None:
-                raise last_err
-            raise e
-
-    def _call_sky_view_factor(
-        *,
-        dem_arr: np.ndarray,
-        radius_val: float,
-        compute_svf: bool,
-        compute_opns: bool,
-    ):
+    # --- SVF (multi-radius averaged) ---
+    def _call_sky_view_factor(dem_arr, radius_val):
         radius_px = _radius_to_cells(radius_val)
         candidates = (
-            {
-                "dem": dem_arr,
-                "resolution": pixel_size,
-                "compute_svf": compute_svf,
-                "compute_asvf": False,
-                "compute_opns": compute_opns,
-                "svf_r_max": radius_px,
-                "svf_noise": 0,
-                "no_data": None,
-            },
-            {
-                "dem": dem_arr,
-                "resolution": pixel_size,
-                "compute_svf": compute_svf,
-                "compute_asvf": False,
-                "compute_opns": compute_opns,
-                "svf_r_max": radius_px,
-                "svf_noise": 0,
-            },
-            {
-                "dem": dem_arr,
-                "resolution": pixel_size,
-                "compute_svf": compute_svf,
-                "compute_opns": compute_opns,
-                "svf_r_max": radius_px,
-                "svf_noise": 0,
-            },
+            {"dem": dem_arr, "resolution": pixel_size, "compute_svf": True,
+             "compute_asvf": False, "compute_opns": False,
+             "svf_r_max": radius_px, "svf_noise": 0, "no_data": None},
+            {"dem": dem_arr, "resolution": pixel_size, "compute_svf": True,
+             "compute_asvf": False, "compute_opns": False,
+             "svf_r_max": radius_px, "svf_noise": 0},
+            {"dem": dem_arr, "resolution": pixel_size, "compute_svf": True,
+             "compute_opns": False, "svf_r_max": radius_px, "svf_noise": 0},
         )
         last_err: Optional[Exception] = None
         for kwargs in candidates:
@@ -1491,7 +1426,6 @@ def compute_derivatives_with_rvt(
                 return rvt_vis.sky_view_factor(**kwargs)
             except TypeError as exc:
                 last_err = exc
-                continue
         try:
             return rvt_vis.sky_view_factor(dem=dem_arr, resolution=pixel_size)
         except Exception as exc:
@@ -1499,305 +1433,60 @@ def compute_derivatives_with_rvt(
                 raise last_err
             raise exc
 
-    def _extract_named_array(result_obj, keys: Sequence[str], name: str) -> np.ndarray:
+    def _extract_named(result_obj, keys, name):
         if isinstance(result_obj, dict):
             for key in keys:
                 if key in result_obj:
-                    return _as_float32_array(result_obj[key], name)
-        return _as_float32_array(result_obj, name)
+                    return _rvt_as_float32(result_obj[key], name)
+        return _rvt_as_float32(result_obj, name)
 
-    svf_layers: List[np.ndarray] = []
     log_fn("  → SVF (Sky View Factor) hesaplanıyor...")
-    radii_iter: Iterable[float]
-    if show_progress:
-        radii_iter = progress_bar(
-            radii,
-            desc="SVF hesaplama",
-            unit="yarıçap",
-            total=len(radii),
-        )
-    else:
-        radii_iter = radii
-    for radius in radii_iter:
-        svf_res = _call_sky_view_factor(
-            dem_arr=dtm_filled,
-            radius_val=float(radius),
-            compute_svf=True,
-            compute_opns=False,
-        )
-        svf = _extract_named_array(svf_res, ("svf", "SVF"), "sky_view_factor")
-        svf_layers.append(svf)
-    svf_avg = np.mean(np.stack(svf_layers, axis=0), axis=0)
-    # Openness variants differ across rvt versions; compute both pos/neg robustly
-    def _compute_openness(radius_val: float) -> tuple[np.ndarray, np.ndarray]:
-        if hasattr(rvt_vis, "positive_openness") and hasattr(rvt_vis, "negative_openness"):
-            pos = _as_float32_array(
-                _call_with_radius(rvt_vis.positive_openness, radius_val),
-                "positive_openness",
-            )
-            neg = _as_float32_array(
-                _call_with_radius(rvt_vis.negative_openness, radius_val),
-                "negative_openness",
-            )
-            return pos, neg
-        # Single 'openness' function that returns both
-        if hasattr(rvt_vis, "openness"):
-            res = _call_with_radius(rvt_vis.openness, radius_val)
-            # dict case
-            if isinstance(res, dict):
-                # try common keys
-                pos_keys = ("positive_openness", "openness_positive", "pos_open", "pos")
-                neg_keys = ("negative_openness", "openness_negative", "neg_open", "neg")
-                pos_arr = None
-                neg_arr = None
-                for k in pos_keys:
-                    if k in res:
-                        pos_arr = _as_float32_array(res[k], "positive_openness")
-                        break
-                for k in neg_keys:
-                    if k in res:
-                        neg_arr = _as_float32_array(res[k], "negative_openness")
-                        break
-                if pos_arr is not None and neg_arr is not None:
-                    return pos_arr, neg_arr
-                # fallback: try to pick two ndarray-like values in order
-                arrays = []
-                for v in res.values():
-                    try:
-                        arrays.append(_as_float32_array(v, "openness"))
-                    except Exception:
-                        continue
-                if len(arrays) >= 2:
-                    return arrays[0], arrays[1]
-                if len(arrays) == 1:
-                    return arrays[0], arrays[0]
-                LOGGER.warning("RVT openness dict değeri array içermiyor; sıfır kullanılıyor.")
-            # sequence case
-            if isinstance(res, (list, tuple)):
-                seq = list(res)
-                if len(seq) >= 2:
-                    return (
-                        _as_float32_array(seq[0], "positive_openness"),
-                        _as_float32_array(seq[1], "negative_openness"),
-                    )
-                if len(seq) == 1:
-                    arr = _as_float32_array(seq[0], "openness")
-                    return arr, arr
-                LOGGER.warning("RVT openness dizisi boş; sıfır kullanılıyor.")
-            # single array case
+    svf_radius = float(radii[0]) if radii else 10.0
+    log_fn("    SVF radius=%.1f m  (%d px)", svf_radius, _radius_to_cells(svf_radius))
+    svf_res = _call_sky_view_factor(dtm_filled, svf_radius)
+    svf_avg = _extract_named(svf_res, ("svf", "SVF"), "sky_view_factor")
+
+    # --- SLRM (ADAF strategy: radius_cell clamped to [10, 50] px) ---
+    log_fn("  → SLRM (Simple Local Relief Model) hesaplanıyor...")
+    from math import ceil as _ceil
+    slrm_rad_cell = int(min(50, max(10, _ceil(10.0 / max(float(pixel_size), 1e-6)))))
+    log_fn("    SLRM rad_cell=%d px  (pixel_size=%.3f m)", slrm_rad_cell, pixel_size)
+
+    slrm: np.ndarray
+    slrm_ready = False
+    if hasattr(rvt_vis, "slrm"):
+        for try_kwargs in (
+            {"dem": dtm_filled, "radius_cell": slrm_rad_cell, "no_data": None},
+            {"dem": dtm_filled, "radius_cell": slrm_rad_cell},
+        ):
             try:
-                arr = _as_float32_array(res, "openness")
-                return arr, arr
-            except Exception:
-                LOGGER.warning("RVT openness desteklenmeyen tip döndürdü; sıfır kullanılıyor.")
-        if hasattr(rvt_vis, "sky_view_factor"):
-            try:
-                pos_res = _call_sky_view_factor(
-                    dem_arr=dtm_filled,
-                    radius_val=radius_val,
-                    compute_svf=False,
-                    compute_opns=True,
-                )
-                neg_res = _call_sky_view_factor(
-                    dem_arr=-dtm_filled,
-                    radius_val=radius_val,
-                    compute_svf=False,
-                    compute_opns=True,
-                )
-                pos_arr = _extract_named_array(
-                    pos_res,
-                    ("opns", "positive_openness", "openness_positive", "pos_open", "pos"),
-                    "positive_openness",
-                )
-                neg_arr = _extract_named_array(
-                    neg_res,
-                    ("opns", "negative_openness", "openness_negative", "neg_open", "neg"),
-                    "negative_openness",
-                )
-                return pos_arr, neg_arr
-            except Exception:
-                LOGGER.warning("RVT sky_view_factor ile openness hesabi basarisiz; sifir kullaniliyor.")
-        # fallback if no openness available
-        zeros = np.zeros_like(dtm_filled, dtype=np.float32)
-        return zeros, zeros
-
-    log_fn("  → Openness (pozitif/negatif) hesaplanıyor...")
-    pos_open, neg_open = _compute_openness(float(max(radii)))
-
-    log_fn("  → LRM (Local Relief Model) hesaplanıyor...")
-
-    def _call_local_relief_model() -> np.ndarray:
-        radius_keys = ("search_radius", "radius", "r_max", "max_radius", "max_search_radius")
-        nodata_keys = ("no_data", "nodata")
-        last_err: Optional[Exception] = None
-        for rk in radius_keys:
-            for nk in nodata_keys:
-                try:
-                    return rvt_vis.local_relief_model(
-                        dem=dtm_filled,
-                        resolution=pixel_size,
-                        **{rk: float(max(radii)), nk: None},
-                    )
-                except TypeError as e:
-                    last_err = e
-                    continue
+                slrm = _rvt_as_float32(rvt_vis.slrm(**try_kwargs), "slrm")
+                slrm_ready = True
+                break
+            except TypeError:
+                continue
+    if not slrm_ready and hasattr(rvt_vis, "local_relief_model"):
+        radius_keys = ("search_radius", "radius", "r_max", "max_radius")
         for rk in radius_keys:
             try:
-                return rvt_vis.local_relief_model(
-                    dem=dtm_filled,
-                    resolution=pixel_size,
-                    **{rk: float(max(radii))},
+                slrm = _rvt_as_float32(
+                    rvt_vis.local_relief_model(dem=dtm_filled, resolution=pixel_size,
+                                               **{rk: float(max(radii)), "no_data": None}),
+                    "local_relief_model",
                 )
-            except TypeError as e:
-                last_err = e
+                slrm_ready = True
+                break
+            except TypeError:
                 continue
-        try:
-            return rvt_vis.local_relief_model(dem=dtm_filled, resolution=pixel_size)
-        except Exception as e:
-            if last_err is not None:
-                raise last_err
-            raise e
+    if not slrm_ready:
+        _warn_once("rvt_slrm_missing", "RVT SLRM fonksiyonu eksik; Gaussian fallback kullaniliyor.")
+        _sigma = DEFAULTS.gaussian_lrm_sigma if gaussian_lrm_sigma is None else float(gaussian_lrm_sigma)
+        low_pass = gaussian_filter(dtm_filled, sigma=_sigma)
+        slrm = (dtm_filled - low_pass).astype(np.float32)
 
-    def _call_slrm() -> np.ndarray:
-        target_radius_px = int(round(float(max(radii)) / max(float(pixel_size), 1e-6)))
-        radius_candidates: List[int] = []
-        for candidate in (target_radius_px, int(round(float(max(radii)))), 20):
-            candidate = max(10, min(50, int(candidate)))
-            if candidate not in radius_candidates:
-                radius_candidates.append(candidate)
-
-        last_err: Optional[Exception] = None
-        for radius_cell in radius_candidates:
-            try:
-                return rvt_vis.slrm(
-                    dem=dtm_filled,
-                    radius_cell=int(radius_cell),
-                    no_data=None,
-                )
-            except TypeError as e:
-                last_err = e
-            try:
-                return rvt_vis.slrm(
-                    dem=dtm_filled,
-                    radius_cell=int(radius_cell),
-                )
-            except TypeError as e:
-                last_err = e
-                continue
-        if last_err is not None:
-            raise last_err
-        return rvt_vis.slrm(dem=dtm_filled)
-
-    lrm: np.ndarray
-    lrm_ready = False
-    if hasattr(rvt_vis, "local_relief_model"):
-        try:
-            lrm = _as_float32_array(_call_local_relief_model(), "local_relief_model")
-            lrm_ready = True
-        except Exception:
-            lrm_ready = False
-
-    if not lrm_ready and hasattr(rvt_vis, "slrm"):
-        try:
-            lrm = _as_float32_array(_call_slrm(), "slrm")
-            lrm_ready = True
-        except Exception:
-            lrm_ready = False
-
-    if not lrm_ready:
-        _warn_once(
-            "rvt_local_relief_model_missing",
-            "RVT LRM fonksiyonu eksik/uyumsuz; Gaussian fallback kullaniliyor.",
-        )
-        _lrm_sigma = DEFAULTS.gaussian_lrm_sigma if gaussian_lrm_sigma is None else float(gaussian_lrm_sigma)
-        low_pass = gaussian_filter(dtm_filled, sigma=_lrm_sigma)
-        lrm = (dtm_filled - low_pass).astype(np.float32)
-
-    # slope signature also varies across versions; try slope and slope_aspect.
-    # If both are unavailable, fall back to numpy gradient.
-    log_fn("  → Slope (eğim) hesaplanıyor...")
-
-    def _call_slope_aspect() -> np.ndarray:
-        candidates = (
-            {
-                "dem": dtm_filled,
-                "resolution_x": pixel_size,
-                "resolution_y": pixel_size,
-                "output_units": "degree",
-                "no_data": None,
-            },
-            {
-                "dem": dtm_filled,
-                "resolution_x": pixel_size,
-                "resolution_y": pixel_size,
-                "output_units": "degree",
-            },
-            {
-                "dem": dtm_filled,
-                "resolution": pixel_size,
-                "output_units": "degree",
-                "no_data": None,
-            },
-            {
-                "dem": dtm_filled,
-                "resolution": pixel_size,
-                "output_units": "degree",
-            },
-            {"dem": dtm_filled},
-        )
-        last_err: Optional[Exception] = None
-        for kwargs in candidates:
-            try:
-                return rvt_vis.slope_aspect(**kwargs)
-            except TypeError as e:
-                last_err = e
-                continue
-        if last_err is not None:
-            raise last_err
-        return rvt_vis.slope_aspect(dtm_filled)
-
-    slope: np.ndarray
-    slope_ready = False
-    if hasattr(rvt_vis, "slope"):
-        try:
-            slope_res = rvt_vis.slope(
-                dem=dtm_filled,
-                resolution=pixel_size,
-                output_units="degree",
-                no_data=None,
-            )
-            slope = _as_float32_array(slope_res, "slope")
-            slope_ready = True
-        except TypeError:
-            try:
-                slope = _as_float32_array(
-                    rvt_vis.slope(dem=dtm_filled, resolution=pixel_size),
-                    "slope",
-                )
-                slope_ready = True
-            except Exception:
-                slope_ready = False
-
-    if not slope_ready and hasattr(rvt_vis, "slope_aspect"):
-        try:
-            slope = _as_float32_array(_call_slope_aspect(), "slope_aspect")
-            slope_ready = True
-        except Exception:
-            slope_ready = False
-
-    if not slope_ready:
-        _warn_once(
-            "rvt_slope_missing",
-            "RVT slope fonksiyonu eksik/uyumsuz; gradyan tabanli fallback kullaniliyor.",
-        )
-        # Compute slope in degrees: arctan(sqrt((dz/dx)^2 + (dz/dy)^2))
-        # Use filled DTM to avoid NaNs breaking gradient
-        gy, gx = np.gradient(dtm_filled.astype(np.float32), pixel_size, pixel_size)
-        slope = np.degrees(np.arctan(np.hypot(gx, gy))).astype(np.float32)
-
-    for derivative in (svf_avg, pos_open, neg_open, lrm, slope):
-        derivative[~valid_mask] = np.nan
-    return svf_avg, pos_open, neg_open, lrm, slope
+    svf_avg[~valid_mask] = np.nan
+    slrm[~valid_mask] = np.nan
+    return svf_avg, slrm
 
 
 def _score_rvtlog(
@@ -1815,17 +1504,18 @@ def _score_rvtlog(
 ) -> np.ndarray:
     """Birleşik RVT + LoG + gradyan klasik skor hesaplama."""
     dtm_filled, valid = fill_nodata(dtm)
-    if pre_svf is None or pre_neg_open is None or pre_lrm is None:
-        svf, _, neg, lrm, _ = compute_derivatives_with_rvt(
-            dtm,
-            pixel_size=pixel_size,
-            radii=rvt_radii,
+    if pre_svf is None or pre_lrm is None:
+        svf, slrm = compute_derivatives_with_rvt(
+            dtm, pixel_size=pixel_size, radii=rvt_radii,
             gaussian_lrm_sigma=gaussian_lrm_sigma,
-            show_progress=False,
-            log_steps=False,
+            show_progress=False, log_steps=False,
         )
-    else:
-        svf, neg, lrm = pre_svf, pre_neg_open, pre_lrm
+        if pre_svf is None:
+            pre_svf = svf
+        if pre_lrm is None:
+            pre_lrm = slrm
+    svf, lrm = pre_svf, pre_lrm
+    neg = pre_neg_open if pre_neg_open is not None else np.zeros_like(dtm_filled, dtype=np.float32)
     _sigmas = DEFAULTS.sigma_scales if sigmas is None else sigmas
     log_responses = [
         np.abs(gaussian_laplace(dtm_filled, sigma=s, mode="nearest"))
@@ -1890,55 +1580,18 @@ def _score_morph(dtm: np.ndarray, radii: Optional[Sequence[int]] = None) -> np.n
 
 def stack_channels(
     rgb: np.ndarray,
-    dsm: Optional[np.ndarray],
-    dtm: np.ndarray,
     svf: np.ndarray,
-    pos_open: np.ndarray,
-    neg_open: np.ndarray,
-    lrm: np.ndarray,
-    slope: np.ndarray,
-    ndsm: np.ndarray,
-    tpi: Optional[np.ndarray] = None,
+    slrm: np.ndarray,
 ) -> np.ndarray:
-    """
-    Stack channels in the required order.
-
-    Varsayilan 11 kanal:
-        [0-2]: RGB
-        [3]: DSM
-        [4]: DTM
-        [5]: SVF
-        [6]: Positive Openness
-        [7]: Negative Openness
-        [8]: LRM
-        [9]: Slope
-        [10]: nDSM
-
-    TPI aktifse:
-        [11]: TPI
-    """
+    """Stack channels in the 5-band order: R, G, B, SVF, SLRM."""
     if rgb.shape[0] != 3:
         raise ValueError("RGB input must have three channels.")
 
-    dsm_channel = dsm if dsm is not None else np.zeros_like(dtm, dtype=np.float32)
-    channels = [
-        rgb[0],
-        rgb[1],
-        rgb[2],
-        dsm_channel,
-        dtm,
-        svf,
-        pos_open,
-        neg_open,
-        lrm,
-        slope,
-        ndsm,
-    ]
-    if tpi is not None:
-        channels.append(tpi)
-
-    stacked = np.stack([ch.astype(np.float32) for ch in channels], axis=0)
-    return stacked
+    stacked = np.stack(
+        [rgb[0], rgb[1], rgb[2], svf, slrm],
+        axis=0,
+    )
+    return stacked.astype(np.float32)
 
 
 # ==============================================================================
@@ -2064,20 +1717,9 @@ class AttentionWrapper(torch.nn.Module):
         return self.base_model(x)
 
 
-def get_num_channels(enable_curvature: bool = True, enable_tpi: bool = True) -> int:
-    """
-    Aktif kanalların toplam sayısını döndürür.
-    
-    Temel: 11 kanal (RGB + DSM + DTM + SVF + Openness + LRM + Slope + nDSM)
-    + TPI: +1 kanal
-    
-    Returns:
-        11 veya 12 (aktif özelliklere bağlı)
-    """
-    base_channels = 11
-    if enable_tpi:
-        base_channels += 1  # TPI
-    return base_channels
+def get_num_channels(*_args, **_kwargs) -> int:
+    """Return the fixed 5-band channel count, accepting legacy unused args."""
+    return 5
 
 
 class TileClassifier(torch.nn.Module):
@@ -2125,7 +1767,7 @@ class TileClassifier(torch.nn.Module):
 def build_model(
     arch: str = "Unet",
     encoder: str = "resnet34",
-    in_ch: int = 12,
+    in_ch: int = 5,
     enable_attention: bool = True,
     attention_reduction: int = 4,
 ) -> torch.nn.Module:
@@ -2135,7 +1777,7 @@ def build_model(
     Args:
         arch: Model mimarisi (Unet, UnetPlusPlus, DeepLabV3Plus, vb.)
         encoder: Encoder ismi (resnet34, resnet50, efficientnet-b3, vb.)
-        in_ch: Giriş kanal sayısı (9 veya 12)
+        in_ch: Giriş kanal sayısı (5: R,G,B,SVF,SLRM)
         enable_attention: CBAM attention modülünü etkinleştir
         attention_reduction: Attention için kanal azaltma oranı
         
@@ -2166,7 +1808,7 @@ def build_model(
 
 def build_tile_classifier(
     encoder: str = "resnet34",
-    in_ch: int = 12,
+    in_ch: int = 5,
     enable_attention: bool = True,
     attention_reduction: int = 4,
     encoder_weights: Optional[str] = None,
@@ -2188,7 +1830,7 @@ def build_tile_classifier(
     return model
 
 
-def inflate_conv1_to_n(conv_w: torch.Tensor, in_ch: int = 9, mode: str = "avg") -> torch.Tensor:
+def inflate_conv1_to_n(conv_w: torch.Tensor, in_ch: int = 5, mode: str = "avg") -> torch.Tensor:
     """
     Inflate a first-conv weight tensor (out,c,kH,kW) to match the requested in_ch.
     - If channels already match, the tensor is returned unchanged.
@@ -2217,7 +1859,7 @@ def inflate_conv1_to_n(conv_w: torch.Tensor, in_ch: int = 9, mode: str = "avg") 
 def build_model_with_imagenet_inflated(
     arch: str = "Unet", 
     encoder: str = "resnet34", 
-    in_ch: int = 12,
+    in_ch: int = 5,
     enable_attention: bool = True,
     attention_reduction: int = 4,
 ) -> torch.nn.Module:
@@ -2232,7 +1874,7 @@ def build_model_with_imagenet_inflated(
     Args:
         arch: Model mimarisi
         encoder: Encoder ismi
-        in_ch: Hedef kanal sayısı (9 veya 12)
+        in_ch: Hedef kanal sayısı (5: R,G,B,SVF,SLRM)
         enable_attention: CBAM attention ekle
         attention_reduction: Attention için kanal azaltma oranı
     
@@ -3044,7 +2686,7 @@ def infer_tiled(
 
         pixels = int(height) * int(width)
         one_float_bytes = pixels * np.dtype(np.float32).itemsize
-        est_bytes = one_float_bytes * 3 + pixels  # prob_acc + weight_acc + ndsm_max + valid_global(bool)
+        est_bytes = one_float_bytes * (3 if mask_talls is not None else 2) + pixels
         avail = available_memory_bytes()
         use_memmap = False
         if avail is not None and avail > 0:
@@ -3080,14 +2722,17 @@ def infer_tiled(
             scratch_dir=scratch_dir,
             name="dl_weight_acc",
         )
-        ndsm_max, _ndsm_max_path = alloc_array(
-            (height, width),
-            np.float32,
-            fill_value=-np.inf,
-            use_memmap=use_memmap,
-            scratch_dir=scratch_dir,
-            name="dl_ndsm_max",
-        )
+        ndsm_max: Optional[np.ndarray] = None
+        _ndsm_max_path: Optional[Path] = None
+        if mask_talls is not None:
+            ndsm_max, _ndsm_max_path = alloc_array(
+                (height, width),
+                np.float32,
+                fill_value=-np.inf,
+                use_memmap=use_memmap,
+                scratch_dir=scratch_dir,
+                name="dl_ndsm_max",
+            )
         valid_global, _valid_global_path = alloc_array(
             (height, width),
             bool,
@@ -3123,37 +2768,15 @@ def infer_tiled(
                     col_end = col_start + int(window.width)
 
                     rgb_s = precomputed_deriv.rgb[:, row_start:row_end, col_start:col_end].copy()
-                    dsm_s = (
-                        precomputed_deriv.dsm[row_start:row_end, col_start:col_end].copy()
-                        if precomputed_deriv.dsm is not None
-                        else None
-                    )
-                    dtm_s = precomputed_deriv.dtm[row_start:row_end, col_start:col_end].copy()
                     svf_s = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
-                    pos_s = precomputed_deriv.pos_open[row_start:row_end, col_start:col_end].copy()
-                    neg_s = precomputed_deriv.neg_open[row_start:row_end, col_start:col_end].copy()
-                    lrm_s = precomputed_deriv.lrm[row_start:row_end, col_start:col_end].copy()
-                    slope_s = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
-                    ndsm_s = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
-                    tpi_s = (
-                        precomputed_deriv.tpi[row_start:row_end, col_start:col_end].copy()
-                        if (enable_tpi and precomputed_deriv.tpi is not None)
-                        else None
-                    )
+                    slrm_s = precomputed_deriv.slrm[row_start:row_end, col_start:col_end].copy()
                     if rgb_only:
                         log_rgb_only_once()
                         Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
                         Z = np.zeros((Hs, Ws), dtype=np.float32)
-                        dsm_s = Z
-                        dtm_s = Z
                         svf_s = Z
-                        pos_s = Z
-                        neg_s = Z
-                        lrm_s = Z
-                        slope_s = Z
-                        ndsm_s = Z
-                        tpi_s = Z if enable_tpi else None
-                    stack_s = stack_channels(rgb_s, dsm_s, dtm_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, tpi_s)
+                        slrm_s = Z
+                    stack_s = stack_channels(rgb_s, svf_s, slrm_s)
                 elif deriv_ds is not None and deriv_band_map is not None:
                     def read_band(idx: int) -> Optional[np.ndarray]:
                         if idx <= 0:
@@ -3162,44 +2785,21 @@ def infer_tiled(
                         return np.ma.filled(data.astype(np.float32), np.nan)
 
                     rgb_s = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-                    dsm_s = read_band(band_idx[3])
-                    dtm_s = read_band(band_idx[4])
 
                     if rgb_only:
                         log_rgb_only_once()
                         Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
                         Z = np.zeros((Hs, Ws), dtype=np.float32)
-                        dsm_s = Z
-                        dtm_s = Z
                         svf_s = Z
-                        pos_s = Z
-                        neg_s = Z
-                        lrm_s = Z
-                        slope_s = Z
-                        ndsm_s = Z
-                        tpi_s = Z if enable_tpi else None
+                        slrm_s = Z
                     else:
-                        band_names: List[str] = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm"]
-                        if enable_tpi:
-                            band_names += ["tpi"]
+                        band_names: List[str] = ["svf", "slrm"]
                         indexes = [int(deriv_band_map[name]) for name in band_names]
                         deriv_stack = deriv_ds.read(indexes=indexes, window=window, boundless=True, masked=True)
                         deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
-                        svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s = deriv_stack[:6]
-                        tpi_s = deriv_stack[6] if enable_tpi else None
+                        svf_s, slrm_s = deriv_stack[0], deriv_stack[1]
 
-                    stack_s = stack_channels(
-                        rgb_s,
-                        dsm_s,
-                        dtm_s,
-                        svf_s,
-                        pos_s,
-                        neg_s,
-                        lrm_s,
-                        slope_s,
-                        ndsm_s,
-                        tpi_s,
-                    )
+                    stack_s = stack_channels(rgb_s, svf_s, slrm_s)
                 else:
                     def read_band(idx: int) -> Optional[np.ndarray]:
                         if idx <= 0:
@@ -3208,7 +2808,6 @@ def infer_tiled(
                         return np.ma.filled(data.astype(np.float32), np.nan)
 
                     rgb_s = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-                    dsm_s = read_band(band_idx[3])
                     dtm_s = read_band(band_idx[4])
                     if dtm_s is None:
                         break
@@ -3217,18 +2816,10 @@ def infer_tiled(
                         log_rgb_only_once()
                         Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
                         Z = np.zeros((Hs, Ws), dtype=np.float32)
-                        dsm_s = Z
-                        dtm_s = Z
                         svf_s = Z
-                        pos_s = Z
-                        neg_s = Z
-                        lrm_s = Z
-                        slope_s = Z
-                        ndsm_s = Z
-                        tpi_s = Z if enable_tpi else None
+                        slrm_s = Z
                     else:
-                        ndsm_s = compute_ndsm(dsm_s, dtm_s)
-                        svf_s, pos_s, neg_s, lrm_s, slope_s = compute_derivatives_with_rvt(
+                        svf_s, slrm_s = compute_derivatives_with_rvt(
                             dtm_s,
                             pixel_size=pixel_size,
                             radii=rvt_radii,
@@ -3236,10 +2827,7 @@ def infer_tiled(
                             show_progress=False,
                             log_steps=False,
                         )
-                        tpi_s = None
-                        if enable_tpi:
-                            tpi_s = compute_tpi_multiscale(dtm_s, radii=tpi_radii)
-                    stack_s = stack_channels(rgb_s, dsm_s, dtm_s, svf_s, pos_s, neg_s, lrm_s, slope_s, ndsm_s, tpi_s)
+                    stack_s = stack_channels(rgb_s, svf_s, slrm_s)
 
                 Hs, Ws = stack_s.shape[1], stack_s.shape[2]
                 ch = min(TILE_SAMPLE_CROP_SIZE, Hs)
@@ -3288,59 +2876,28 @@ def infer_tiled(
             
             # Precomputed derivatives kullan (cache modunda)
             if precomputed_deriv is not None:
-                # Tüm raster'dan tile'ı kes
                 row_start = int(window.row_off)
                 col_start = int(window.col_off)
                 row_end = row_start + win_height
                 col_end = col_start + win_width
                 
                 rgb = precomputed_deriv.rgb[:, row_start:row_end, col_start:col_end].copy()
-                dsm = precomputed_deriv.dsm[row_start:row_end, col_start:col_end].copy() if precomputed_deriv.dsm is not None else None
-                dtm = precomputed_deriv.dtm[row_start:row_end, col_start:col_end].copy()
                 svf = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
-                pos_open = precomputed_deriv.pos_open[row_start:row_end, col_start:col_end].copy()
-                neg_open = precomputed_deriv.neg_open[row_start:row_end, col_start:col_end].copy()
-                lrm = precomputed_deriv.lrm[row_start:row_end, col_start:col_end].copy()
-                slope = precomputed_deriv.slope[row_start:row_end, col_start:col_end].copy()
-                ndsm_tile = precomputed_deriv.ndsm[row_start:row_end, col_start:col_end].copy()
+                slrm = precomputed_deriv.slrm[row_start:row_end, col_start:col_end].copy()
                 
-                tpi_tile = (
-                    precomputed_deriv.tpi[row_start:row_end, col_start:col_end].copy()
-                    if (enable_tpi and precomputed_deriv.tpi is not None)
-                    else None
-                )
-                
-                # Padding ekle (gerekirse)
                 if pad_h or pad_w:
                     rgb = np.pad(rgb, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    dtm = np.pad(dtm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    if dsm is not None:
-                        dsm = np.pad(dsm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     svf = np.pad(svf, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    pos_open = np.pad(pos_open, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    neg_open = np.pad(neg_open, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    lrm = np.pad(lrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    slope = np.pad(slope, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    ndsm_tile = np.pad(ndsm_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    # Yeni kanallar için padding
-                    if tpi_tile is not None:
-                        tpi_tile = np.pad(tpi_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    slrm = np.pad(slrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
 
                 if rgb_only:
                     log_rgb_only_once()
                     Ht, Wt = rgb.shape[1], rgb.shape[2]
                     Z = np.zeros((Ht, Wt), dtype=np.float32)
-                    dsm = Z
-                    dtm = Z
                     svf = Z
-                    pos_open = Z
-                    neg_open = Z
-                    lrm = Z
-                    slope = Z
-                    ndsm_tile = Z
-                    tpi_tile = Z if enable_tpi else None
+                    slrm = Z
 
-                valid_mask = np.isfinite(dtm)
+                valid_mask = np.isfinite(svf)
             elif deriv_ds is not None and deriv_band_map is not None:
                 def read_band(idx: int) -> Optional[np.ndarray]:
                     if idx <= 0:
@@ -3349,34 +2906,20 @@ def infer_tiled(
                     return np.ma.filled(data.astype(np.float32), np.nan)
 
                 rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-                dsm = read_band(band_idx[3])
-                dtm = read_band(band_idx[4])
 
-                band_names: List[str] = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm"]
-                if enable_tpi:
-                    band_names += ["tpi"]
+                band_names: List[str] = ["svf", "slrm"]
                 indexes = [int(deriv_band_map[name]) for name in band_names]
                 deriv_stack = deriv_ds.read(indexes=indexes, window=window, boundless=True, masked=True)
                 deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
 
-                svf, pos_open, neg_open, lrm, slope, ndsm_tile = deriv_stack[:6]
-                tpi_tile = deriv_stack[6] if enable_tpi else None
+                svf, slrm = deriv_stack[0], deriv_stack[1]
 
                 if pad_h or pad_w:
                     rgb = np.pad(rgb, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    dtm = np.pad(dtm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    if dsm is not None:
-                        dsm = np.pad(dsm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
                     svf = np.pad(svf, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    pos_open = np.pad(pos_open, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    neg_open = np.pad(neg_open, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    lrm = np.pad(lrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    slope = np.pad(slope, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    ndsm_tile = np.pad(ndsm_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    if tpi_tile is not None:
-                        tpi_tile = np.pad(tpi_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    slrm = np.pad(slrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
 
-                valid_mask = np.isfinite(dtm)
+                valid_mask = np.isfinite(svf)
             else:
                 # Normal mod - Her tile için RVT hesapla
                 def read_band(idx: int) -> Optional[np.ndarray]:
@@ -3418,18 +2961,10 @@ def infer_tiled(
                     log_rgb_only_once()
                     Ht, Wt = rgb.shape[1], rgb.shape[2]
                     Z = np.zeros((Ht, Wt), dtype=np.float32)
-                    dsm = Z
-                    dtm = Z
                     svf = Z
-                    pos_open = Z
-                    neg_open = Z
-                    lrm = Z
-                    slope = Z
-                    ndsm_tile = Z
-                    tpi_tile = Z if enable_tpi else None
+                    slrm = Z
                 else:
-                    ndsm_tile = compute_ndsm(dsm, dtm)
-                    svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+                    svf, slrm = compute_derivatives_with_rvt(
                         dtm,
                         pixel_size=pixel_size,
                         radii=rvt_radii,
@@ -3437,22 +2972,8 @@ def infer_tiled(
                         show_progress=False,
                         log_steps=False,
                     )
-                    tpi_tile = None
-                    if enable_tpi:
-                        tpi_tile = compute_tpi_multiscale(dtm, radii=tpi_radii)
 
-            stacked = stack_channels(
-                rgb=rgb,
-                dsm=dsm,
-                dtm=dtm,
-                svf=svf,
-                pos_open=pos_open,
-                neg_open=neg_open,
-                lrm=lrm,
-                slope=slope,
-                ndsm=ndsm_tile,
-                tpi=tpi_tile,
-            )
+            stacked = stack_channels(rgb, svf, slrm)
             if global_norm and fixed_lows is not None and fixed_highs is not None:
                 normed = robust_norm_fixed(stacked, fixed_lows, fixed_highs)
             else:
@@ -3505,10 +3026,22 @@ def infer_tiled(
             prob_acc[row_slice, col_slice] += prob_tile * W * valid_tile
             weight_acc[row_slice, col_slice] += W * valid_tile.astype(np.float32)
             valid_global[row_slice, col_slice] |= valid_tile
-            ndsm_chunk = ndsm_tile.astype(np.float32)[:tile_rows, :tile_cols]
-            existing = ndsm_max[row_slice, col_slice]
-            ndsm_chunk[~valid_tile] = existing[~valid_tile]
-            ndsm_max[row_slice, col_slice] = np.maximum(existing, ndsm_chunk)
+
+            if mask_talls is not None:
+                if precomputed_deriv is None and deriv_ds is None:
+                    ndsm_tile = compute_ndsm(dsm, dtm)
+                else:
+                    _dsm_mt = src.read(band_idx[3], window=window, boundless=True, masked=True) if band_idx[3] > 0 else None
+                    _dtm_mt = src.read(band_idx[4], window=window, boundless=True, masked=True)
+                    _dsm_f = np.ma.filled(_dsm_mt.astype(np.float32), np.nan) if _dsm_mt is not None else None
+                    _dtm_f = np.ma.filled(_dtm_mt.astype(np.float32), np.nan)
+                    ndsm_tile = compute_ndsm(_dsm_f, _dtm_f)
+                    if pad_h or pad_w:
+                        ndsm_tile = np.pad(ndsm_tile, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                ndsm_chunk = ndsm_tile.astype(np.float32)[:tile_rows, :tile_cols]
+                existing = ndsm_max[row_slice, col_slice]
+                ndsm_chunk[~valid_tile] = existing[~valid_tile]
+                ndsm_max[row_slice, col_slice] = np.maximum(existing, ndsm_chunk)
 
         binary_mask, _binary_mask_path = alloc_array(
             (height, width),
@@ -3594,7 +3127,9 @@ def infer_tiled(
         if use_memmap:
             prob_map_out = None
             mask_out = None
-            del prob_map, binary_mask, prob_acc, weight_acc, ndsm_max, valid_global
+            del prob_map, binary_mask, prob_acc, weight_acc, valid_global
+            if ndsm_max is not None:
+                del ndsm_max
             gc.collect()
         else:
             prob_map_out = prob_map
@@ -4285,16 +3820,12 @@ def infer_classic_tiled(
                             row_end = row_start + win_height
                             col_end = col_start + win_width
                             svf_tile = precomputed_deriv.svf[row_start:row_end, col_start:col_end]
-                            neg_tile = precomputed_deriv.neg_open[row_start:row_end, col_start:col_end]
-                            lrm_tile = precomputed_deriv.lrm[row_start:row_end, col_start:col_end]
-                            slope_tile = precomputed_deriv.slope[row_start:row_end, col_start:col_end]
+                            slrm_tile = precomputed_deriv.slrm[row_start:row_end, col_start:col_end]
                             score_tile = _score_rvtlog(
                                 dtm_tile,
                                 pixel_size=pixel_size,
                                 pre_svf=svf_tile,
-                                pre_neg_open=neg_tile,
-                                pre_lrm=lrm_tile,
-                                pre_slope=slope_tile,
+                                pre_lrm=slrm_tile,
                                 sigmas=sigma_scales,
                                 gaussian_gradient_sigma=gaussian_gradient_sigma,
                                 local_variance_window=local_variance_window,
@@ -4304,25 +3835,16 @@ def infer_classic_tiled(
                         elif deriv_ds is not None and deriv_band_map is not None:
                             idxs = [
                                 int(deriv_band_map["svf"]),
-                                int(deriv_band_map["neg_open"]),
-                                int(deriv_band_map["lrm"]),
-                                int(deriv_band_map["slope"]),
+                                int(deriv_band_map["slrm"]),
                             ]
                             deriv_tile = deriv_ds.read(indexes=idxs, window=window, boundless=True, masked=True)
                             deriv_tile = np.ma.filled(deriv_tile.astype(np.float32), np.nan)
-                            svf_tile, neg_tile, lrm_tile, slope_tile = (
-                                deriv_tile[0],
-                                deriv_tile[1],
-                                deriv_tile[2],
-                                deriv_tile[3],
-                            )
+                            svf_tile, slrm_tile = deriv_tile[0], deriv_tile[1]
                             score_tile = _score_rvtlog(
                                 dtm_tile,
                                 pixel_size=pixel_size,
                                 pre_svf=svf_tile,
-                                pre_neg_open=neg_tile,
-                                pre_lrm=lrm_tile,
-                                pre_slope=slope_tile,
+                                pre_lrm=slrm_tile,
                                 sigmas=sigma_scales,
                                 gaussian_gradient_sigma=gaussian_gradient_sigma,
                                 local_variance_window=local_variance_window,
@@ -4509,20 +4031,17 @@ def infer_classic_tiled(
 
             for mode in base_modes:
                 if mode == "rvtlog":
-                    # Use precomputed derivatives if available
                     if precomputed_deriv is not None:
                         row_start = int(window.row_off)
                         col_start = int(window.col_off)
                         row_end = row_start + win_height
                         col_end = col_start + win_width
                         svf_tile = precomputed_deriv.svf[row_start:row_end, col_start:col_end]
-                        neg_tile = precomputed_deriv.neg_open[row_start:row_end, col_start:col_end]
-                        lrm_tile = precomputed_deriv.lrm[row_start:row_end, col_start:col_end]
-                        slope_tile = precomputed_deriv.slope[row_start:row_end, col_start:col_end]
+                        slrm_tile = precomputed_deriv.slrm[row_start:row_end, col_start:col_end]
                         score_tile = _score_rvtlog(
                             dtm_tile, pixel_size=pixel_size,
-                            pre_svf=svf_tile, pre_neg_open=neg_tile, pre_lrm=lrm_tile,
-                            pre_slope=slope_tile,
+                            pre_svf=svf_tile,
+                            pre_lrm=slrm_tile,
                             sigmas=sigma_scales,
                             gaussian_gradient_sigma=gaussian_gradient_sigma,
                             local_variance_window=local_variance_window,
@@ -4532,25 +4051,16 @@ def infer_classic_tiled(
                     elif deriv_ds is not None and deriv_band_map is not None:
                         idxs = [
                             int(deriv_band_map["svf"]),
-                            int(deriv_band_map["neg_open"]),
-                            int(deriv_band_map["lrm"]),
-                            int(deriv_band_map["slope"]),
+                            int(deriv_band_map["slrm"]),
                         ]
                         deriv_tile = deriv_ds.read(indexes=idxs, window=window, boundless=True, masked=True)
                         deriv_tile = np.ma.filled(deriv_tile.astype(np.float32), np.nan)
-                        svf_tile, neg_tile, lrm_tile, slope_tile = (
-                            deriv_tile[0],
-                            deriv_tile[1],
-                            deriv_tile[2],
-                            deriv_tile[3],
-                        )
+                        svf_tile, slrm_tile = deriv_tile[0], deriv_tile[1]
                         score_tile = _score_rvtlog(
                             dtm_tile,
                             pixel_size=pixel_size,
                             pre_svf=svf_tile,
-                            pre_neg_open=neg_tile,
-                            pre_lrm=lrm_tile,
-                            pre_slope=slope_tile,
+                            pre_lrm=slrm_tile,
                             sigmas=sigma_scales,
                             gaussian_gradient_sigma=gaussian_gradient_sigma,
                             local_variance_window=local_variance_window,
@@ -6033,9 +5543,7 @@ def validate_derivative_raster_cache_metadata(
         LOGGER.warning("Raster-cache band_map eksik; cache gecersiz")
         return False
 
-    required_bands = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm"]
-    if enable_tpi:
-        required_bands += ["tpi"]
+    required_bands = ["svf", "slrm"]
     missing = [b for b in required_bands if b not in band_map]
     if missing:
         LOGGER.warning("Raster-cache band_map eksik kanallar: %s", ", ".join(missing))
@@ -6165,15 +5673,7 @@ def _compute_derivative_cache_block_from_source(
     dtm_ma = src.read(dtm_idx, window=padded, boundless=False, masked=True)
     dtm = np.ma.filled(dtm_ma.astype(np.float32), np.nan)
 
-    dsm: Optional[np.ndarray]
-    if dsm_idx > 0:
-        dsm_ma = src.read(dsm_idx, window=padded, boundless=False, masked=True)
-        dsm = np.ma.filled(dsm_ma.astype(np.float32), np.nan)
-    else:
-        dsm = None
-
-    ndsm = compute_ndsm(dsm, dtm)
-    svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+    svf, slrm = compute_derivatives_with_rvt(
         dtm,
         pixel_size=pixel_size,
         radii=rvt_radii,
@@ -6182,10 +5682,6 @@ def _compute_derivative_cache_block_from_source(
         log_steps=False,
     )
 
-    tpi: Optional[np.ndarray] = None
-    if enable_tpi:
-        tpi = compute_tpi_multiscale(dtm, radii=tuple(int(x) for x in tpi_radii))
-
     roff = int(row) - row0
     coff = int(col) - col0
     rs = slice(roff, roff + win_h)
@@ -6193,14 +5689,8 @@ def _compute_derivative_cache_block_from_source(
 
     layers: List[np.ndarray] = [
         svf[rs, cs],
-        pos_open[rs, cs],
-        neg_open[rs, cs],
-        lrm[rs, cs],
-        slope[rs, cs],
-        ndsm[rs, cs],
+        slrm[rs, cs],
     ]
-    if enable_tpi and tpi is not None:
-        layers.append(tpi[rs, cs])
 
     return np.stack(layers, axis=0).astype(np.float32, copy=False)
 
@@ -6318,17 +5808,9 @@ def build_derivative_raster_cache(
 
         band_map: Dict[str, int] = {
             "svf": 1,
-            "pos_open": 2,
-            "neg_open": 3,
-            "lrm": 4,
-            "slope": 5,
-            "ndsm": 6,
+            "slrm": 2,
         }
-        next_band = 7
-        if enable_tpi:
-            band_map["tpi"] = next_band
-            next_band += 1
-        band_count = next_band - 1
+        band_count = 2
 
         stat = input_path.stat()
         metadata: Dict[str, Any] = {
@@ -6678,36 +6160,10 @@ def validate_cache(
 
 @dataclass
 class PrecomputedDerivatives:
-    """
-    Önceden hesaplanmış RVT türevlerini ve gelişmiş topografik özellikleri tutan sınıf.
-    
-    Temel Kanallar (9 kanal - geriye uyumlu):
-        rgb: RGB bantları (3, H, W)
-        svf: Sky-View Factor (H, W)
-        pos_open: Positive Openness (H, W)
-        neg_open: Negative Openness (H, W)
-        lrm: Local Relief Model (H, W)
-        slope: Eğim (H, W)
-        ndsm: Normalize edilmiş DSM (H, W)
-    
-    Gelişmiş Kanallar (3 ek kanal):
-        plan_curv: Plan Curvature - hendek/sırt ayrımı (H, W)
-        profile_curv: Profile Curvature - teraslar (H, W)
-        tpi: Topographic Position Index - höyük/çukur (H, W)
-    """
+    """Precomputed derivatives for the 5-band schema (R,G,B,SVF,SLRM)."""
     rgb: np.ndarray          # (3, H, W)
-    dsm: Optional[np.ndarray]  # (H, W) or None
-    dtm: np.ndarray          # (H, W)
     svf: np.ndarray          # (H, W)
-    pos_open: np.ndarray     # (H, W)
-    neg_open: np.ndarray     # (H, W)
-    lrm: np.ndarray          # (H, W)
-    slope: np.ndarray        # (H, W)
-    ndsm: np.ndarray         # (H, W)
-    # Yeni gelişmiş kanallar
-    plan_curv: Optional[np.ndarray] = None    # (H, W) - Plan Curvature
-    profile_curv: Optional[np.ndarray] = None # (H, W) - Profile Curvature
-    tpi: Optional[np.ndarray] = None          # (H, W) - Topographic Position Index
+    slrm: np.ndarray         # (H, W)
     # Metadata
     transform: Affine = field(default=None)  # type: ignore
     crs: Optional[RasterioCRS] = None
@@ -6727,17 +6183,14 @@ def precompute_derivatives(
     tpi_radii: Tuple[int, ...] = (5, 15, 30),
 ) -> Optional[PrecomputedDerivatives]:
     """
-    Tüm raster için RVT türevlerini ve gelişmiş topografik özellikleri önceden hesapla.
+    Tüm raster için SVF ve SLRM türevlerini önceden hesapla.
     
     Bu fonksiyon:
     1. Cache varsa ve geçerliyse yükler
     2. Yoksa tüm raster'ı okur ve türevleri hesaplar
     3. İstenirse cache'e kaydeder
     
-    Hesaplanan kanallar:
-        - Temel 9 kanal: RGB, SVF, Openness (±), LRM, Slope, nDSM
-        - Curvature (enable_curvature=True): Plan + Profile Curvature
-        - TPI (enable_tpi=True): Multi-scale Topographic Position Index
+    Hesaplanan kanallar: RGB (3) + SVF (1) + SLRM (1) = 5 kanal
     
     Args:
         input_path: GeoTIFF dosya yolu
@@ -6747,9 +6200,9 @@ def precompute_derivatives(
         recalculate: Cache'i yoksay, yeniden hesapla
         rvt_radii: RVT yarıçapları (metre)
         gaussian_lrm_sigma: LRM için Gaussian sigma
-        enable_curvature: Curvature kanallarını hesapla
-        enable_tpi: TPI kanalını hesapla
-        tpi_radii: TPI yarıçapları (piksel)
+        enable_curvature: Unused (kept for backward compatibility)
+        enable_tpi: Unused (kept for backward compatibility)
+        tpi_radii: Unused (kept for backward compatibility)
     
     Returns:
         PrecomputedDerivatives veya None
@@ -6778,7 +6231,6 @@ def precompute_derivatives(
             cache_result = load_derivatives_cache(cache_path)
             if cache_result:
                 derivatives_data, metadata = cache_result
-                # Cache geçerli mi?
                 if validate_cache(
                     metadata,
                     input_path,
@@ -6789,51 +6241,17 @@ def precompute_derivatives(
                     enable_tpi=enable_tpi,
                     tpi_radii=tpi_radii,
                 ):
-                    # Cache'den yükle
-                    dsm_cached = derivatives_data.get("dsm")
-                    if dsm_cached is not None and getattr(dsm_cached, "size", 0) == 0:
-                        dsm_cached = None
-                    
-                    # Yeni kanalları cache'den al (yoksa None)
-                    plan_curv_cached = derivatives_data.get("plan_curv")
-                    profile_curv_cached = derivatives_data.get("profile_curv")
-                    tpi_cached = derivatives_data.get("tpi")
-                    
-                    # Eski cache formatından gelen boş array'leri None yap
-                    if plan_curv_cached is not None and getattr(plan_curv_cached, "size", 0) == 0:
-                        plan_curv_cached = None
-                    if profile_curv_cached is not None and getattr(profile_curv_cached, "size", 0) == 0:
-                        profile_curv_cached = None
-                    if tpi_cached is not None and getattr(tpi_cached, "size", 0) == 0:
-                        tpi_cached = None
-                    
-                    # Eğer yeni kanallar isteniyor ama cache'de yoksa, yeniden hesapla
-                    need_recalc = False
-                    if enable_tpi and tpi_cached is None:
-                        LOGGER.info("Cache'de TPI yok, yeniden hesaplanacak")
-                        need_recalc = True
-                    
-                    if not need_recalc:
-                        if stage_pbar is not None:
-                            stage_pbar.update(stage_pbar.total - stage_pbar.n)
-                            stage_pbar.close()
-                        return PrecomputedDerivatives(
-                            rgb=derivatives_data["rgb"],
-                            dsm=dsm_cached,
-                            dtm=derivatives_data["dtm"],
-                            svf=derivatives_data["svf"],
-                            pos_open=derivatives_data["pos_open"],
-                            neg_open=derivatives_data["neg_open"],
-                            lrm=derivatives_data["lrm"],
-                            slope=derivatives_data["slope"],
-                            ndsm=derivatives_data["ndsm"],
-                            plan_curv=plan_curv_cached,
-                            profile_curv=profile_curv_cached,
-                            tpi=tpi_cached,
-                            transform=transform,
-                            crs=crs,
-                            pixel_size=pixel_size,
-                        )
+                    if stage_pbar is not None:
+                        stage_pbar.update(stage_pbar.total - stage_pbar.n)
+                        stage_pbar.close()
+                    return PrecomputedDerivatives(
+                        rgb=derivatives_data["rgb"],
+                        svf=derivatives_data["svf"],
+                        slrm=derivatives_data["slrm"],
+                        transform=transform,
+                        crs=crs,
+                        pixel_size=pixel_size,
+                    )
                 else:
                     LOGGER.info("Cache geçersiz, yeniden hesaplanacak")
         
@@ -6849,9 +6267,8 @@ def precompute_derivatives(
             data = src.read(idx, masked=True)
             return np.ma.filled(data.astype(np.float32), np.nan)
         
-        # Progress bar ile bandları oku
-        bands_to_read = [("RGB-R", band_idx[0]), ("RGB-G", band_idx[1]), ("RGB-B", band_idx[2]), 
-                        ("DSM", band_idx[3]), ("DTM", band_idx[4])]
+        bands_to_read = [("RGB-R", band_idx[0]), ("RGB-G", band_idx[1]), ("RGB-B", band_idx[2]),
+                        ("DTM", band_idx[4])]
         band_data = {}
         for band_name, band_id in progress_bar(
             bands_to_read,
@@ -6865,52 +6282,29 @@ def precompute_derivatives(
             stage_pbar.update(1)
         
         rgb = np.stack([band_data["RGB-R"], band_data["RGB-G"], band_data["RGB-B"]], axis=0)
-        dsm = band_data.get("DSM")
         dtm = band_data["DTM"]
         
         if dtm is None:
             raise ValueError("DTM band gerekli")
         
-        # nDSM hesapla
-        LOGGER.info("nDSM hesaplanıyor...")
-        ndsm = compute_ndsm(dsm, dtm)
         if stage_pbar is not None:
             stage_pbar.update(1)
         
-        # RVT türevlerini hesapla
-        LOGGER.info("RVT türevleri hesaplanıyor (SVF, openness, LRM, slope)...")
-        svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+        # RVT türevlerini hesapla (SVF + SLRM)
+        LOGGER.info("RVT türevleri hesaplanıyor (SVF, SLRM)...")
+        svf, slrm = compute_derivatives_with_rvt(
             dtm, pixel_size=pixel_size, radii=rvt_radii, gaussian_lrm_sigma=gaussian_lrm_sigma
         )
         if stage_pbar is not None:
             stage_pbar.update(1)
-        
-        # Gelişmiş topografik özellikler
-        plan_curv = None
-        profile_curv = None
-        tpi = None
-
-        if enable_tpi:
-            LOGGER.info(f"TPI (Topographic Position Index) hesaplanıyor (yarıçaplar: {tpi_radii})...")
-            tpi = compute_tpi_multiscale(dtm, radii=tpi_radii)
-            LOGGER.info("  → TPI: höyük/çukur tespiti için")
 
         if stage_pbar is not None:
             stage_pbar.update(1)
         
         derivatives = PrecomputedDerivatives(
             rgb=rgb,
-            dsm=dsm,
-            dtm=dtm,
             svf=svf,
-            pos_open=pos_open,
-            neg_open=neg_open,
-            lrm=lrm,
-            slope=slope,
-            ndsm=ndsm,
-            plan_curv=plan_curv,
-            profile_curv=profile_curv,
-            tpi=tpi,
+            slrm=slrm,
             transform=transform,
             crs=crs,
             pixel_size=pixel_size,
@@ -6920,18 +6314,8 @@ def precompute_derivatives(
         if use_cache and cache_path:
             derivatives_data = {
                 "rgb": rgb,
-                "dsm": dsm if dsm is not None else np.array([]),  # None yerine boş array
-                "dtm": dtm,
                 "svf": svf,
-                "pos_open": pos_open,
-                "neg_open": neg_open,
-                "lrm": lrm,
-                "slope": slope,
-                "ndsm": ndsm,
-                # Yeni kanallar
-                "plan_curv": plan_curv if plan_curv is not None else np.array([]),
-                "profile_curv": profile_curv if profile_curv is not None else np.array([]),
-                "tpi": tpi if tpi is not None else np.array([]),
+                "slrm": slrm,
             }
             metadata = {
                 "cache_key": build_derivative_cache_key(
@@ -7116,7 +6500,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         action=argparse.BooleanOptionalAction,
         default=default_for("rgb_only"),
         dest="rgb_only",
-        help=cli_help("rgb_only", "Zero out SVF/Openness/LRM/Slope/nDSM so the model effectively runs on RGB only."),
+        help=cli_help("rgb_only", "Zero out SVF/SLRM so the model effectively runs on RGB only."),
     )
     parser.add_argument(
         "--min-area",
@@ -8562,4 +7946,3 @@ if __name__ == "__main__":
 #   yolo_weights: "path/to/your/best.pt"
 #
 # ============================================================================
-

@@ -16,6 +16,11 @@
 # YENI NOT: YAML icindeki goreli yollar bu config dosyasinin bulundugu klasore
 # gore cozulur. CLI'dan verilen yollar ise calistiginiz working directory'ye
 # gore cozulur.
+#
+# 5-KANAL MODEL: Girdi GeoTIFF hâlâ 5 bantlı (R, G, B, DSM, DTM). Ağ girişi ise
+# 5 kanaldır: R, G, B, SVF, SLRM — SVF ve SLRM DSM/DTM’den (ve gerekiyorsa
+# ilgili ön işlemlerden) içeride türetilir; ayrıca “ek topografik kanal”
+# (curvature/TPI vb.) bu şemada kullanılmaz.
 # Proje dizini: C:\d_surucusu\arkeolojik_alan_tespit\archaeo_detect_base
 # ============================================================================
 
@@ -136,6 +141,9 @@ dl_task: "tile_classification"
 # ============================================================================
 # Derin öğrenme yöntemi etkinse (enable_deep_learning: true), bu parametreler
 # hangi model mimarisinin ve encoder'ın kullanılacağını belirler.
+#
+# Kanal sayısı: TileClassifier girişi 5 kanaldır — R, G, B, SVF, SLRM (girdi
+# GeoTIFF bantları R,G,B,DSM,DTM kalır; SVF/SLRM tensör içinde hesaplanır).
 
 # arch: Segmentasyon model mimarisi
 # - Segmentation Models PyTorch (SMP) kütüphanesinden desteklenen mimari
@@ -187,13 +195,13 @@ encoders: "none"
 # - null ise: ImageNet ağırlıkları kullanılır (zero-shot)
 # - Örnek: "models/unet_resnet34_5ep.pth"
 # NOT: Bu parametre yalnızca tek encoder modunda (encoders: "none") kullanılır
-# weights: "checkpoints/epochs/epoch_032_Unet_resnet50_12ch_attention.pth"
+# weights: "checkpoints/epochs/epoch_032_Unet_resnet50_5ch_attention.pth"
 # CLASSIFICATION PRESET:
 #   Aşağıdaki yol tile-level classification eğitimi sonrası beklenen örnek addır.
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "checkpoints/best_iou_TileClassifier_resnet50_12ch.pth"
+weights: "checkpoints/best_iou_TileClassifier_resnet50_5ch.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
@@ -211,11 +219,11 @@ weights_template: null
 
 # zero_shot_imagenet: ImageNet ağırlıklarını çok kanala genişletme
 # - true: Özel ağırlık yoksa, ImageNet (3 kanal RGB) encoder'ı kullan
-#         ve ağırlıkları çok kanala (örn. 9 kanal) "inflate" ederek genişlet
+#         ve ağırlıkları çok kanala (örn. 5 kanal) "inflate" ederek genişlet
 # - false: Özel ağırlık yoksa rastgele başlatma kullan
 # NASIL ÇALIŞIR:
 #   ImageNet encoder'ları 3 kanal (RGB) için eğitilmiştir.
-#   Sistem bu ağırlıkları tekrarlayarak veya ortalayarak 9 kanala genişletir.
+#   Sistem bu ağırlıkları tekrarlayarak veya ortalayarak 5 kanala genişletir.
 # AVANTAJLAR:
 #   + Eğitim verisi olmadan iyi başlangıç noktası
 #   + Transfer öğrenme etkisi
@@ -349,7 +357,7 @@ morphology_radii: [3, 5, 9, 15]
 #   - Büyük yarıçap (50-100m): Geniş höyükler, büyük yapılar
 # NOT: Çok büyük yarıçap çok yavaş işlem demektir
 # ÖNERİ: Çalışma alanınızdaki yapı boyutlarına göre ayarlayın
-rvt_radii: [5.0, 10.0, 20.0, 30.0, 50.0]
+rvt_radii: [10.0]
 
 # local_variance_window: Yerel varyans hesaplama pencere boyutu (piksel)
 # - Yerel doku değişkenliğini ölçmek için kullanılır
@@ -385,89 +393,31 @@ gaussian_lrm_sigma: 6.0
 
 
 # ============================================================================
-# BÖLÜM 4.5: GELİŞMİŞ TOPOGRAFİK ANALİZ (YENİ KANALLAR)
+# BÖLÜM 4.5: GELİŞMİŞ TOPOGRAFİK ANALİZ (plan/curvature, TPI) — DEVRE DIŞI
 # ============================================================================
-# Bu bölüm, arkeolojik tespit doğruluğunu artıran gelişmiş topografik
-# kanalları kontrol eder. Varsayılan olarak aktiftir (önerilir).
-
-# enable_curvature: Plan ve Profile Curvature kanallarını hesapla
-# - true: DTM'den eğrilik kanalları hesaplanır (+2 kanal)
-# - false: Eğrilik kanalları devre dışı (9 kanal modunda kalır)
-# NASIL ÇALIŞIR:
-#   Plan Curvature: Yatay eğrilik - kontür çizgileri boyunca
-#     • Pozitif: Sırt/tepe (dışbükey) → Tümülüsler
-#     • Negatif: Vadi/hendek (içbükey) → Savunma hendekleri
-#   Profile Curvature: Dikey eğrilik - eğim yönünde
-#     • Dışbükey yüzeyler, teraslar, basamaklar
-# ARKEOLOJİK KULLANIM:
-#   ✓ Tümülüs ve höyük tepelerini tanıma
-#   ✓ Savunma hendeği ve su kanallarını tespit
-#   ✓ Teraslanmış tarım alanlarını belirleme
-# ÖNERİ: Mutlaka true yapın, çok etkili bir kanaldır
-enable_curvature: true
-
-# enable_tpi: Multi-scale TPI (Topographic Position Index) kanalını hesapla
-# - true: Çok ölçekli TPI hesaplanır (+1 kanal)
-# - false: TPI kanalı devre dışı
-# NASIL ÇALIŞIR:
-#   TPI = merkez_yükseklik - ortalama(komşu_yükseklikleri)
-#   • Pozitif TPI: Çevreden yüksek → Höyük, tümülüs, tepe
-#   • Negatif TPI: Çevreden alçak → Hendek, çukur, vadi
-#   • Sıfıra yakın: Düz alan veya yamaç
-# ÇOK ÖLÇEKLİ YAKLAŞIM:
-#   Farklı yarıçaplarda hesaplanıp ortalaması alınır
-#   → Küçük ve büyük yapıları aynı anda yakalar
-# ARKEOLOJİK KULLANIM:
-#   ✓ Höyük ve tümülüsleri çevreden ayırt etme
-#   ✓ Çukur yapıları (kuyu, çöp çukuru) tespit
-#   ✓ Topografik anomalileri vurgulama
-# ÖNERİ: true yapın, höyük tespitinde çok etkili
-enable_tpi: true
-
-# tpi_radii: TPI hesaplama yarıçapları (piksel cinsinden)
-# - Her yarıçap için ayrı TPI hesaplanır, sonra ortalaması alınır
-# - Küçük yarıçap: Küçük yapılar (duvar kalıntısı, küçük çukur)
-# - Orta yarıçap: Tipik tümülüsler (5-15m çap)
-# - Büyük yarıçap: Geniş höyükler, yerleşim tepeleri
-# VARSAYILAN: [5, 15, 30] → Çoğu durum için dengeli
-# AYARLAMA İPUÇLARI:
-#   - Küçük yapılar arıyorsanız: [3, 7, 15]
-#   - Büyük höyükler arıyorsanız: [10, 25, 50]
-#   - Çok detaylı analiz: [3, 5, 10, 20, 40]
-tpi_radii: [5, 15, 30]
+# curvature / TPI / tpi_radii: 5-kanal şemada (R,G,B,SVF,SLRM) kullanılmaz;
+# SVF ve SLRM DSM/DTM’den içeride üretilir. Aşağıdaki anahtarlar yalnız uyumluluk
+# veya önbellek anahtarı için tutulur — false bırakın.
+#
+# # --- Eski uzun açıklamalar (artık geçerli değil) ---
+# # enable_curvature, enable_tpi, tpi_radii için önceki sürümde geniş notlar vardı.
+enable_curvature: false   # 5-bant giriş şemasında kullanılmaz
+enable_tpi: false         # 5-bant giriş şemasında kullanılmaz
+tpi_radii: [5, 15, 30]    # enable_tpi: false iken etkisiz; cache anahtarı için tutulabilir
 
 
 # ============================================================================
-# BÖLÜM 4.6: CBAM ATTENTION MEKANİZMASI
+# BÖLÜM 4.6: CBAM ATTENTION MEKANİZMASI — varsayılan kapalı
 # ============================================================================
-# CBAM (Convolutional Block Attention Module), modelin hangi kanalların
-# ve hangi bölgelerin önemli olduğunu otomatik olarak öğrenmesini sağlar.
+# CBAM ayrı bir mimari seçenektir; 5 kanallı tensör girişinden bağımsızdır (5-bant
+# şema değişikliği ile aynı şey değildir). İhtiyaç yoksa kapalı tutun; CBAM’lı
+# checkpoint kullanıyorsanız true yapın.
+#
+# # --- Eski uzun CBAM notları kaldırıldı; gerektiğinde eski config sürümüne bakın.
+enable_attention: false
 
-# enable_attention: CBAM Attention modülünü etkinleştir
-# - true: Model giriş katmanına CBAM eklenir
-# - false: Standart model (attention yok)
-# NASIL ÇALIŞIR:
-#   1. Kanal Dikkat: Her kanalın (RGB, SVF, Curvature vb.) önemini ağırlıklandırır
-#   2. Mekansal Dikkat: Görüntünün hangi bölgelerine odaklanılacağını belirler
-# AVANTAJLAR:
-#   ✓ Farklı yapı tipleri için farklı kanallar ön plana çıkar
-#     → Tümülüs için SVF ve TPI, hendek için Curvature
-#   ✓ Gürültülü bölgeleri otomatik olarak azaltır
-#   ✓ Yapı sınırlarına ve merkezlerine odaklanır
-# DEZAVANTAJLAR:
-#   - Çok hafif performans kaybı (~%5 yavaşlama)
-#   - Eğitilmiş model yoksa sınırlı fayda (zero-shot modunda)
-# ÖNERİ: true yapın, genel olarak performansı artırır
-enable_attention: False
-
-# attention_reduction: Attention için kanal azaltma oranı
-# - Değer: 2, 4, 8 gibi pozitif tam sayı
-# - Düşük değer: Daha fazla hesaplama, daha hassas attention
-# - Yüksek değer: Daha hızlı, daha kaba attention
-# NASIL ÇALIŞIR:
-#   12 kanal / 4 = 3 ara kanal → Sıkıştırılmış temsil → 12 kanala geri genişletme
-# VARSAYILAN: 4 → Çoğu durum için dengeli
-# ÖNERİ: Varsayılan 4'ü kullanın
+# attention_reduction: Attention için kanal azaltma oranı (enable_attention: true iken)
+# Örnek: 5 kanal / 4 → ara temsil → tekrar 5 kanala genişletme
 attention_reduction: 4
 
 
@@ -700,7 +650,7 @@ yolo_device: null
 #   Eğitimle birebir tutarlılık için tile=256 kullanın.
 # trained_model_only: true iken gercek tile degeri training_metadata.json
 # icindeki tile_size alanindan alinir. Bu satir belge amaclidir.
-tile: 256
+tile: 512
 
 # overlap: Karolar arası bindirme miktarı (piksel)
 # - Komşu karolar arasında örtüşen bölge boyutu
@@ -718,7 +668,7 @@ tile: 256
 # overlap config'ten elle artirilmaz. trained_model_only: true iken gercek
 # deger training_metadata.json icindeki overlap alanindan alinir.
 # Farkli overlap kullanmak istiyorsaniz modeli o overlap ile yeniden egitin.
-overlap: 64
+overlap: 128
 
 # feather: Karo kenarlarında kosinüs yumuşatma (feathering)
 # - true: Karoların kenarlarına doğru tahminleri yumuşak geçiş ile karıştırır
@@ -804,7 +754,7 @@ percentile_high: 98.0
 # UYARI: Çok düşük değer gerçek arkeolojik yapıları da maskeler
 # ÖNERİ: 2.5m iyi bir başlangıç, alanınıza göre ayarlayın
 mask_talls: 2.5
-rgb_only: false               # true yaparsan SVF/Openness/LRM/Slope/nDSM kanallari sifirlanir, model efektif olarak sadece RGB kullanir
+rgb_only: false               # true yaparsan SVF/SLRM (ve ilgili türetilmiş topo) kanallari sifirlanir, model efektif olarak sadece RGB kullanir
 
 
 # ============================================================================
@@ -962,7 +912,7 @@ deriv_cache_chunk: 4096
 # - 1: seri işleme
 # - 2-4: genelde daha hızlı (disk hızına ve RAM'e bağlı)
 # - Çok yüksek değerler: I/O ve bellek maliyeti nedeniyle verimsiz olabilir
-deriv_cache_workers: 4
+deriv_cache_workers: 8
 
 # deriv_cache_halo: Blok sınır artefaktlarını önlemek için halo (piksel)
 # - null: otomatik (rvt_radii / tpi_radii / gaussian_lrm_sigma'dan hesaplanır)

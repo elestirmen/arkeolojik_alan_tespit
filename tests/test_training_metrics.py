@@ -81,7 +81,7 @@ def test_validate_threshold_sweep_finds_better_threshold() -> None:
 
 
 def _write_npz_tile(split_dir: Path, tile_name: str, positive: bool) -> None:
-    image = np.zeros((12, 8, 8), dtype=np.float32)
+    image = np.zeros((5, 8, 8), dtype=np.float32)
     mask = np.zeros((8, 8), dtype=np.uint8)
     if positive:
         mask[2:4, 2:4] = 1
@@ -111,7 +111,7 @@ def _build_class_folder_train_dataset(
     (split_dir / "Positive").mkdir(parents=True, exist_ok=True)
     (split_dir / "Negative").mkdir(parents=True, exist_ok=True)
 
-    image = np.zeros((12, 8, 8), dtype=np.float32)
+    image = np.zeros((5, 8, 8), dtype=np.float32)
     for idx in range(positive_count):
         np.savez_compressed(split_dir / "Positive" / f"pos_{idx}.npz", image=image)
     for idx in range(negative_count):
@@ -144,7 +144,7 @@ def test_infer_file_format_allows_empty_val_for_classification_layout(tmp_path: 
     ]:
         (tmp_path / rel).mkdir(parents=True, exist_ok=True)
 
-    image = np.zeros((12, 8, 8), dtype=np.float32)
+    image = np.zeros((5, 8, 8), dtype=np.float32)
     np.savez_compressed(tmp_path / "train/Positive" / "pos_0.npz", image=image)
     np.savez_compressed(tmp_path / "train/Negative" / "neg_0.npz", image=image)
 
@@ -162,7 +162,7 @@ def test_resolve_classification_folder_split_counts_prefers_real_files_over_stal
     ]:
         (tmp_path / rel).mkdir(parents=True, exist_ok=True)
 
-    image = np.zeros((12, 8, 8), dtype=np.float32)
+    image = np.zeros((5, 8, 8), dtype=np.float32)
     np.savez_compressed(tmp_path / "train/Positive" / "pos_0.npz", image=image)
     np.savez_compressed(tmp_path / "train/Negative" / "neg_0.npz", image=image)
 

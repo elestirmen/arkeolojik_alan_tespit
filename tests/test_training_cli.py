@@ -41,7 +41,7 @@ def test_training_fails_when_all_masks_are_negative(tmp_path):
     ]:
         (tmp_path / rel).mkdir(parents=True, exist_ok=True)
 
-    image = np.random.rand(12, 32, 32).astype(np.float32)
+    image = np.random.rand(5, 32, 32).astype(np.float32)
     mask = np.zeros((32, 32), dtype=np.uint8)
 
     np.savez_compressed(tmp_path / "train/images/tile_0.npz", image=image)
@@ -90,7 +90,7 @@ def test_training_npy_format_is_detected_and_validated(tmp_path):
     ]:
         (tmp_path / rel).mkdir(parents=True, exist_ok=True)
 
-    image = np.random.rand(12, 32, 32).astype(np.float32)
+    image = np.random.rand(5, 32, 32).astype(np.float32)
     mask = np.zeros((32, 32), dtype=np.uint8)
 
     np.save(tmp_path / "train/images/tile_0.npy", image)
@@ -137,7 +137,7 @@ def test_training_fails_when_class_folder_dataset_has_no_positive_tiles(tmp_path
     ]:
         (tmp_path / rel).mkdir(parents=True, exist_ok=True)
 
-    image = np.random.rand(12, 32, 32).astype(np.float32)
+    image = np.random.rand(5, 32, 32).astype(np.float32)
     np.savez_compressed(tmp_path / "train/Negative/tile_0.npz", image=image)
     np.savez_compressed(tmp_path / "val/Negative/tile_0.npz", image=image)
 
@@ -192,7 +192,7 @@ def test_publish_active_artifacts_writes_model_metadata_and_manifest(tmp_path):
         data_dir=data_dir,
         task_type="tile_classification",
         encoder="resnet50",
-        in_channels=12,
+        in_channels=5,
         channel_names=tuple(MODEL_CHANNEL_NAMES),
         active_dir=tmp_path / "active",
         source_metadata_path=metadata_path,

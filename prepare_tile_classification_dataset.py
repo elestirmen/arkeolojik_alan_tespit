@@ -16,7 +16,7 @@ output_dir/
     Positive/
     Negative/
 
-Each saved tile is a 12-channel numpy array (.npz or .npy) compatible with
+Each saved tile is a 5-channel numpy array (.npz or .npy) compatible with
 training.py tile_classification mode.
 """
 
@@ -47,8 +47,6 @@ try:
         PrecomputedDerivatives,
         build_derivative_raster_cache,
         compute_derivatives_with_rvt,
-        compute_ndsm,
-        compute_tpi_multiscale,
         full_raster_cache_precompute_ok,
         get_cache_path,
         get_derivative_raster_cache_paths,
@@ -68,7 +66,6 @@ CONFIG = {
     "tile_size": 256,
     "overlap": 128,
     "bands": "1,2,3,4,5",
-    "tpi_radii": "5,15,30",
     "sampling_mode": "full_grid",
     "positive_ratio_threshold": 0.02,
     "valid_ratio_threshold": 0.7,
@@ -673,7 +670,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tile-size", type=int, default=int(CONFIG["tile_size"]))
     parser.add_argument("--overlap", type=int, default=int(CONFIG["overlap"]))
     parser.add_argument("--bands", type=str, default=str(CONFIG["bands"]))
-    parser.add_argument("--tpi-radii", type=str, default=str(CONFIG["tpi_radii"]))
     parser.add_argument(
         "--sampling-mode",
         choices=SAMPLING_MODES,
@@ -751,12 +747,6 @@ def validate_args(args: argparse.Namespace) -> None:
         band_idx = parse_int_csv(args.bands, expected_len=5)
         if any(b <= 0 for b in band_idx):
             errors.append(f"bands 1-bazli pozitif olmali, verilen: {args.bands}")
-    except ValueError as exc:
-        errors.append(str(exc))
-    try:
-        tpi_radii = parse_int_csv(args.tpi_radii)
-        if not tpi_radii:
-            errors.append("tpi_radii bos olamaz.")
     except ValueError as exc:
         errors.append(str(exc))
     for name in (
@@ -1241,7 +1231,6 @@ def collect_selected_region_records(
         "tile_size": int(args.tile_size),
         "overlap": int(args.overlap),
         "stride": stride,
-        "tpi_radii": list(parse_int_csv(args.tpi_radii)),
         "positive_ratio_threshold": float(args.positive_ratio_threshold),
         "valid_ratio_threshold": float(args.valid_ratio_threshold),
         "negative_to_positive_ratio": float(args.negative_to_positive_ratio),
@@ -1354,7 +1343,6 @@ def collect_tile_records(
         "tile_size": int(args.tile_size),
         "overlap": int(args.overlap),
         "stride": stride,
-        "tpi_radii": list(parse_int_csv(args.tpi_radii)),
         "positive_ratio_threshold": float(args.positive_ratio_threshold),
         "valid_ratio_threshold": float(args.valid_ratio_threshold),
         "negative_to_positive_ratio": float(args.negative_to_positive_ratio),
@@ -1386,7 +1374,6 @@ def prepare_derivative_cache_for_source(
     *,
     pair: SourcePair,
     band_idx: Sequence[int],
-    tpi_radii: Sequence[int],
     args: argparse.Namespace,
 ) -> PreparedDerivativeCache:
     cache_mode = str(getattr(args, "derivative_cache_mode", "none")).strip().lower()
@@ -1395,16 +1382,12 @@ def prepare_derivative_cache_for_source(
 
     cache_dir = resolve_derivative_cache_dir(args, pair.raster_path)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    enable_curvature = False
-    enable_tpi = True
     recalculate = bool(getattr(args, "recalculate_derivative_cache", False))
 
     if cache_mode in ("auto", "npz"):
         precompute_ok, reason = full_raster_cache_precompute_ok(
             pair.raster_path,
             band_idx,
-            enable_curvature=enable_curvature,
-            enable_tpi=enable_tpi,
         )
         if precompute_ok:
             cache_path = get_cache_path(
@@ -1413,9 +1396,6 @@ def prepare_derivative_cache_for_source(
                 band_idx=band_idx,
                 rvt_radii=None,
                 gaussian_lrm_sigma=None,
-                enable_curvature=enable_curvature,
-                enable_tpi=enable_tpi,
-                tpi_radii=tpi_radii,
             )
             precomputed = precompute_derivatives(
                 input_path=pair.raster_path,
@@ -1423,9 +1403,6 @@ def prepare_derivative_cache_for_source(
                 use_cache=True,
                 cache_path=cache_path,
                 recalculate=recalculate,
-                enable_curvature=enable_curvature,
-                enable_tpi=enable_tpi,
-                tpi_radii=tuple(int(v) for v in tpi_radii),
             )
             if precomputed is not None:
                 return PreparedDerivativeCache(
@@ -1446,9 +1423,6 @@ def prepare_derivative_cache_for_source(
         band_idx=band_idx,
         rvt_radii=None,
         gaussian_lrm_sigma=None,
-        enable_curvature=enable_curvature,
-        enable_tpi=enable_tpi,
-        tpi_radii=tpi_radii,
     )
     raster_info = None
 
@@ -1470,9 +1444,6 @@ def prepare_derivative_cache_for_source(
             band_idx,
             rvt_radii=None,
             gaussian_lrm_sigma=None,
-            enable_curvature=enable_curvature,
-            enable_tpi=enable_tpi,
-            tpi_radii=tpi_radii,
         )
     if raster_info is None:
         _remove_raster_cache_files()
@@ -1485,9 +1456,6 @@ def prepare_derivative_cache_for_source(
                 recalculate=True,
                 rvt_radii=None,
                 gaussian_lrm_sigma=None,
-                enable_curvature=enable_curvature,
-                enable_tpi=enable_tpi,
-                tpi_radii=tuple(int(v) for v in tpi_radii),
                 chunk_size=2048,
                 worker_count=max(1, int(args.num_workers)),
                 halo_px=None,
@@ -1499,9 +1467,6 @@ def prepare_derivative_cache_for_source(
                 band_idx,
                 rvt_radii=None,
                 gaussian_lrm_sigma=None,
-                enable_curvature=enable_curvature,
-                enable_tpi=enable_tpi,
-                tpi_radii=tpi_radii,
             )
         except Exception as exc:
             _remove_raster_cache_files()
@@ -1531,34 +1496,19 @@ def compute_tile_stack(
     src: rasterio.DatasetReader,
     window: Window,
     band_idx: Sequence[int],
-    tpi_radii: Sequence[int],
     normalize: bool,
 ) -> np.ndarray:
     data, _ = read_window_data(src, band_idx, window)
     rgb = data[:3]
-    dsm = data[3]
     dtm = data[4]
     pixel_size = float((abs(src.transform.a) + abs(src.transform.e)) / 2.0)
-    ndsm = compute_ndsm(dsm, dtm)
-    svf, pos_open, neg_open, lrm, slope = compute_derivatives_with_rvt(
+    svf, slrm = compute_derivatives_with_rvt(
         dtm,
         pixel_size=pixel_size,
         show_progress=False,
         log_steps=False,
     )
-    tpi = compute_tpi_multiscale(dtm, radii=tuple(int(r) for r in tpi_radii))
-    stacked = stack_channels(
-        rgb=rgb,
-        dsm=dsm,
-        dtm=dtm,
-        svf=svf,
-        pos_open=pos_open,
-        neg_open=neg_open,
-        lrm=lrm,
-        slope=slope,
-        ndsm=ndsm,
-        tpi=tpi,
-    )
+    stacked = stack_channels(rgb, svf, slrm)
     if normalize:
         stacked = robust_norm(stacked)
     return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -1576,35 +1526,9 @@ def compute_tile_stack_from_precomputed(
     col_end = col_start + int(window.width)
 
     rgb = precomputed.rgb[:, row_start:row_end, col_start:col_end].copy()
-    dsm = (
-        precomputed.dsm[row_start:row_end, col_start:col_end].copy()
-        if precomputed.dsm is not None
-        else None
-    )
-    dtm = precomputed.dtm[row_start:row_end, col_start:col_end].copy()
     svf = precomputed.svf[row_start:row_end, col_start:col_end].copy()
-    pos_open = precomputed.pos_open[row_start:row_end, col_start:col_end].copy()
-    neg_open = precomputed.neg_open[row_start:row_end, col_start:col_end].copy()
-    lrm = precomputed.lrm[row_start:row_end, col_start:col_end].copy()
-    slope = precomputed.slope[row_start:row_end, col_start:col_end].copy()
-    ndsm = precomputed.ndsm[row_start:row_end, col_start:col_end].copy()
-    tpi = (
-        precomputed.tpi[row_start:row_end, col_start:col_end].copy()
-        if precomputed.tpi is not None
-        else None
-    )
-    stacked = stack_channels(
-        rgb=rgb,
-        dsm=dsm,
-        dtm=dtm,
-        svf=svf,
-        pos_open=pos_open,
-        neg_open=neg_open,
-        lrm=lrm,
-        slope=slope,
-        ndsm=ndsm,
-        tpi=tpi,
-    )
+    slrm = precomputed.slrm[row_start:row_end, col_start:col_end].copy()
+    stacked = stack_channels(rgb, svf, slrm)
     if normalize:
         stacked = robust_norm(stacked)
     return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -1621,25 +1545,12 @@ def compute_tile_stack_from_raster_cache(
 ) -> np.ndarray:
     data, _ = read_window_data(src, band_idx, window)
     rgb = data[:3]
-    dsm = data[3]
-    dtm = data[4]
-    band_names = ["svf", "pos_open", "neg_open", "lrm", "slope", "ndsm", "tpi"]
+    band_names = ["svf", "slrm"]
     indexes = [int(derivative_band_map[name]) for name in band_names]
     deriv_stack = derivative_src.read(indexes=indexes, window=window, masked=True)
     deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
-    svf, pos_open, neg_open, lrm, slope, ndsm, tpi = deriv_stack
-    stacked = stack_channels(
-        rgb=rgb,
-        dsm=dsm,
-        dtm=dtm,
-        svf=svf,
-        pos_open=pos_open,
-        neg_open=neg_open,
-        lrm=lrm,
-        slope=slope,
-        ndsm=ndsm,
-        tpi=tpi,
-    )
+    svf, slrm = deriv_stack
+    stacked = stack_channels(rgb, svf, slrm)
     if normalize:
         stacked = robust_norm(stacked)
     return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -1655,7 +1566,6 @@ def _save_tile_array(output_path: Path, stacked: np.ndarray, file_ext: str) -> N
 def _init_save_tile_worker(
     raster_path: str,
     band_idx: Tuple[int, ...],
-    tpi_radii: Tuple[int, ...],
     normalize: bool,
     tile_size: int,
     output_dir: str,
@@ -1675,7 +1585,6 @@ def _init_save_tile_worker(
         "derivative_src": derivative_src,
         "derivative_band_map": derivative_map,
         "band_idx": tuple(int(v) for v in band_idx),
-        "tpi_radii": tuple(int(v) for v in tpi_radii),
         "normalize": bool(normalize),
         "tile_size": int(tile_size),
         "output_dir": Path(output_dir),
@@ -1710,7 +1619,6 @@ def _save_tile_worker(record: TileRecord) -> str:
             src=src,
             window=window,
             band_idx=ctx["band_idx"],
-            tpi_radii=ctx["tpi_radii"],
             normalize=bool(ctx["normalize"]),
         )
     output_dir = ctx["output_dir"]
@@ -1765,7 +1673,6 @@ def save_tiles(
     for record in selected_records:
         records_by_source[record.source_name].append(record)
     band_idx = parse_int_csv(args.bands, expected_len=5)
-    tpi_radii = parse_int_csv(args.tpi_radii)
     file_ext = str(args.format)
     num_workers = int(args.num_workers)
     total_records = len(selected_records)
@@ -1797,7 +1704,6 @@ def save_tiles(
             prepared_cache = prepare_derivative_cache_for_source(
                 pair=pair,
                 band_idx=band_idx,
-                tpi_radii=tpi_radii,
                 args=args,
             )
         cache_records.append(
@@ -1900,7 +1806,6 @@ def save_tiles(
                             src=src,
                             window=window,
                             band_idx=band_idx,
-                            tpi_radii=tpi_radii,
                             normalize=bool(args.normalize),
                         )
                     tile_name = make_tile_name(
@@ -1950,7 +1855,6 @@ def save_tiles(
             initargs=(
                 str(pair.raster_path),
                 tuple(int(v) for v in band_idx),
-                tuple(int(v) for v in tpi_radii),
                 bool(args.normalize),
                 int(args.tile_size),
                 str(output_dir),

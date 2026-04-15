@@ -1,4 +1,7 @@
-"""Shared channel schema for training and inference."""
+"""Shared channel schema for training and inference.
+
+5-kanal modeli:  R | G | B | SVF | SLRM
+"""
 
 from __future__ import annotations
 
@@ -8,20 +11,13 @@ MODEL_CHANNEL_NAMES: Tuple[str, ...] = (
     "R",
     "G",
     "B",
-    "DSM",
-    "DTM",
     "SVF",
-    "Pos_Openness",
-    "Neg_Openness",
-    "LRM",
-    "Slope",
-    "nDSM",
-    "TPI",
+    "SLRM",
 )
 
 LOCKED_TRAINED_ONLY_FIELDS: Tuple[str, ...] = ("tile", "overlap", "bands")
 
-METADATA_SCHEMA_VERSION = 2
+METADATA_SCHEMA_VERSION = 3
 
 
 def expected_channel_names(in_channels: int) -> Tuple[str, ...]:

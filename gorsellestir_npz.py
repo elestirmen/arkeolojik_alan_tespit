@@ -354,20 +354,13 @@ class NPZViewerApp:
                 else:
                     axes_flat = axes.flatten()
                 
-                # İsimlerin iyice sadeleşmesi için sadece İngilizce etiketler
+                # NPZ tile stack: R, G, B, SVF, SLRM (5 channels)
                 band_isimleri = {
-                    0: "1: Red",
-                    1: "2: Green",
-                    2: "3: Blue",
-                    3: "4: DSM",
-                    4: "5: DTM",
-                    5: "6: SVF",
-                    6: "7: Pos_Openness",
-                    7: "8: Neg_Openness",
-                    8: "9: LRM",
-                    9: "10: Slope",
-                    10: "11: nDSM",
-                    11: "12: TPI",
+                    0: "R",
+                    1: "G",
+                    2: "B",
+                    3: "SVF",
+                    4: "SLRM",
                 }
 
                 for i in range(rows * cols):

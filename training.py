@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Arkeolojik Alan Tespiti - 12 Kanallı U-Net Eğitim Scripti
+Arkeolojik Alan Tespiti - 5 Kanallı U-Net Eğitim Scripti
 
-Bu script, egitim_verisi_olusturma.py ile oluşturulan 12 kanallı tile'ları
+Bu script, egitim_verisi_olusturma.py ile oluşturulan 5 kanallı tile'ları
 kullanarak U-Net modelini eğitir.
 
 Özellikler:
-    - 12 kanallı girdi desteği (RGB + DSM + DTM + RVT türevleri + nDSM + TPI)
+    - 5 kanallı girdi desteği (RGB + SVF + SLRM)
     - CBAM Attention modülü (opsiyonel)
     - Mixed precision training (AMP)
     - Erken durdurma (Early stopping)
@@ -149,7 +149,7 @@ CONFIG: dict[str, object] = {
 
     # patience:
     # Erken durdurma sabri (iyilesme olmayan epoch sayisi).
-    "patience": 10,
+    "patience": 20,
 
     # metric_threshold:
     # Egitim/dogrulama metriklerini (IoU/F1/Precision/Recall) hesaplamak icin
@@ -396,7 +396,7 @@ def _count_positive_tiles_from_class_dirs(
 
 class ArchaeologyDataset(Dataset):
     """
-    12 kanallı arkeolojik alan tespiti veri seti.
+    5 kanallı arkeolojik alan tespiti veri seti.
     
     egitim_verisi_olusturma.py tarafından oluşturulan .npy dosyalarını okur.
     """
@@ -1050,7 +1050,7 @@ class TrainingConfig:
     # Model
     arch: str = "Unet"
     encoder: str = "resnet34"
-    in_channels: int = 12
+    in_channels: int = 5
     channel_names: Tuple[str, ...] = field(default_factory=lambda: MODEL_CHANNEL_NAMES)
     enable_attention: bool = True
     attention_reduction: int = 4
@@ -2496,7 +2496,7 @@ def train(config: TrainingConfig) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="12 kanallı arkeolojik tespit modeli eğitimi",
+        description="5 kanallı arkeolojik tespit modeli eğitimi",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     
@@ -2795,13 +2795,13 @@ def main():
         with open(metadata_path, encoding="utf-8") as f:
             source_metadata = json.load(f)
         source_metadata_path = metadata_path
-        in_channels = source_metadata.get("num_channels", 12)
+        in_channels = source_metadata.get("num_channels", 5)
         LOGGER.info(f"Metadata'dan kanal sayısı okundu: {in_channels}")
         raw_channel_names = source_metadata.get("channel_names")
         if isinstance(raw_channel_names, list) and raw_channel_names:
             channel_names = tuple(str(x) for x in raw_channel_names)
     else:
-        in_channels = 12
+        in_channels = 5
         LOGGER.warning(f"Metadata bulunamadı, varsayılan kanal sayısı kullanılıyor: {in_channels}")
 
     auto_val_ratio = _resolve_auto_val_holdout_ratio(source_metadata)

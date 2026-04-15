@@ -2841,7 +2841,7 @@ class MainWindow(QMainWindow):
                         "Secilen DSM/DTM bantlari 8-bit gorunuyor "
                         f"({dsm_dtype}/{dtm_dtype}).\n\n"
                         "Bu durumda yukseklik verisi 0-255'e ezilmis olabilir; "
-                        "SVF, Openness, Slope ve benzeri topografik bantlar guvenilir uretilemez.\n\n"
+                        "SVF, SLRM ve benzeri topografik bantlar guvenilir uretilemez.\n\n"
                         "Float32 DSM/DTM iceren dogru 5-band GeoTIFF ile tekrar deneyin."
                     )
         except Exception as exc:
