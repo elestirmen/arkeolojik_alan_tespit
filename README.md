@@ -17,6 +17,8 @@ The checked-in profile targets **tile-level classification** (`dl_task: tile_cla
 - **`tile`**, **`overlap`**, and **`bands`** are taken from `training_metadata.json` during inference—do not “fix” mismatches by editing overlap in YAML; retrain with the desired overlap if needed.
 - After a successful `training.py` run, the best weights are published to `checkpoints/active/model.pth` and metadata to `checkpoints/active/training_metadata.json` (you may point `weights` to another file in `checkpoints/active/` if you prefer).
 
+**Model input channels (current code):** the deep-learning stack is **5 channels** — **R, G, B, SVF, SLRM** — in that order (`archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`). The GeoTIFF remains **5 bands** (RGB + DSM + DTM). **SVF** (Sky-View Factor) and **SLRM** (Simple Local Relief Model from RVT, computed on DTM) are **derived inside** `archaeo_detect.py` / the dataset scripts; they are not separate GeoTIFF bands. Older documentation that referred to a 12-channel tensor (nDSM, multi-scale TPI, extra RVT openness channels, etc.) describes a **previous schema**, not the current training + inference path.
+
 ---
 
 ## 📑 Table of Contents
@@ -61,8 +63,8 @@ The checked-in profile targets **tile-level classification** (`dl_task: tile_cla
 - ✅ **Ensemble Learning**: Combines results from multiple encoders for more reliable detection
 - ✅ **Multi-Scale Analysis**: Detects structures of different sizes
 - ✅ **🆕 Labeled Object Detection**: Automatic labeling of 80 different object classes (trees, buildings, vehicles, etc.) with YOLO11
-- ✅ **🆕 12-Channel Input**: RGB + DSM + DTM + RVT derivatives + nDSM + TPI for enhanced detection
-- ✅ **🆕 CBAM Attention**: Channel and spatial attention mechanism for dynamic feature weighting
+- ✅ **🆕 5-channel DL stack**: R, G, B from the raster plus **SVF** and **SLRM** (from DTM via RVT), assembled in code—not extra GeoTIFF bands
+- ✅ **🆕 CBAM attention (optional)**: Supported in `training.py` when attention is enabled (off in the checked-in `CONFIG` by default)
 
 ### 🔧 Technical Features
 - 🚀 **Tile-Based Processing**: Memory-efficient processing for large images
@@ -504,7 +506,7 @@ output_dir/
   tile_labels.csv
 ```
 
-Each tile is a 12-channel `.npz` (or `.npy`) file compatible with `training.py tile_classification` mode.
+Each tile is a 5-channel `.npz` (or `.npy`) file compatible with `training.py tile_classification` mode (same order as `MODEL_CHANNEL_NAMES`).
 
 ### Quick Run
 
@@ -540,7 +542,6 @@ python prepare_tile_classification_dataset.py \
 | `--tile-size` | `256` | Tile size in pixels |
 | `--overlap` | `128` | Sliding-window overlap in pixels |
 | `--bands` | `1,2,3,4,5` | 1-based band indices: R, G, B, DSM, DTM |
-| `--tpi-radii` | `5,15,30` | Comma-separated TPI radii (pixels) |
 | `--sampling-mode` | `full_grid` | `full_grid` or `selected_regions` |
 | `--positive-ratio-threshold` | `0.02` | Min fraction of positive pixels to call a tile Positive |
 | `--valid-ratio-threshold` | `0.70` | Min valid-pixel fraction required to keep a tile |
@@ -711,7 +712,7 @@ System behavior is controlled by the `config.yaml` file. This file is **richly d
 4. **Trained-only mode**: `trained_model_only` — when `true`, enforces a single checkpoint + metadata (`weights`, `training_metadata`); locks tile/overlap/bands from metadata
 5. **Deep Learning**: Architecture, encoder, weights, `zero_shot_imagenet`, attention / band importance (`save_band_importance`, `band_importance_max_tiles`)
 6. **Classical Methods**: RVT, Hessian, Morphology parameters
-7. **Advanced Topographic Analysis**: `enable_curvature` (Plan + Profile Curvature channels for ditch/ridge separation), `enable_tpi` (multi-scale TPI), `tpi_radii`
+7. **Advanced Topographic Analysis (legacy / off in default preset)**: `enable_curvature`, `enable_tpi`, `tpi_radii` still exist in `config.yaml` and `archaeo_detect.py` for experimentation, but the **checked-in 5-channel DL schema does not add curvature/TPI to the model tensor** (see comments at the top of `config.yaml`).
 8. **Fusion**: Hybrid combination settings (`alpha`, …) — requires both DL and classic enabled
 9. **YOLO11** (optional): Separate RGB-only inventory / segmentation path; usually off for the tile-classification preset
 10. **Tile Processing**: Memory and performance optimization (`tile` / `overlap` documented vs metadata-locked)
@@ -963,34 +964,27 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
 
 **Steps:**
 
-1. **RVT Derivatives Calculation**
-   - Sky-View Factor (SVF)
-   - Openness (Positive & Negative)
-   - Local Relief Model (LRM)
-   - Slope
+1. **Build the 5-channel DL tensor**
+   - Read **RGB** and **DSM/DTM** from the GeoTIFF (bands chosen in `config.yaml`)
+   - On the filled DTM, compute **SVF** and **SLRM** with RVT (`compute_derivatives_with_rvt` in `archaeo_detect.py`)
+   - Concatenate with `stack_channels(rgb, svf, slrm)` → shape `(5, H, W)` in channel order `MODEL_CHANNEL_NAMES`
 
-2. **12-Channel Tensor Creation** (Updated!)
-   - 3 x RGB
-   - 1 x DSM (raw)
-   - 1 x DTM (raw)
-   - 5 x RVT derivatives (SVF, Pos/Neg Openness, LRM, Slope)
-   - 1 x nDSM (DSM - DTM)
-   - 1 x TPI (Topographic Position Index)
+   Other RVT products (openness, slope, etc.) may still be used on **classical** or experimental code paths; they are **not** separate planes in this DL stack.
 
-3. **Normalization**
+2. **Normalization**
    - Global or local percentile-based
    - Scaling to 2%-98% range
 
-4. **Tile-Based Processing**
+3. **Tile-Based Processing**
    - Large image divided into small tiles
    - Each tile fed to U-Net
    - Probability map generated
 
-5. **Feathering (Smoothing)**
+4. **Feathering (Smoothing)**
    - Transitions between tiles smoothed
    - Seamless mosaic created
 
-6. **Thresholding**
+5. **Thresholding**
    - Probability > threshold → Mask = 1
    - Probability ≤ threshold → Mask = 0
 
@@ -1457,13 +1451,13 @@ HATA: archaeo_detect.py'den attention modülleri import edilemedi.
 
 **Symptoms:**
 ```
-ValueError: Expected 12 channels but got 9
+ValueError: Expected 5 channels but got X
 ```
 
 **Solutions:**
 1. **Regenerate training data**: Use `egitim_verisi_olusturma.py` with correct parameters
 2. **Check metadata.json**: Verify `num_channels` matches actual data
-3. **Verify file format**: Ensure `.npz` files contain `image` key with shape `(12, H, W)`
+3. **Verify file format**: Ensure `.npz` files contain an `image` key with shape `(5, H, W)` for the current schema
 
 ### Debug Mode
 
@@ -1501,7 +1495,7 @@ if train_images:
     if 'image' in sample.files:
         img = sample['image']
         print(f"Image shape: {img.shape}")
-        print(f"Expected: (12, 256, 256), Got: {img.shape}")
+        print(f"Expected: (5, 256, 256), Got: {img.shape}")
 ```
 
 **Monitor training in real-time:**
@@ -1531,7 +1525,7 @@ A: The system is **primarily designed for UAV (drone) nadir imagery** (orthomosa
 ### 🔧 Technical Questions
 
 **Q: How many bands are required?**  
-A: Minimum 3 bands (RGB). Optimum 5 bands (RGB + DSM + DTM). **12 channels** are automatically created with raw DSM/DTM + RVT derivatives + nDSM + TPI.
+A: Minimum 3 bands (RGB). For the current pipeline, use **5 bands** (RGB + DSM + DTM). The **model tensor** is **5 channels**: R, G, B plus **SVF** and **SLRM** computed from the DTM inside the code (see `stack_channels()` in `archaeo_detect.py`).
 
 **Q: How much space do cache files take?**  
 A: Typically 10-50 MB. Depends on input file size. Can be larger (several GB) for high-resolution data.
@@ -1604,7 +1598,7 @@ python archaeo_detect.py --input new_area.tif
 │         │                     │                     │                        │
 │         ▼                     ▼                     ▼                        │
 │   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐              │
-│   │ GeoTIFF +    │      │ 12-channel   │      │ Trained      │              │
+│   │ GeoTIFF +    │      │ 5-channel    │      │ Trained      │              │
 │   │ Binary Mask  │      │ NPZ tiles    │      │ .pth model   │              │
 │   └──────────────┘      └──────────────┘      └──────────────┘              │
 │                                                      │                       │
@@ -1874,7 +1868,7 @@ with rasterio.open('mask.tif', 'w', driver='GTiff',
 
 ### 📦 Step 2: Generate Training Tiles
 
-The script `egitim_verisi_olusturma.py` converts your GeoTIFF + mask into 12-channel training tiles.
+The script `egitim_verisi_olusturma.py` converts your GeoTIFF + mask into **5-channel** training tiles (R, G, B, SVF, SLRM).
 
 #### Basic Command
 
@@ -1900,44 +1894,33 @@ python egitim_verisi_olusturma.py \
 
 ```
 Input GeoTIFF (5 bands)          Ground Truth Mask
-       │                                │
-       ▼                                │
-┌──────────────────┐                    │
-│ Read RGB + DSM   │                    │
-│ + DTM bands      │                    │
-└────────┬─────────┘                    │
-         │                              │
-         ▼                              │
-┌──────────────────┐                    │
-│ Calculate RVT    │                    │
-│ derivatives:     │                    │
-│ - SVF            │                    │
-│ - Openness (+/-) │                    │
-│ - LRM, Slope     │                    │
-└────────┬─────────┘                    │
-         │                              │
-         ▼                              │
-┌──────────────────┐                    │
-│ Calculate:       │                    │
-│ - DSM/DTM (raw)  │                    │
-│ - TPI            │                    │
-│ - nDSM           │                    │
-└────────┬─────────┘                    │
-         │                              │
-         ▼                              │
-┌──────────────────┐                    │
-│ Stack 12 channels│◄───────────────────┘
-│ + slice into     │
-│ 256x256 tiles    │
-└────────┬─────────┘
-         │
-         ▼
+       |                                |
+       v                                |
++------------------+                    |
+| Read RGB + DSM   |                    |
+| + DTM bands      |                    |
++--------+---------+                    |
+         |                              |
+         v                              |
++------------------+                    |
+| RVT on DTM       |                    |
+| SVF + SLRM       |                    |
++--------+---------+                    |
+         |                              |
+         v                              |
++------------------+                    |
+| stack_channels   |<-------------------+
+| R,G,B,SVF,SLRM   |
+| 256x256 tiles    |
++--------+---------+
+         |
+         v
    training_data/
-   ├── train/images/*.npz  (12, 256, 256)
-   ├── train/masks/*.npz   (256, 256)
-   ├── val/images/*.npz
-   ├── val/masks/*.npz
-   └── metadata.json
+   |-- train/images/*.npz  (5, 256, 256)
+   |-- train/masks/*.npz   (256, 256)
+   |-- val/images/*.npz
+   |-- val/masks/*.npz
+   `-- metadata.json
 ```
 
 #### Key Parameters
@@ -1952,7 +1935,6 @@ Run `python egitim_verisi_olusturma.py --help` for the full list. Common options
 | `--tile-size` / `-t` | `256` | Tile size in pixels |
 | `--overlap` | `128` | Sliding-window overlap in pixels (must stay consistent with training/inference metadata) |
 | `--bands` / `-b` | `1,2,3,4,5` | 1-based GeoTIFF band indices: R, G, B, DSM, DTM |
-| `--tpi-radii` | `5,15,30` | Comma-separated TPI radii (pixels), passed to `compute_tpi_multiscale` |
 | `--min-positive` | `0.0` | Minimum fraction of positive pixels in a tile to keep it (0 = allow all-negative tiles subject to negative sampling) |
 | `--tile-label-min-positive-ratio` | _(from `CONFIG`)_ | For tile-level labels: minimum positive ratio for the tile’s class label (0 = any positive pixel) |
 | `--max-nodata` | `0.3` | Maximum allowed NoData fraction per tile |
@@ -1975,26 +1957,21 @@ Run `python egitim_verisi_olusturma.py --help` for the full list. Common options
 | **Imbalanced data** (<5% archaeological) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
 | **Quick test** | `--tile-size 256 --train-ratio 0.9` |
 
-#### Output: 12 Channels Explained
+#### Output: 5 channels (model tensor)
 
-| # | Channel | What it detects |
-|---|---------|-----------------|
-| 0-2 | RGB | Color/texture anomalies |
-| 3 | DSM | Surface elevation context |
-| 4 | DTM | Ground elevation context |
-| 5 | SVF | Tumuli, mounds (horizon visibility) |
-| 6 | Positive Openness | Raised structures |
-| 7 | Negative Openness | Ditches, depressions |
-| 8 | LRM | Local topographic anomalies |
-| 9 | Slope | Terraces, walls |
-| 10 | nDSM | Surface height above ground |
-| 11 | TPI | Relative elevation (mounds/depressions) |
+| # | Channel | Role |
+|---|---------|------|
+| 0–2 | R, G, B | Orthophoto color/texture |
+| 3 | SVF | Sky-View Factor (relief visibility; mounds, local dominance) |
+| 4 | SLRM | Simple Local Relief Model (local height anomalies on DTM) |
+
+DSM/DTM **bands** are still required in the GeoTIFF for correct masking and for computing SVF/SLRM; only RGB + the two relief channels enter the saved `image` tensor.
 
 ---
 
 ### 🚀 Step 3: Train the Model
 
-Use `training.py` to train a U-Net model with CBAM attention on your 12-channel data.
+Use `training.py` to train a U-Net (SMP) model on your **5-channel** tiles.
 
 #### Basic Training
 
@@ -2002,8 +1979,7 @@ Use `training.py` to train a U-Net model with CBAM attention on your 12-channel 
 python training.py --data training_data
 ```
 
-This uses sensible defaults: U-Net + ResNet34 + 50 epochs + CBAM attention + mixed precision.
-By default it also publishes the latest successful run to `checkpoints/active/` for IDE inference.
+This uses the checked-in `CONFIG` in `training.py` (currently: **U-Net**, **ResNet50**, **BCE** loss, **patience 20**, **CBAM off** via `no_attention: true`, **AMP on** unless you disable it). Successful runs **publish** the best weights to `checkpoints/active/` when `publish_active` is true.
 
 #### Full Command with Options
 
@@ -2011,12 +1987,12 @@ By default it also publishes the latest successful run to `checkpoints/active/` 
 python training.py \
   --data training_data \
   --arch Unet \
-  --encoder resnet34 \
+  --encoder resnet50 \
   --epochs 50 \
-  --batch-size 8 \
+  --batch-size 16 \
   --lr 1e-4 \
-  --loss combined \
-  --patience 10
+  --loss bce \
+  --patience 20
 ```
 
 #### Key Parameters
@@ -2034,10 +2010,10 @@ python training.py \
 | `--balance-mode` | `auto` | `auto` (computes pos_weight from train ratio), `manual`, `none` |
 | `--pos-weight` | `1.0` | Manual BCE positive class weight (used when `--balance-mode manual`) |
 | `--max-auto-pos-weight` | `100.0` | Clamp for auto-computed pos_weight to avoid destabilizing training |
-| `--patience` | `10` | Early stopping after N epochs without improvement |
+| `--patience` | `20` | Early stopping after N epochs without improvement |
 | `--metric-threshold` | `0.5` | Probability threshold used to compute IoU/F1/Precision/Recall metrics |
 | `--val-threshold-sweep` | on | Sweep thresholds 0.1–0.9 on val and report best IoU + threshold |
-| `--no-attention` | Off | Disable CBAM attention |
+| `--no-attention` | on | Matches `CONFIG["no_attention"]` (default **true** → CBAM **off**; set `no_attention: false` in `CONFIG` to enable attention) |
 | `--no-amp` | Off | Disable mixed precision (FP16) |
 | `--train-neg-to-pos-ratio` | `2` | Sub-sample negatives to this multiple of positives in train (`None` = keep all) |
 | `--train-neg-sample-seed` | `42` | RNG seed for negative sub-sampling |
@@ -2072,9 +2048,9 @@ python training.py \
 
 | Loss | When to Use |
 |------|-------------|
-| `combined` | **Default** - works for most cases |
-| `focal` | Imbalanced data (few archaeological pixels) |
-| `dice` | Small objects, overlap-focused |
+| `bce` | **Default in `training.py` `CONFIG`**; required path for `tile_classification` together with `focal` |
+| `focal` | Strong class imbalance in tile labels |
+| `combined` / `dice` | Primarily for **segmentation** task (pixel masks) |
 
 #### Training Output
 
@@ -2177,7 +2153,7 @@ cat training_data/metadata.json | python -m json.tool
 
 # Test data loading
 python -c "import numpy as np; d=np.load('training_data/train/images/tile_00000_00000.npz'); print(d['image'].shape)"
-# Expected: (12, 256, 256)
+# Expected: (5, 256, 256)
 ```
 
 ---
@@ -2230,7 +2206,7 @@ python training.py \
   --encoder resnet34 \
   --epochs 50 \
   --batch-size 16 \
-  --loss combined
+  --loss bce
 
 # 3. Run inference on new area
 python archaeo_detect.py \
@@ -2257,8 +2233,8 @@ python archaeo_detect.py \
 
 The project includes two dedicated scripts for training custom models:
 
-- **`egitim_verisi_olusturma.py`**: Creates 12-channel training tiles from GeoTIFF + ground truth masks
-- **`training.py`**: Trains U-Net models with CBAM Attention support
+- **`egitim_verisi_olusturma.py`**: Creates **5-channel** training tiles (R, G, B, SVF, SLRM) from GeoTIFF + ground truth masks
+- **`training.py`**: Trains SMP U-Net (and related heads) on **5-channel** tiles; **CBAM** is optional (`no_attention` in `CONFIG`)
 
 **Quick Start:**
 
@@ -2274,26 +2250,17 @@ python archaeo_detect.py
 ```
 
 **Key Features:**
-- ✅ 12-channel input (RGB + DSM + DTM + RVT + nDSM + TPI)
-- ✅ CBAM Attention (channel + spatial)
-- ✅ Multiple loss functions (BCE, Dice, Combined, Focal)
+- ✅ 5-channel input (R, G, B, SVF, SLRM) aligned with inference
+- ✅ Optional CBAM attention on the SMP model (`training.py`)
+- ✅ Losses: **BCE / Focal** for `tile_classification`; **BCE / Dice / Combined / Focal** for `segmentation`
 - ✅ Mixed precision training
 - ✅ Early stopping and checkpointing
 
 For complete documentation, examples, and troubleshooting, see the [Model Training Guide](#-model-training-guide) section.
 
-### Adding Custom Encoders
+### Encoder selection
 
-To add a new encoder:
-
-```python
-# In archaeo_detect.py
-SUPPORTED_ENCODERS = [
-    'resnet34', 'resnet50',
-    'efficientnet-b3',
-    'your_custom_encoder'  # Add new encoder
-]
-```
+Encoders are **Segmentation Models PyTorch** backbone names (e.g. `resnet34`, `resnet50`, `efficientnet-b3`). Set `encoder` / `encoders` in `config.yaml` or pass the corresponding CLI flags. Use only encoders your installed `segmentation-models-pytorch` build supports and that match your checkpoint when loading weights.
 
 ### API Usage
 
@@ -2378,7 +2345,7 @@ arkeolojik_alan_tespit/            # project root (example name)
 ├── README.md                      # This documentation
 ├── training_data/                  # Generated training tiles (paired layout)
 │   ├── train/
-│   │   ├── images/                 # 12-channel image tiles (.npz)
+│   │   ├── images/                 # 5-channel image tiles (.npz)
 │   │   └── masks/                  # Binary mask tiles (.npz)
 │   ├── val/
 │   │   ├── images/
@@ -2424,15 +2391,8 @@ archaeo_detect.py
 │   └── CRS and transform preservation
 ├── Preprocessing
 │   ├── Band reading (RGB, DSM, DTM)
-│   ├── RVT derivatives (rvt-py)
-│   │   ├── SVF (Sky-View Factor)
-│   │   ├── Positive/Negative Openness
-│   │   ├── LRM (Local Relief Model)
-│   │   └── Slope
-│   ├── Advanced features
-│   │   ├── Raw DSM/DTM channel inclusion
-│   │   ├── TPI calculation (multi-scale)
-│   │   └── nDSM calculation (DSM - DTM)
+│   ├── DL stack (default): RVT on DTM → **SVF** + **SLRM** → `stack_channels` (**5 channels**)
+│   ├── Optional / classical paths: extra RVT views, TPI, curvature, nDSM (see `config.yaml`; off in default preset)
 │   └── Normalization (global/local percentile)
 ├── Detection Pipeline
 │   ├── Deep Learning (PyTorch + SMP)
@@ -2474,10 +2434,8 @@ egitim_verisi_olusturma.py
 │   ├── Dimension matching
 │   └── CRS validation
 ├── Feature Extraction
-│   ├── RVT derivatives (SVF, Openness, LRM, Slope)
-│   ├── Raw DSM/DTM channels
-│   ├── TPI (multi-scale)
-│   └── nDSM calculation
+│   ├── RVT on DTM: SVF + SLRM
+│   └── `stack_channels` → 5-channel tiles (R, G, B, SVF, SLRM)
 ├── Tile Generation
 │   ├── Sliding window with overlap
 │   ├── Quality filtering (nodata, positive ratio)
@@ -2498,7 +2456,7 @@ training.py
 │   ├── Architecture selection (U-Net, etc.)
 │   ├── Encoder initialization
 │   ├── CBAM Attention wrapper
-│   └── Channel adaptation (12 channels)
+│   └── Channel adaptation (5 channels)
 ├── Training Loop
 │   ├── Forward pass
 │   ├── Loss calculation (BCE, Dice, Combined, Focal)
@@ -2529,27 +2487,20 @@ training.py
 
 ### Channel Architecture
 
-**12-Channel Input Structure** (canonical names in `archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`):
+**5-channel DL tensor** (canonical names in `archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`):
 
-| Channel | Feature | Description | Archaeological Use |
-|---------|---------|-------------|-------------------|
-| 0-2 | RGB | Red, Green, Blue | Color/texture anomalies |
-| 3 | DSM | Digital Surface Model | Surface context |
-| 4 | DTM | Digital Terrain Model | Ground context |
-| 5 | SVF | Sky-View Factor | Tumuli, mounds |
-| 6 | Pos. Openness | Positive Openness | Raised structures |
-| 7 | Neg. Openness | Negative Openness | Ditches, depressions |
-| 8 | LRM | Local Relief Model | Local topographic anomalies |
-| 9 | Slope | Terrain slope | Terraces, walls |
-| 10 | nDSM | Normalized DSM | Surface height above terrain (DSM − DTM) |
-| 11 | TPI | Topographic Position Index | Mounds/depressions |
+| Index | Name | Source |
+|------:|------|--------|
+| 0–2 | R, G, B | GeoTIFF bands selected as RGB |
+| 3 | SVF | RVT Sky-View Factor on filled DTM |
+| 4 | SLRM | RVT Simple Local Relief Model on DTM (with Gaussian fallback if needed) |
 
-Training tiles and inference stacks use the same ordering via `stack_channels()` in `archaeo_detect.py`.
+Training tiles and inference use the same ordering via `stack_channels(rgb, svf, slrm)` in `archaeo_detect.py`. GeoTIFF **DSM/DTM bands** are still read for masking and for building these relief channels.
 
-**CBAM Attention:**
-- **Channel Attention**: Dynamically weights feature channels (e.g., SVF/TPI for tumuli, Openness/LRM for ditches)
-- **Spatial Attention**: Focuses on important regions (structure boundaries, centers)
-- **Benefits**: Improves detection accuracy, reduces false positives, adapts to different structure types
+**CBAM Attention (when enabled in training):**
+- **Channel Attention**: Weights the five input-derived feature maps (e.g., emphasizing SVF vs. SLRM where useful).
+- **Spatial Attention**: Highlights informative regions in the feature maps.
+- **Note:** The checked-in `training.py` `CONFIG` keeps attention off (`no_attention: true`) unless you change it.
 
 ### Algorithm Details
 
@@ -2583,18 +2534,9 @@ Ridge/valley detection via eigenvalue analysis.
 - **DTM** provides ground-only relief context.
 - **nDSM = DSM - DTM** emphasizes above-ground height anomalies and supports tall-object masking.
 
-#### TPI (Topographic Position Index)
+#### TPI (Topographic Position Index) — optional, not in the 5-channel DL tensor
 
-Multi-scale TPI calculation:
-```
-TPI = center_elevation - mean(neighbor_elevations)
-```
-
-- **Positive TPI**: Higher than surroundings → Mounds, tumuli, hills
-- **Negative TPI**: Lower than surroundings → Ditches, depressions, valleys
-- **Near zero**: Flat areas or slopes
-
-Multi-scale approach uses multiple radii (e.g., 5, 15, 30 pixels) and averages results to detect structures of different sizes.
+`archaeo_detect.py` still contains `compute_tpi_multiscale()` and `config.yaml` keys such as `enable_tpi` / `tpi_radii` for experiments, but the **current** `MODEL_CHANNEL_NAMES` stack does **not** include TPI. Relief cues for the neural network are **SVF + SLRM** only.
 
 #### Fusion Algorithm
 

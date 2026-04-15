@@ -201,7 +201,7 @@ encoders: "none"
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "checkpoints/best_iou_TileClassifier_resnet50_5ch.pth"
+weights: "checkpoints/best_TileClassifier_resnet50_5ch.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
@@ -682,6 +682,49 @@ overlap: 128
 #   - Çok hafif bir performans maliyeti (genellikle ihmal edilebilir)
 # ÖNERİ: Neredeyse her zaman true kullanın
 feather: true
+
+
+# ============================================================================
+# BÖLÜM 7.5: ÇOKLU ÖLÇEK (MULTI-SCALE) INFERENCE
+# ============================================================================
+# Aynı modeli farklı çözünürlüklerde çalıştırarak hem küçük hem büyük
+# arkeolojik yapıları tek bir olasılık haritasında birleştirir.
+#
+# NASIL ÇALIŞIR:
+#   1) Girdi raster her ölçek için küçültülür (ör. 0.5x → 2x küçük)
+#   2) Her küçültülmüş raster üzerinde SVF/SLRM yeniden hesaplanır
+#   3) Model (256x256) her ölçekte ayrı ayrı inference yapar
+#   4) Küçük ölçeklerin prob haritaları orijinal boyuta büyütülür
+#   5) Tüm ölçekler birleştirilir (max, mean veya weighted_mean)
+#
+# PERFORMANS:
+#   Küçük ölçekler çok az piksel içerdiğinden toplam maliyet ~%30-40 artar.
+#   3 ölçek ≠ 3x yavaş; gerçek maliyet ~1.3-1.4x.
+
+# enable_multiscale: Çoklu ölçek inference'ı etkinleştir
+# - true: Aşağıdaki ölçeklerde çalışır ve sonuçları birleştirir
+# - false: Sadece orijinal çözünürlükte çalışır (mevcut davranış)
+enable_multiscale: true
+
+# multiscale_scales: Kullanılacak ölçekler
+# - 1.0: Orijinal çözünürlük (0.5m ise 256px = 128m alan)
+# - 0.5: 2x küçültme (0.5m→1.0m, 256px = 256m alan)
+# - 0.25: 4x küçültme (0.5m→2.0m, 256px = 512m alan)
+# ÖNERİ: [1.0, 0.5, 0.25] iyi bir başlangıç
+multiscale_scales: [1.0, 0.5, 0.25]
+
+# multiscale_merge: Ölçek birleştirme stratejisi
+# - "max": Her pikselde en yüksek olasılığı al (en az bir ölçekte tespit → pozitif)
+# - "mean": Tüm ölçeklerin ortalaması (dengeli, yanlış pozitifleri azaltır)
+# - "weighted_mean": Ağırlıklı ortalama (multiscale_weights ile kontrol edilir)
+# ÖNERİ: "max" ile başlayın (recall yüksek), çok fazla yanlış pozitif varsa "mean" deneyin
+multiscale_merge: "max"
+
+# multiscale_weights: weighted_mean için ölçek ağırlıkları
+# - null: Eşit ağırlık
+# - Liste: multiscale_scales ile aynı uzunlukta
+# ÖRNEK: [0.5, 0.3, 0.2] → orijinal ölçeğe %50, 0.5x'e %30, 0.25x'e %20 ağırlık
+multiscale_weights: null
 
 
 # ============================================================================

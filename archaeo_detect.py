@@ -720,6 +720,24 @@ class PipelineDefaults:
         metadata={"help": "Mevcut cache'i yoksay ve RVT türevlerini yeniden hesapla"},
     )
     
+    # ===== MULTI-SCALE INFERENCE =====
+    enable_multiscale: bool = field(
+        default=False,
+        metadata={"help": "Çoklu ölçekte inference çalıştır. Her ölçekte girdi raster küçültülüp aynı model ile tahmin yapılır."},
+    )
+    multiscale_scales: Tuple[float, ...] = field(
+        default=(1.0, 0.5, 0.25),
+        metadata={"help": "Inference ölçekleri. 1.0=orijinal, 0.5=2x küçük, 0.25=4x küçük."},
+    )
+    multiscale_merge: str = field(
+        default="max",
+        metadata={"help": "Ölçek birleştirme stratejisi: 'max', 'mean', 'weighted_mean'."},
+    )
+    multiscale_weights: Optional[Tuple[float, ...]] = field(
+        default=None,
+        metadata={"help": "weighted_mean için ölçek ağırlıkları. None ise eşit ağırlık. Sırası scales ile aynı olmalı."},
+    )
+
     # ===== CİHAZ SEÇİMİ =====
     device: Optional[str] = field(
         default=None,
@@ -820,6 +838,18 @@ class PipelineDefaults:
             errors.append("rvt_radii en az bir değer içermeli")
         if any(r <= 0 for r in self.rvt_radii):
             errors.append("rvt_radii tüm değerleri pozitif olmalı")
+
+        # Multi-scale kontrolleri
+        if self.enable_multiscale:
+            if len(self.multiscale_scales) == 0:
+                errors.append("multiscale_scales en az bir ölçek içermeli")
+            if any(s <= 0 or s > 1.0 for s in self.multiscale_scales):
+                errors.append("multiscale_scales değerleri (0, 1.0] aralığında olmalı")
+            if self.multiscale_merge not in ("max", "mean", "weighted_mean"):
+                errors.append(f"multiscale_merge geçersiz: {self.multiscale_merge}. max/mean/weighted_mean")
+            if self.multiscale_merge == "weighted_mean" and self.multiscale_weights is not None:
+                if len(self.multiscale_weights) != len(self.multiscale_scales):
+                    errors.append("multiscale_weights uzunluğu multiscale_scales ile eşit olmalı")
 
         # Cache (NPZ vs raster) kontrolleri
         mode = str(self.cache_derivatives_mode).strip().lower()
@@ -936,7 +966,8 @@ def build_config_from_args(
             LOGGER.warning(f"Config dosyası yüklenemedi ({yaml_path}): {e}")
     
     # YAML'dan gelen listeleri tuple'a çevir
-    list_to_tuple_fields = {'sigma_scales', 'morphology_radii', 'rvt_radii', 'tpi_radii'}
+    list_to_tuple_fields = {'sigma_scales', 'morphology_radii', 'rvt_radii', 'tpi_radii',
+                             'multiscale_scales', 'multiscale_weights'}
     for field_name in list_to_tuple_fields:
         if field_name in base_config and isinstance(base_config[field_name], list):
             base_config[field_name] = tuple(base_config[field_name])
@@ -1723,7 +1754,11 @@ def get_num_channels(*_args, **_kwargs) -> int:
 
 
 class TileClassifier(torch.nn.Module):
-    """SMP encoder tabanli tile-level binary classifier."""
+    """SMP encoder tabanli tile-level binary classifier.
+
+    use_fpn=True ise encoder'in tum katmanlarindan feature toplar
+    (FPN-style multi-level aggregation).
+    """
 
     def __init__(
         self,
@@ -1732,6 +1767,7 @@ class TileClassifier(torch.nn.Module):
         in_channels: int,
         encoder_weights: Optional[str] = "imagenet",
         dropout: float = 0.2,
+        use_fpn: bool = False,
     ):
         super().__init__()
         if smp is None:
@@ -1745,21 +1781,30 @@ class TileClassifier(torch.nn.Module):
         out_channels = list(getattr(self.encoder, "out_channels", []))
         if not out_channels:
             raise ValueError(f"Encoder cikis kanallari okunamadi: {encoder_name}")
+
+        self.use_fpn = bool(use_fpn)
         self.pool = torch.nn.AdaptiveAvgPool2d(1)
         self.dropout = (
             torch.nn.Dropout(p=float(dropout))
             if float(dropout) > 0.0
             else torch.nn.Identity()
         )
-        self.classifier = torch.nn.Linear(int(out_channels[-1]), 1)
+        if self.use_fpn and len(out_channels) > 1:
+            fpn_ch = sum(int(c) for c in out_channels[1:])
+            self.classifier = torch.nn.Linear(fpn_ch, 1)
+        else:
+            self.use_fpn = False
+            self.classifier = torch.nn.Linear(int(out_channels[-1]), 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feats = self.encoder(x)
-        if isinstance(feats, (list, tuple)):
-            x = feats[-1]
+        if not isinstance(feats, (list, tuple)):
+            feats = [feats]
+        if self.use_fpn and len(feats) > 1:
+            pooled = [self.pool(f).flatten(1) for f in feats[1:]]
+            x = torch.cat(pooled, dim=1)
         else:
-            x = feats
-        x = self.pool(x).flatten(1)
+            x = self.pool(feats[-1]).flatten(1)
         x = self.dropout(x)
         return self.classifier(x)
 
@@ -1812,12 +1857,14 @@ def build_tile_classifier(
     enable_attention: bool = True,
     attention_reduction: int = 4,
     encoder_weights: Optional[str] = None,
+    use_fpn: bool = False,
 ) -> torch.nn.Module:
     """Tile-level classification modeli olusturur."""
     base_model = TileClassifier(
         encoder_name=encoder,
         in_channels=in_ch,
         encoder_weights=encoder_weights,
+        use_fpn=use_fpn,
     )
     if enable_attention:
         model = AttentionWrapper(base_model, in_ch, reduction=attention_reduction)
@@ -2570,6 +2617,57 @@ def _write_band_importance_report(
     txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return txt_path, json_path
+
+
+def _downsample_raster(input_path: Path, scale: float, output_path: Path) -> Path:
+    """Raster'ı verilen ölçeğe küçültüp geçici dosyaya yaz."""
+    with rasterio.open(input_path) as src:
+        new_h = max(1, int(round(src.height * scale)))
+        new_w = max(1, int(round(src.width * scale)))
+        transform = src.transform * src.transform.scale(
+            src.width / new_w,
+            src.height / new_h,
+        )
+        profile = src.profile.copy()
+        profile.update(height=new_h, width=new_w, transform=transform)
+        data = src.read(
+            out_shape=(src.count, new_h, new_w),
+            resampling=rasterio.enums.Resampling.bilinear,
+        )
+        with rasterio.open(output_path, "w", **profile) as dst:
+            dst.write(data)
+    LOGGER.info("  Ölçek %.2fx: %dx%d → %dx%d  (%s)", scale, src.height, src.width, new_h, new_w, output_path.name)
+    return output_path
+
+
+def _upsample_prob_map(prob_map: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    """Olasılık haritasını orijinal boyuta bilinear interpolasyon ile büyüt."""
+    from scipy.ndimage import zoom as _zoom
+    if prob_map.shape[0] == target_h and prob_map.shape[1] == target_w:
+        return prob_map
+    zoom_h = target_h / max(prob_map.shape[0], 1)
+    zoom_w = target_w / max(prob_map.shape[1], 1)
+    return _zoom(prob_map.astype(np.float32), (zoom_h, zoom_w), order=1).astype(np.float32)
+
+
+def _merge_prob_maps(
+    prob_maps: List[np.ndarray],
+    merge: str,
+    weights: Optional[Sequence[float]] = None,
+) -> np.ndarray:
+    """Birden fazla olasılık haritasını birleştir."""
+    if len(prob_maps) == 1:
+        return prob_maps[0]
+    stack = np.stack(prob_maps, axis=0)
+    if merge == "max":
+        return np.nanmax(stack, axis=0)
+    if merge == "mean":
+        return np.nanmean(stack, axis=0)
+    if merge == "weighted_mean":
+        w = np.array(weights if weights else [1.0] * len(prob_maps), dtype=np.float32)
+        w = w / w.sum()
+        return np.nansum(stack * w[:, None, None], axis=0)
+    raise ValueError(f"Bilinmeyen merge stratejisi: {merge}")
 
 
 def infer_tiled(
@@ -7481,10 +7579,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if enc_mode in ("", "none") and config.enable_deep_learning and model is not None:
         # Weight type belirleme (eğitilmiş mi, ImageNet mi)
         single_wt = "trained" if weights_path is not None else ("imagenet" if config.zero_shot_imagenet else "random")
-        
-        outputs = infer_tiled(
+
+        _infer_kwargs = dict(
             model=model,
-            input_path=input_path,
             band_idx=bands,
             task_type=dl_task,
             tile=config.tile,
@@ -7497,9 +7594,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             global_norm=config.global_norm,
             norm_sample_tiles=config.norm_sample_tiles,
             feather=config.feather,
-            precomputed_deriv=precomputed_deriv,
-            derivative_cache_tif=derivative_cache_tif,
-            derivative_cache_meta=derivative_cache_meta,
             enable_curvature=config.enable_curvature,
             enable_tpi=config.enable_tpi,
             encoder=config.encoder,
@@ -7516,6 +7610,114 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             save_band_importance=config.save_band_importance,
             band_importance_max_tiles=config.band_importance_max_tiles,
         )
+
+        ms_scales = tuple(float(s) for s in config.multiscale_scales) if config.enable_multiscale else (1.0,)
+        run_multiscale = config.enable_multiscale and len(ms_scales) > 1
+
+        if not run_multiscale:
+            # --- Tek ölçek (mevcut davranış) ---
+            outputs = infer_tiled(
+                input_path=input_path,
+                precomputed_deriv=precomputed_deriv,
+                derivative_cache_tif=derivative_cache_tif,
+                derivative_cache_meta=derivative_cache_meta,
+                **_infer_kwargs,
+            )
+        else:
+            # --- Multi-scale inference ---
+            import tempfile
+            LOGGER.info("")
+            LOGGER.info("=" * 70)
+            LOGGER.info("MULTI-SCALE INFERENCE: ölçekler=%s  birleştirme=%s",
+                        ms_scales, config.multiscale_merge)
+            LOGGER.info("=" * 70)
+
+            with rasterio.open(input_path) as _src:
+                orig_h, orig_w = _src.height, _src.width
+
+            scale_prob_maps: List[np.ndarray] = []
+            base_outputs: Optional[InferenceOutputs] = None
+            tmp_dir = Path(tempfile.mkdtemp(prefix="multiscale_"))
+
+            for si, scale in enumerate(ms_scales):
+                LOGGER.info("")
+                LOGGER.info("--- Ölçek %d/%d: %.2fx ---", si + 1, len(ms_scales), scale)
+
+                if abs(scale - 1.0) < 1e-6:
+                    scale_outputs = infer_tiled(
+                        input_path=input_path,
+                        precomputed_deriv=precomputed_deriv,
+                        derivative_cache_tif=derivative_cache_tif,
+                        derivative_cache_meta=derivative_cache_meta,
+                        **_infer_kwargs,
+                    )
+                    if base_outputs is None:
+                        base_outputs = scale_outputs
+                    if scale_outputs.prob_map is not None:
+                        scale_prob_maps.append(scale_outputs.prob_map)
+                    else:
+                        with rasterio.open(scale_outputs.prob_path) as _ps:
+                            scale_prob_maps.append(_ps.read(1).astype(np.float32))
+                else:
+                    scaled_path = tmp_dir / f"scaled_{scale:.2f}_{input_path.name}"
+                    _downsample_raster(input_path, scale, scaled_path)
+                    scale_outputs = infer_tiled(
+                        input_path=scaled_path,
+                        precomputed_deriv=None,
+                        derivative_cache_tif=None,
+                        derivative_cache_meta=None,
+                        **_infer_kwargs,
+                    )
+                    if base_outputs is None:
+                        base_outputs = scale_outputs
+                    if scale_outputs.prob_map is not None:
+                        small_prob = scale_outputs.prob_map
+                    else:
+                        with rasterio.open(scale_outputs.prob_path) as _ps:
+                            small_prob = _ps.read(1).astype(np.float32)
+                    upsampled = _upsample_prob_map(small_prob, orig_h, orig_w)
+                    scale_prob_maps.append(upsampled)
+                    try:
+                        scaled_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            LOGGER.info("")
+            LOGGER.info("Ölçekler birleştiriliyor: %s ...", config.multiscale_merge)
+            ms_weights = (
+                tuple(float(w) for w in config.multiscale_weights)
+                if config.multiscale_weights is not None
+                else None
+            )
+            merged_prob = _merge_prob_maps(scale_prob_maps, config.multiscale_merge, ms_weights)
+            merged_prob = np.clip(merged_prob, 0.0, 1.0)
+
+            merged_mask = (merged_prob >= config.th).astype(np.uint8)
+
+            assert base_outputs is not None
+            with rasterio.open(base_outputs.prob_path, "r+") as dst:
+                dst.write(merged_prob.astype(np.float32), 1)
+            with rasterio.open(base_outputs.mask_path, "r+") as dst:
+                dst.write(merged_mask, 1)
+
+            outputs = InferenceOutputs(
+                prob_path=base_outputs.prob_path,
+                mask_path=base_outputs.mask_path,
+                prob_map=merged_prob,
+                mask=merged_mask,
+                transform=base_outputs.transform,
+                crs=base_outputs.crs,
+                band_importance_txt=base_outputs.band_importance_txt,
+                band_importance_json=base_outputs.band_importance_json,
+            )
+            LOGGER.info("Multi-scale birleştirme tamamlandı. %d ölçek → merged prob map.", len(ms_scales))
+
+            try:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
         if outputs.band_importance_txt is not None:
             LOGGER.info("Band onem raporu: %s", outputs.band_importance_txt)
 

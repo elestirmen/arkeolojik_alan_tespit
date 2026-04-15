@@ -247,6 +247,22 @@ CONFIG: dict[str, object] = {
     # Train augment icin deterministik donme aci adimi.
     # 0.0: kapali, 30.0: [0,30,...,330] olacak sekilde 12x gorunum.
     "deterministic_rotate_step_deg": 30.0,
+
+    # scale_augment:
+    # Egitim sirasinda rastgele olcek degisikligi (zoom in/out) uygula.
+    # Model farkli boyutlardaki yapilari tanir hale gelir.
+    "scale_augment": True,
+
+    # scale_augment_range:
+    # Olcek araliginin alt ve ust siniri.
+    # 0.7 = %30 zoom out, 1.3 = %30 zoom in.
+    "scale_augment_min": 0.7,
+    "scale_augment_max": 1.3,
+
+    # use_fpn_classifier:
+    # True ise TileClassifier encoder'in tum katmanlarindan feature toplar (FPN-style).
+    # False ise sadece son katmani kullanir (eski davranis).
+    "use_fpn_classifier": True,
 }
 # ===============================================
 
@@ -409,6 +425,9 @@ class ArchaeologyDataset(Dataset):
         task_type: str = "segmentation",
         tile_label_min_positive_ratio: float = 0.0,
         deterministic_rotate_step_deg: float = 0.0,
+        scale_augment: bool = False,
+        scale_augment_min: float = 0.7,
+        scale_augment_max: float = 1.3,
     ):
         """
         Args:
@@ -423,6 +442,9 @@ class ArchaeologyDataset(Dataset):
         self.file_format = file_format
         self.task_type = str(task_type).strip().lower()
         self.tile_label_min_positive_ratio = float(tile_label_min_positive_ratio)
+        self.scale_augment = bool(scale_augment) and self.augment
+        self.scale_augment_min = float(scale_augment_min)
+        self.scale_augment_max = float(scale_augment_max)
         self.deterministic_rotate_step_deg = float(deterministic_rotate_step_deg)
         if not 0.0 <= self.deterministic_rotate_step_deg < 360.0:
             raise ValueError(
@@ -680,8 +702,33 @@ class ArchaeologyDataset(Dataset):
 
         return image, mask
 
+    @staticmethod
+    def _scale_augment_image(image: np.ndarray, scale: float) -> np.ndarray:
+        """Rastgele zoom in/out uygula. image: (C, H, W)."""
+        if abs(scale - 1.0) < 1e-4:
+            return image
+        C, H, W = image.shape
+        new_h, new_w = max(1, int(round(H * scale))), max(1, int(round(W * scale)))
+        zoom_factors = (1.0, new_h / H, new_w / W)
+        scaled = ndimage.zoom(image, zoom_factors, order=1, mode="nearest")
+        sC, sH, sW = scaled.shape
+        out = np.zeros_like(image)
+        if sH >= H and sW >= W:
+            r0 = (sH - H) // 2
+            c0 = (sW - W) // 2
+            out = scaled[:, r0:r0 + H, c0:c0 + W].copy()
+        else:
+            r0 = (H - sH) // 2
+            c0 = (W - sW) // 2
+            out[:, r0:r0 + sH, c0:c0 + sW] = scaled
+        return out.astype(np.float32)
+
     def _augment_image(self, image: np.ndarray) -> np.ndarray:
-        """Tile-level classification icin yalnizca goruntu augmentasyonu."""
+        """Tile-level classification icin goruntu augmentasyonu."""
+
+        if self.scale_augment:
+            s = np.random.uniform(self.scale_augment_min, self.scale_augment_max)
+            image = self._scale_augment_image(image, s)
 
         if np.random.random() > 0.5:
             image = np.flip(image, axis=2).copy()
@@ -1096,7 +1143,15 @@ class TrainingConfig:
     auto_val_ratio: float = 0.2
     auto_val_reason: str = ""
     deterministic_rotate_step_deg: float = 0.0
-    
+
+    # Scale augmentation
+    scale_augment: bool = True
+    scale_augment_min: float = 0.7
+    scale_augment_max: float = 1.3
+
+    # FPN-style multi-level classifier
+    use_fpn_classifier: bool = True
+
     # Çıktı
     output_dir: Path = field(default_factory=lambda: Path("checkpoints"))
     save_every_epoch: bool = True
@@ -1620,7 +1675,11 @@ def _expand_base_indices_to_dataset_indices(
 
 
 class TileClassifier(nn.Module):
-    """SMP encoder tabanli basit tile-level binary classifier."""
+    """SMP encoder tabanli tile-level binary classifier.
+
+    use_fpn=True ise encoder'in tum katmanlarindan feature toplar
+    (FPN-style multi-level aggregation). False ise sadece son katman.
+    """
 
     def __init__(
         self,
@@ -1628,6 +1687,7 @@ class TileClassifier(nn.Module):
         encoder_name: str,
         in_channels: int,
         dropout: float = 0.2,
+        use_fpn: bool = False,
     ):
         super().__init__()
         smp_lib = _require_smp()
@@ -1640,17 +1700,29 @@ class TileClassifier(nn.Module):
         encoder_channels = list(getattr(self.encoder, "out_channels", []))
         if not encoder_channels:
             raise ValueError(f"Encoder cikis kanallari okunamadi: {encoder_name}")
+
+        self.use_fpn = bool(use_fpn)
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.dropout = nn.Dropout(p=float(dropout)) if float(dropout) > 0.0 else nn.Identity()
-        self.classifier = nn.Linear(int(encoder_channels[-1]), 1)
+
+        if self.use_fpn and len(encoder_channels) > 1:
+            fpn_ch = sum(int(c) for c in encoder_channels[1:])
+            self.classifier = nn.Linear(fpn_ch, 1)
+        else:
+            self.use_fpn = False
+            self.classifier = nn.Linear(int(encoder_channels[-1]), 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         features = self.encoder(x)
-        if isinstance(features, (list, tuple)):
-            x = features[-1]
+        if not isinstance(features, (list, tuple)):
+            features = [features]
+
+        if self.use_fpn and len(features) > 1:
+            pooled = [self.pool(f).flatten(1) for f in features[1:]]
+            x = torch.cat(pooled, dim=1)
         else:
-            x = features
-        x = self.pool(x).flatten(1)
+            x = self.pool(features[-1]).flatten(1)
+
         x = self.dropout(x)
         return self.classifier(x)
 
@@ -1671,6 +1743,7 @@ def create_model(config: TrainingConfig) -> nn.Module:
         base_model = TileClassifier(
             encoder_name=config.encoder,
             in_channels=config.in_channels,
+            use_fpn=config.use_fpn_classifier,
         )
     else:
         smp_lib = _require_smp()
@@ -1996,6 +2069,9 @@ def train(config: TrainingConfig) -> Path:
         task_type=config.task_type,
         tile_label_min_positive_ratio=config.tile_label_min_positive_ratio,
         deterministic_rotate_step_deg=float(config.deterministic_rotate_step_deg),
+        scale_augment=config.scale_augment,
+        scale_augment_min=config.scale_augment_min,
+        scale_augment_max=config.scale_augment_max,
     )
     auto_val_holdout_stats: Optional[Dict[str, int]] = None
     train_base_indices_for_holdout: Optional[List[int]] = None
@@ -2738,6 +2814,22 @@ def main():
         ),
     )
     parser.add_argument(
+        "--scale-augment",
+        action=argparse.BooleanOptionalAction,
+        default=bool(CONFIG["scale_augment"]),
+        help="Egitimde rastgele zoom in/out augmentasyonu.",
+    )
+    parser.add_argument("--scale-augment-min", type=float, default=float(CONFIG["scale_augment_min"]),
+                        help="Scale augment min (0.7 = %%30 zoom out).")
+    parser.add_argument("--scale-augment-max", type=float, default=float(CONFIG["scale_augment_max"]),
+                        help="Scale augment max (1.3 = %%30 zoom in).")
+    parser.add_argument(
+        "--use-fpn-classifier",
+        action=argparse.BooleanOptionalAction,
+        default=bool(CONFIG["use_fpn_classifier"]),
+        help="TileClassifier icin FPN-style multi-level feature aggregation.",
+    )
+    parser.add_argument(
         "--monitor-channel-importance",
         action=argparse.BooleanOptionalAction,
         default=bool(CONFIG["monitor_channel_importance"]),
@@ -3080,6 +3172,10 @@ def main():
         auto_val_ratio=float(auto_val_ratio),
         auto_val_reason=str(auto_val_reason),
         deterministic_rotate_step_deg=float(args.deterministic_rotate_step_deg),
+        scale_augment=bool(args.scale_augment),
+        scale_augment_min=float(args.scale_augment_min),
+        scale_augment_max=float(args.scale_augment_max),
+        use_fpn_classifier=bool(args.use_fpn_classifier),
         output_dir=Path(args.output),
         save_every_epoch=bool(CONFIG["save_every_epoch"]),
         epoch_dir=str(CONFIG["epoch_dir"]),

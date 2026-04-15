@@ -17,6 +17,8 @@ Kayıtlı profil **karo düzeyinde sınıflandırma** (`dl_task: tile_classifica
 - **`tile`**, **`overlap`** ve **`bands`** çıkarım sırasında `training_metadata.json` içinden kilitlenir; YAML’da yalnızca `overlap` değerini artırarak uyumsuzluğu gidermeyin — farklı overlap için veri üretimini ve eğitimi o overlap ile yeniden yapın.
 - Başarılı bir `training.py` çalışmasından sonra en iyi ağırlıklar `checkpoints/active/model.pth` dosyasına, metadata ise `checkpoints/active/training_metadata.json` dosyasına kopyalanır (`weights` yolunu `checkpoints/active/` altındaki başka bir checkpoint’e de yönlendirebilirsiniz).
 
+**Model girdi kanalları (güncel kod):** derin öğrenme tensörü **5 kanaldır** — **R, G, B, SVF, SLRM** — sırasıyla `archeo_shared/channels.py` içindeki `MODEL_CHANNEL_NAMES` ile tanımlıdır. GeoTIFF **5 bantlı** kalır (RGB + DSM + DTM). **SVF** (Sky-View Factor) ve **SLRM** (RVT ile DTM üzerinde hesaplanan Simple Local Relief Model) `archaeo_detect.py` ve veri hazırlık betikleri **içinde türetilir**; ayrı GeoTIFF bandı değildirler. Eski belgelerde geçen **12 kanallı** tensör (nDSM, çok ölçekli TPI, ek RVT açıklık kanalları vb.) **önceki bir şemayı** anlatır; mevcut eğitim ve çıkarım yolu bu yapıyı kullanmaz.
+
 ---
 
 ## 📑 İçindekiler
@@ -58,8 +60,8 @@ Kayıtlı profil **karo düzeyinde sınıflandırma** (`dl_task: tile_classifica
 - ✅ **Topluluk Öğrenme**: Daha güvenilir tespit için birden fazla kodlayıcının sonuçlarını birleştirir
 - ✅ **Çok Ölçekli Analiz**: Farklı boyutlardaki yapıları tespit eder
 - ✅ **🆕 Etiketli Nesne Tespiti**: YOLO11 ile 80 farklı nesne sınıfının otomatik etiketlenmesi (ağaçlar, binalar, araçlar vb.)
-- ✅ **🆕 12 Kanallı Giriş**: Gelişmiş tespit için RGB + DSM + DTM + RVT türevleri + nDSM + TPI
-- ✅ **🆕 CBAM Dikkat**: Dinamik özellik ağırlıklandırma için kanal ve uzamsal dikkat mekanizması
+- ✅ **🆕 5 kanallı DL yığını**: Rasterdan R, G, B; DTM üzerinden RVT ile **SVF** ve **SLRM** — kodda birleştirilir, ekstra GeoTIFF bandı değildir
+- ✅ **🆕 CBAM dikkat (isteğe bağlı)**: `training.py` içinde etkinleştirilebilir; kayıtlı `CONFIG` varsayılanında genelde kapalı (`no_attention: true`)
 
 ### 🔧 Teknik Özellikler
 - 🚀 **Karo Tabanlı İşleme**: Büyük görüntüler için bellek verimli işleme
@@ -491,14 +493,15 @@ Sistem davranışı `config.yaml` dosyası tarafından kontrol edilir. Bu dosya 
 4. **Eğitilmiş-tekil mod**: `trained_model_only` — `true` iken tek checkpoint + metadata (`weights`, `training_metadata`); `tile` / `overlap` / `bands` metadata’dan kilitlenir
 5. **Derin öğrenme**: Mimari, encoder, ağırlıklar, `zero_shot_imagenet`, dikkat / bant önem raporu
 6. **Klasik Yöntemler**: RVT, Hessian, Morfoloji parametreleri
-7. **Füzyon**: Hibrit kombinasyon (`alpha`, …) — hem DL hem klasik açık olmalıdır
-8. **YOLO11** (isteğe bağlı): Yalnızca RGB; genelde tile sınıflandırma ön ayarında kapalıdır
-9. **Karo İşleme**: Bellek ve performans; `tile` / `overlap` belge ile metadata kilitlenmesi
-10. **Normalizasyon**: Veri ön işleme
-11. **Maskeleme**: Yüksek yapılar (`mask_talls`, `rgb_only`)
-12. **Vektörleştirme**: CBS çıktısı (`vectorize`, `min_area`, `export_candidate_excel`, …)
-13. **Performans**: Cihaz, `half`, `seed`, `verbose`
-14. **Önbellek**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster önbellek ayarları
+7. **Gelişmiş topografik analiz (legacy / varsayılan preset’te kapalı)**: `enable_curvature`, `enable_tpi`, `tpi_radii` — `config.yaml` ve `archaeo_detect.py` içinde deneysel kullanım için durur; **kayıtlı 5 kanallı DL şeması** eğri/TPI’yi model tensörüne eklemez (`config.yaml` üst yorumlarına bakın).
+8. **Füzyon**: Hibrit kombinasyon (`alpha`, …) — hem DL hem klasik açık olmalıdır
+9. **YOLO11** (isteğe bağlı): Yalnızca RGB; genelde tile sınıflandırma ön ayarında kapalıdır
+10. **Karo İşleme**: Bellek ve performans; `tile` / `overlap` belge ile metadata kilitlenmesi
+11. **Normalizasyon**: Veri ön işleme
+12. **Maskeleme**: Yüksek yapılar (`mask_talls`, `rgb_only`)
+13. **Vektörleştirme**: CBS çıktısı (`vectorize`, `min_area`, `export_candidate_excel`, …)
+14. **Performans**: Cihaz, `half`, `seed`, `verbose`
+15. **Önbellek**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster önbellek ayarları
 
 #### Hızlı Yapılandırma Senaryoları:
 
@@ -742,34 +745,27 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
 
 **Adımlar:**
 
-1. **RVT Türevleri Hesaplama**
-   - Gökyüzü Görünürlük Faktörü (SVF)
-   - Açıklık (Pozitif & Negatif)
-   - Yerel Kabartma Modeli (LRM)
-   - Eğim
+1. **5 kanallı DL tensörünü oluşturma**
+   - GeoTIFF’ten **RGB** ve **DSM/DTM** okunur (`config.yaml`’daki bant seçimine göre)
+   - Doldurulmuş DTM üzerinde RVT ile **SVF** ve **SLRM** hesaplanır (`archaeo_detect.py` içindeki `compute_derivatives_with_rvt` vb.)
+   - `stack_channels(rgb, svf, slrm)` ile `(5, H, W)` tensörü üretilir; kanal sırası `MODEL_CHANNEL_NAMES`
 
-2. **12 Kanallı Tensör Oluşturma** (Güncellenmiş!)
-   - 3 x RGB
-   - 1 x DSM (ham)
-   - 1 x DTM (ham)
-   - 5 x RVT türevleri (SVF, Poz/Neg Açıklık, LRM, Eğim)
-   - 1 x nDSM (DSM - DTM)
-   - 1 x TPI (Topografik Konum İndeksi)
+   Açıklık, eğim vb. diğer RVT çıktıları **klasik** veya deneysel yollarda kullanılabilir; bu DL yığınında ayrı düzlem olarak yer almazlar.
 
-3. **Normalizasyon**
+2. **Normalizasyon**
    - Global veya yerel yüzdelik tabanlı
    - %2-%98 aralığına ölçekleme
 
-4. **Karo Tabanlı İşleme**
+3. **Karo Tabanlı İşleme**
    - Büyük görüntü küçük karolara bölünür
    - Her karo U-Net'e beslenir
    - Olasılık haritası oluşturulur
 
-5. **Yumuşatma (Feathering)**
+4. **Yumuşatma (Feathering)**
    - Karolar arasındaki geçişler yumuşatılır
    - Sorunsuz mozaik oluşturulur
 
-6. **Eşikleme**
+5. **Eşikleme**
    - Olasılık > eşik → Maske = 1
    - Olasılık ≤ eşik → Maske = 0
 
@@ -1236,13 +1232,13 @@ HATA: archaeo_detect.py'den attention modülleri import edilemedi.
 
 **Belirtiler:**
 ```
-ValueError: Expected 12 channels but got 9
+ValueError: Expected 5 channels but got X
 ```
 
 **Çözümler:**
 1. **Eğitim verisini yeniden oluşturun**: `egitim_verisi_olusturma.py`'yi doğru parametrelerle kullanın
 2. **metadata.json'u kontrol edin**: `num_channels`'ın gerçek veriyle eşleştiğini doğrulayın
-3. **Dosya formatını doğrulayın**: `.npz` dosyalarının `(12, H, W)` şeklinde `image` anahtarı içerdiğinden emin olun
+3. **Dosya formatını doğrulayın**: `.npz` dosyalarının güncel şemada `(5, H, W)` şeklinde `image` anahtarı içerdiğinden emin olun
 
 ### Hata Ayıklama Modu
 
@@ -1280,7 +1276,7 @@ if train_images:
     if 'image' in sample.files:
         img = sample['image']
         print(f"Görüntü şekli: {img.shape}")
-        print(f"Beklenen: (12, 256, 256), Alınan: {img.shape}")
+        print(f"Beklenen: (5, 256, 256), Alınan: {img.shape}")
 ```
 
 **Eğitimi gerçek zamanlı izleyin:**
@@ -1310,7 +1306,7 @@ C: Sistem **öncelikli olarak İHA (drone) nadir görüntüleri** için tasarlan
 ### 🔧 Teknik Sorular
 
 **S: Kaç bant gerekli?**  
-C: Minimum 3 bant (RGB). Optimum 5 bant (RGB + DSM + DTM). **12 kanal** ham DSM/DTM + RVT türevleri + nDSM + TPI ile otomatik oluşturulur.
+C: Minimum 3 bant (RGB). Güncel süreçte **5 bant** (RGB + DSM + DTM) kullanın. **Model tensörü** ise **5 kanaldır**: R, G, B ve DTM üzerinden kod içinde üretilen **SVF** ile **SLRM** (`archaeo_detect.py` içindeki `stack_channels`).
 
 **S: Önbellek dosyaları ne kadar yer kaplar?**  
 C: Tipik olarak 10-50 MB. Giriş dosya boyutuna bağlıdır. Yüksek çözünürlüklü veriler için daha büyük (birkaç GB) olabilir.
@@ -1383,7 +1379,7 @@ python archaeo_detect.py --input yeni_alan.tif
 │         │                     │                     │                        │
 │         ▼                     ▼                     ▼                        │
 │   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐              │
-│   │ GeoTIFF +    │      │ 12 kanallı   │      │ Eğitilmiş    │              │
+│   │ GeoTIFF +    │      │ 5 kanallı    │      │ Eğitilmiş    │              │
 │   │ İkili Maske  │      │ NPZ karolar  │      │ .pth model   │              │
 │   └──────────────┘      └──────────────┘      └──────────────┘              │
 │                                                      │                       │
@@ -1654,7 +1650,7 @@ with rasterio.open('maske.tif', 'w', driver='GTiff',
 
 ### 📦 Adım 2: Eğitim Karoları Oluşturma
 
-`egitim_verisi_olusturma.py` betiği GeoTIFF + maskenizi 12 kanallı eğitim karolarına dönüştürür.
+`egitim_verisi_olusturma.py` betiği GeoTIFF + maskenizi **5 kanallı** (R, G, B, SVF, SLRM) eğitim karolarına dönüştürür.
 
 #### Temel Komut
 
@@ -1665,57 +1661,41 @@ python egitim_verisi_olusturma.py \
   --output training_data
 ```
 
-#### İnteraktif Mod
+#### IDE / CLI
 
-Yönlendirmeli giriş için argümansız çalıştırın:
-
-```bash
-python egitim_verisi_olusturma.py
-# Sırayla sorar: Giriş dosyası → Maske dosyası → Çıktı dizini → Karo boyutu
-```
+Betik etkileşimli dosya penceresi açmaz. Ya `--input` / `--mask` / `--output` verin ya da betikteki `CONFIG` sözlüğünü doldurup IDE’den çalıştırın.
 
 #### İçeride Ne Olur
 
 ```
 Giriş GeoTIFF (5 bant)           Ground Truth Maske
-       │                                │
-       ▼                                │
-┌──────────────────┐                    │
-│ RGB + DSM + DTM  │                    │
-│ bantlarını oku   │                    │
-└────────┬─────────┘                    │
-         │                              │
-         ▼                              │
-┌──────────────────┐                    │
-│ RVT türevlerini  │                    │
-│ hesapla:         │                    │
-│ - SVF            │                    │
-│ - Açıklık (+/-)  │                    │
-│ - LRM, Eğim      │                    │
-└────────┬─────────┘                    │
-         │                              │
-         ▼                              │
-┌──────────────────┐                    │
-│ Hesapla:         │                    │
-│ - DSM/DTM (ham)  │                    │
-│ - TPI            │                    │
-│ - nDSM           │                    │
-└────────┬─────────┘                    │
-         │                              │
-         ▼                              │
-┌──────────────────┐                    │
-│ 12 kanalı yığınla│◄───────────────────┘
-│ + 256x256        │
-│ karolara böl     │
-└────────┬─────────┘
-         │
-         ▼
+       |                                |
+       v                                |
++------------------+                    |
+| RGB + DSM + DTM  |                    |
+| bantlarını oku   |                    |
++--------+---------+                    |
+         |                              |
+         v                              |
++------------------+                    |
+| DTM üzerinde RVT |                    |
+| SVF + SLRM       |                    |
++--------+---------+                    |
+         |                              |
+         v                              |
++------------------+                    |
+| stack_channels   |<-------------------+
+| R,G,B,SVF,SLRM   |
+| 256x256 karolar  |
++--------+---------+
+         |
+         v
    training_data/
-   ├── train/images/*.npz  (12, 256, 256)
-   ├── train/masks/*.npz   (256, 256)
-   ├── val/images/*.npz
-   ├── val/masks/*.npz
-   └── metadata.json
+   |-- train/images/*.npz  (5, 256, 256)
+   |-- train/masks/*.npz   (256, 256)
+   |-- val/images/*.npz
+   |-- val/masks/*.npz
+   `-- metadata.json
 ```
 
 #### Temel Parametreler
@@ -1730,7 +1710,6 @@ Tam liste için: `python egitim_verisi_olusturma.py --help`. Sık kullanılanlar
 | `--tile-size` / `-t` | `256` | Karo boyutu (piksel) |
 | `--overlap` | `128` | Kaydırmalı pencere örtüşmesi (eğitim/çıkarımda metadata ile tutarlı kalmalı) |
 | `--bands` / `-b` | `1,2,3,4,5` | 1 tabanlı GeoTIFF bant indeksleri: R, G, B, DSM, DTM |
-| `--tpi-radii` | `5,15,30` | Virgülle ayrılmış TPI yarıçapları (piksel) |
 | `--min-positive` | `0.0` | Karoda minimum pozitif piksel oranı |
 | `--tile-label-min-positive-ratio` | `CONFIG`’ten | Karo sınıfı etiketi için minimum pozitif oran (0 = en az bir pozitif piksel yeter) |
 | `--max-nodata` | `0.3` | Karo başına izin verilen maksimum NoData oranı |
@@ -1753,28 +1732,23 @@ Tam liste için: `python egitim_verisi_olusturma.py --help`. Sık kullanılanlar
 | **Dengesiz veri** (<%5 arkeolojik) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
 | **Hızlı test** | `--tile-size 256 --train-ratio 0.9` |
 
-#### Çıktı: 12 Kanal Açıklaması
+#### Çıktı: model tensörü (5 kanal)
 
-Kanonik sıra `archeo_shared/channels.py` içindeki `MODEL_CHANNEL_NAMES` ile tanımlıdır; eğitim ve çıkarım `archaeo_detect.py` içindeki `stack_channels()` ile aynı düzeni kullanır.
+Kanonik sıra `archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`; `archaeo_detect.py` içindeki `stack_channels()` ile aynıdır.
 
-| # | Kanal | Ne Tespit Eder |
-|---|-------|----------------|
-| 0-2 | RGB | Renk/doku anomalileri |
-| 3 | DSM | Yüzey yükseklik bağlamı |
-| 4 | DTM | Zemin yükseklik bağlamı |
-| 5 | SVF | Tümülüsler, höyükler (ufuk görünürlüğü) |
-| 6 | Pozitif Açıklık | Yükseltilmiş yapılar |
-| 7 | Negatif Açıklık | Hendekler, çöküntüler |
-| 8 | LRM | Yerel topografik anomaliler |
-| 9 | Eğim | Teraslar, duvarlar |
-| 10 | nDSM | Zemin üstü yüzey yüksekliği |
-| 11 | TPI | Göreceli yükseklik (höyükler/çöküntüler) |
+| # | Kanal | Kaynak |
+|---|-------|--------|
+| 0–2 | R, G, B | GeoTIFF’te seçilen RGB bantları |
+| 3 | SVF | DTM üzerinde RVT Sky-View Factor |
+| 4 | SLRM | DTM üzerinde RVT Simple Local Relief Model (gerekirse Gaussian yedek) |
+
+DSM/DTM **bantları** maskeleme ve türev hesabı için hâlâ gereklidir; kaydedilen `image` tensöründe yalnızca RGB + iki kabartma kanalı bulunur.
 
 ---
 
 ### 🚀 Adım 3: Modeli Eğitme
 
-12 kanallı verileriniz üzerinde CBAM dikkat mekanizmalı U-Net modeli eğitmek için `training.py` kullanın.
+**5 kanallı** karolarınız üzerinde SMP tabanlı U-Net (ve ilgili başlıklar) eğitmek için `training.py` kullanın; **CBAM** isteğe bağlıdır (`CONFIG` içinde `no_attention`).
 
 #### Temel Eğitim
 
@@ -1782,7 +1756,7 @@ Kanonik sıra `archeo_shared/channels.py` içindeki `MODEL_CHANNEL_NAMES` ile ta
 python training.py --data training_data
 ```
 
-Bu mantıklı varsayılanları kullanır: U-Net + ResNet34 + 50 epoch + CBAM dikkat + karma hassasiyet.
+Kayıtlı `training.py` `CONFIG` değerlerini kullanır (ör. **U-Net**, **ResNet50**, **BCE** kaybı, **patience 20**, **CBAM kapalı** — `no_attention: true`, **AMP** genelde açık). `publish_active: true` iken en iyi ağırlıklar `checkpoints/active/` altına kopyalanır.
 
 #### Tüm Seçeneklerle Tam Komut
 
@@ -1790,28 +1764,30 @@ Bu mantıklı varsayılanları kullanır: U-Net + ResNet34 + 50 epoch + CBAM dik
 python training.py \
   --data training_data \
   --arch Unet \
-  --encoder resnet34 \
+  --encoder resnet50 \
   --epochs 50 \
-  --batch-size 8 \
+  --batch-size 16 \
   --lr 1e-4 \
-  --loss combined \
-  --patience 10
+  --loss bce \
+  --patience 20
 ```
 
 #### Temel Parametreler
 
 | Parametre | Varsayılan | Seçenekler / Notlar |
 |-----------|------------|---------------------|
-| `--data` | `training_data` | Adım 2 çıktısının yolu |
+| `--data` | `training_data` | Adım 2 çıktısının yolu (eşleştirilmiş veya Positive/Negative düzeni) |
+| `--task` | `tile_classification` | `segmentation` veya `tile_classification` |
 | `--arch` | `Unet` | `Unet`, `UnetPlusPlus`, `DeepLabV3Plus`, `FPN` |
-| `--encoder` | `resnet34` | `resnet50`, `efficientnet-b3`, `densenet121` |
+| `--encoder` | `resnet50` | `resnet34`, `efficientnet-b3`, `densenet121` |
 | `--epochs` | `50` | Daha fazla = potansiyel olarak daha iyi (erken durdurma ile) |
-| `--batch-size` | `8` | GPU belleği izin veriyorsa artırın |
+| `--batch-size` | `16` | GPU belleği izin veriyorsa artırın |
 | `--lr` | `1e-4` | Kayıp salınıyorsa azaltın |
-| `--loss` | `combined` | `bce`, `dice`, `combined`, `focal` |
-| `--patience` | `10` | N epoch iyileşme yoksa erken durdurma |
-| `--no-attention` | Kapalı | CBAM dikkatini devre dışı bırak |
-| `--no-amp` | Kapalı | Karma hassasiyeti (FP16) devre dışı bırak |
+| `--loss` | `bce` | `bce` / `focal` (`tile_classification`); `segmentation` için ayrıca `dice` / `combined` |
+| `--balance-mode` | `auto` | `auto`, `manual`, `none` (BCE tarafı) |
+| `--patience` | `20` | N epoch iyileşme yoksa erken durdurma |
+| `--no-attention` | açık (`CONFIG` ile) | Varsayılan **true** → CBAM **kapalı**; açmak için `CONFIG`’ta `no_attention: false` |
+| `--no-amp` | kapalı | Karma hassasiyeti (FP16) kapatır |
 
 #### Doğru Ayarları Seçme
 
@@ -1835,9 +1811,9 @@ python training.py \
 
 | Kayıp | Ne Zaman Kullanılır |
 |-------|---------------------|
-| `combined` | **Varsayılan** - çoğu durum için çalışır |
-| `focal` | Dengesiz veri (az arkeolojik piksel) |
-| `dice` | Küçük nesneler, örtüşme odaklı |
+| `bce` | **`training.py` CONFIG varsayılanı**; `tile_classification` için `focal` ile birlikte uygun seçenekler |
+| `focal` | Karo etiketlerinde güçlü sınıf dengesizliği |
+| `combined` / `dice` | Öncelikle **segmentation** (piksel maskesi) görevi için |
 
 #### Eğitim Çıktısı
 
@@ -1933,7 +1909,7 @@ cat training_data/metadata.json | python -m json.tool
 
 # Veri yüklemeyi test et
 python -c "import numpy as np; d=np.load('training_data/train/images/tile_00000_00000.npz'); print(d['image'].shape)"
-# Beklenen: (12, 256, 256)
+# Beklenen: (5, 256, 256)
 ```
 
 ---
@@ -1983,10 +1959,10 @@ python egitim_verisi_olusturma.py \
 python training.py \
   --data training_data \
   --arch Unet \
-  --encoder resnet34 \
+  --encoder resnet50 \
   --epochs 50 \
   --batch-size 16 \
-  --loss combined
+  --loss bce
 
 # 3. Yeni alanda çıkarım yap
 python archaeo_detect.py \
@@ -2013,8 +1989,8 @@ python archaeo_detect.py \
 
 Proje, özel modeller eğitmek için iki özel betik içerir:
 
-- **`egitim_verisi_olusturma.py`**: GeoTIFF + ground truth maskelerinden 12 kanallı eğitim karoları oluşturur
-- **`training.py`**: CBAM Dikkat desteğiyle U-Net modelleri eğitir
+- **`egitim_verisi_olusturma.py`**: GeoTIFF + ground truth maskelerinden **5 kanallı** eğitim karoları oluşturur
+- **`training.py`**: SMP U-Net ailesinde eğitim; **CBAM** isteğe bağlı (`no_attention` / `CONFIG`)
 
 **Hızlı Başlangıç:**
 
@@ -2030,26 +2006,17 @@ python archaeo_detect.py
 ```
 
 **Temel Özellikler:**
-- ✅ 12 kanallı giriş (RGB + DSM + DTM + RVT + nDSM + TPI)
-- ✅ CBAM Dikkat (kanal + uzamsal)
-- ✅ Birden fazla kayıp fonksiyonu (BCE, Dice, Birleşik, Focal)
+- ✅ 5 kanallı giriş (R, G, B, SVF, SLRM) — çıkarımla uyumlu
+- ✅ İsteğe bağlı CBAM dikkat (`training.py`)
+- ✅ Kayıplar: **BCE / Focal** (`tile_classification`); **BCE / Dice / Combined / Focal** (`segmentation`)
 - ✅ Karma hassasiyet eğitimi
 - ✅ Erken durdurma ve checkpoint kaydetme
 
 Tam dokümantasyon, örnekler ve sorun giderme için [Model Eğitimi Kılavuzu](#-model-eğitimi-kılavuzu) bölümüne bakın.
 
-### Özel Kodlayıcı Ekleme
+### Kodlayıcı seçimi
 
-Yeni bir kodlayıcı eklemek için:
-
-```python
-# archaeo_detect.py içinde
-SUPPORTED_ENCODERS = [
-    'resnet34', 'resnet50',
-    'efficientnet-b3',
-    'sizin_ozel_kodlayiciniz'  # Yeni kodlayıcı ekle
-]
-```
+Kodlayıcılar **Segmentation Models PyTorch** omurga adlarıdır (`resnet34`, `resnet50`, `efficientnet-b3`, …). `config.yaml` içindeki `encoder` / `encoders` veya CLI bayraklarıyla seçin. Yüklü `segmentation-models-pytorch` sürümünüzün desteklediği ve checkpoint’inizle eşleşen adları kullanın.
 
 ### API Kullanımı
 
@@ -2119,7 +2086,8 @@ python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumul
 arkeolojik_alan_tespit/            # proje kökü (örnek ad)
 ├── archaeo_detect.py              # Ana tespit betiği
 ├── archeo_shared/                 # Ortak kanal şeması ve model yardımcıları
-│   └── channels.py                # MODEL_CHANNEL_NAMES, metadata şema sürümü
+│   ├── channels.py                # MODEL_CHANNEL_NAMES, metadata şema sürümü
+│   └── modeling.py                # CBAM, AttentionWrapper
 ├── egitim_verisi_olusturma.py     # Eğitim verisi oluşturma
 ├── training.py                    # Model eğitim betiği
 ├── evaluation.py                  # Değerlendirme metrikleri
@@ -2130,7 +2098,7 @@ arkeolojik_alan_tespit/            # proje kökü (örnek ad)
 ├── README_TR.md                   # Türkçe dokümantasyon (bu dosya)
 ├── training_data/                  # Oluşturulan eğitim karoları
 │   ├── train/
-│   │   ├── images/                 # 12 kanallı görüntü karoları (.npz)
+│   │   ├── images/                 # 5 kanallı görüntü karoları (.npz)
 │   │   └── masks/                  # İkili maske karoları (.npz)
 │   ├── val/
 │   │   ├── images/
@@ -2247,6 +2215,6 @@ Bu projeyi akademik çalışmanızda kullanırsanız, lütfen şu şekilde atıf
 <div align="center">
 
 Geliştirici: Ahmet Ertuğrul Arık  
-Son güncelleme: Mart 2026
+Son güncelleme: Nisan 2026
 
 </div>
