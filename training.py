@@ -1569,6 +1569,39 @@ def _build_auto_val_holdout_indices(
     return train_indices, val_indices, stats
 
 
+def _build_auto_val_holdout_from_dataset(
+    train_dataset: ArchaeologyDataset,
+    *,
+    holdout_ratio: float,
+    seed: int,
+) -> Tuple[List[int], List[int], Dict[str, int]]:
+    """Train dataset'ten base tile etiketlerini cikarip stratified val holdout uret."""
+    base_labels: List[float] = []
+    if (
+        train_dataset.task_type == "tile_classification"
+        and train_dataset.tile_labels is not None
+    ):
+        base_labels = [float(value) for value in train_dataset.tile_labels]
+    else:
+        for img_path in train_dataset.image_files:
+            mask_path = train_dataset.masks_dir / img_path.name
+            if not mask_path.exists():
+                raise FileNotFoundError(f"Maske dosyasi bulunamadi: {mask_path}")
+            mask = _load_mask_array(mask_path, train_dataset.file_format)
+            base_labels.append(
+                _mask_to_tile_label(
+                    mask,
+                    min_positive_ratio=float(train_dataset.tile_label_min_positive_ratio),
+                )
+            )
+
+    return _build_auto_val_holdout_indices(
+        base_labels,
+        holdout_ratio=holdout_ratio,
+        seed=seed,
+    )
+
+
 def _expand_base_indices_to_dataset_indices(
     dataset: ArchaeologyDataset,
     base_indices: Sequence[int],
@@ -1967,14 +2000,9 @@ def train(config: TrainingConfig) -> Path:
     auto_val_holdout_stats: Optional[Dict[str, int]] = None
     train_base_indices_for_holdout: Optional[List[int]] = None
     if config.auto_val_from_train:
-        if train_dataset.task_type != "tile_classification" or train_dataset.tile_labels is None:
-            raise ValueError(
-                "auto_val_from_train yalnizca explicit tile etiketi olan "
-                "tile_classification veri setlerinde kullanilabilir."
-            )
         train_base_indices_for_holdout, val_base_indices, auto_val_holdout_stats = (
-            _build_auto_val_holdout_indices(
-                train_dataset.tile_labels,
+            _build_auto_val_holdout_from_dataset(
+                train_dataset,
                 holdout_ratio=float(config.auto_val_ratio),
                 seed=int(config.val_sample_seed),
             )
@@ -2792,7 +2820,8 @@ def main():
 
     # Etiket dağılımını doğrula (tamamı negatif veri sessizce eğitime girmesin)
     allow_missing_val = bool(
-        args.task == "tile_classification" and data_layout == "classification_folders"
+        (args.task == "tile_classification" and data_layout == "classification_folders")
+        or data_layout == "paired"
     )
     file_format = _infer_file_format(data_dir, allow_missing_val=allow_missing_val)
     manifest_train_counts = None
@@ -2873,17 +2902,20 @@ def main():
 
     auto_val_from_train = False
     auto_val_reason = ""
-    if args.task == "tile_classification" and data_layout == "classification_folders":
+    if data_layout == "classification_folders":
         if val_total <= 0:
             auto_val_from_train = True
             auto_val_reason = "val split boş"
         elif val_positive <= 0:
             auto_val_from_train = True
             auto_val_reason = "val splitte pozitif tile yok"
+    elif data_layout == "paired" and val_total <= 0:
+        auto_val_from_train = True
+        auto_val_reason = "val split boş"
 
     if auto_val_from_train:
         LOGGER.warning(
-            "Qt export dataseti için otomatik validation holdout etkinleştirildi: %s. "
+            "Otomatik validation holdout etkinleştirildi: %s. "
             "Train split içinden stratified val ayrımı yapılacak (oran=%.3f).",
             auto_val_reason,
             auto_val_ratio,
@@ -3062,7 +3094,7 @@ def main():
         best_model = train(config)
         
         print("\n" + "=" * 60)
-        print("✓ EĞİTİM TAMAMLANDI!")
+        print("EGITIM TAMAMLANDI!")
         print("=" * 60)
         print("\nEğitilmiş modeli kullanmak için config.yaml'da:")
         print(f"  weights: \"{best_model}\"")

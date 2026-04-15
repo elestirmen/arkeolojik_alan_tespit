@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from training import (
     ArchaeologyDataset,
     BCELoss,
+    _build_auto_val_holdout_from_dataset,
     _build_auto_val_holdout_indices,
     _compute_val_target_samples,
     _infer_file_format,
@@ -214,6 +215,24 @@ def test_resolve_classification_folder_split_counts_prefers_real_files_over_stal
 def test_auto_val_holdout_indices_are_stratified() -> None:
     train_indices, val_indices, stats = _build_auto_val_holdout_indices(
         [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        holdout_ratio=0.33,
+        seed=42,
+    )
+
+    assert set(train_indices).isdisjoint(val_indices)
+    assert sorted(train_indices + val_indices) == list(range(6))
+    assert stats["train_positive_samples"] >= 1
+    assert stats["val_positive_samples"] >= 1
+    assert stats["val_negative_samples"] >= 1
+
+
+def test_auto_val_holdout_from_segmentation_dataset_is_stratified(
+    tmp_path: Path,
+) -> None:
+    dataset = _build_npz_train_dataset(tmp_path, positive_count=3, negative_count=3)
+
+    train_indices, val_indices, stats = _build_auto_val_holdout_from_dataset(
+        dataset,
         holdout_ratio=0.33,
         seed=42,
     )
