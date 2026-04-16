@@ -157,7 +157,7 @@ dl_task: "tile_classification"
 #   - "MAnet"          → Multi-scale Attention Net
 #   - "Linknet"        → LinkNet (hafif ve hızlı)
 # ÖNERİ: Başlangıç için "Unet" kullanın, hız/doğruluk dengesi iyidir
-arch: "Unet"
+arch: "fpn"
 
 # encoder: TEK ENCODER modunda kullanılacak encoder ağı
 # - Önceden eğitilmiş (ImageNet) bir CNN omurgası

@@ -490,6 +490,12 @@ class PipelineDefaults:
         default=False,
         metadata={"help": "Sadece egitilmis DL checkpointini kullan; multi/zeroshot kapatilir (classic/fusion kalabilir)."},
     )
+    use_fpn_classifier: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "TileClassifier icin FPN-style multi-level feature aggregation. None ise checkpoint metadata/state_dict'ten otomatik cozulur; bulunamazsa False kullanilir."
+        },
+    )
     th: float = field(
         default=0.6,
         metadata={"help": "DL olasılık haritasını maskeye çevirmek için eşik (0-1 arası); düşük değer daha fazla tespit üretir"},
@@ -822,6 +828,8 @@ class PipelineDefaults:
             errors.append(
                 f"dl_task gecersiz: {self.dl_task}. Gecerli degerler: 'segmentation', 'tile_classification'"
             )
+        if self.use_fpn_classifier not in (None, True, False):
+            errors.append("use_fpn_classifier degeri true/false veya null (None) olmalidir.")
         
         # Sigma ve radii kontrolleri
         if len(self.sigma_scales) == 0:
@@ -2051,6 +2059,102 @@ def _infer_checkpoint_task_type_from_state_dict(state_dict: Optional[Dict[str, A
     return None
 
 
+def _checkpoint_classifier_in_features(state_dict: Optional[Dict[str, Any]]) -> Optional[int]:
+    """Return the classifier input width from a checkpoint state dict when available."""
+    if not state_dict:
+        return None
+    preferred_suffixes = (
+        "classifier.weight",
+        "base_model.classifier.weight",
+        "module.classifier.weight",
+        "module.base_model.classifier.weight",
+    )
+    for suffix in preferred_suffixes:
+        for key, tensor in state_dict.items():
+            if isinstance(key, str) and key.endswith(suffix):
+                if isinstance(tensor, torch.Tensor) and tensor.ndim == 2:
+                    return int(tensor.shape[1])
+    for key, tensor in state_dict.items():
+        if not isinstance(key, str) or "classifier.weight" not in key:
+            continue
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 2:
+            return int(tensor.shape[1])
+    return None
+
+
+def _resolve_tile_classifier_feature_dims(
+    encoder_name: str,
+    in_channels: int,
+) -> Optional[Tuple[int, int]]:
+    """Resolve (last_level_dim, fpn_concat_dim) for a TileClassifier encoder."""
+    if smp is None:
+        return None
+    try:
+        encoder = smp.encoders.get_encoder(
+            encoder_name,
+            in_channels=in_channels,
+            depth=5,
+            weights=None,
+        )
+    except Exception as exc:
+        LOGGER.debug(
+            "Could not inspect TileClassifier feature dims for encoder=%s in_channels=%s: %s",
+            encoder_name,
+            in_channels,
+            exc,
+        )
+        return None
+
+    out_channels = list(getattr(encoder, "out_channels", []))
+    if not out_channels:
+        return None
+    last_dim = int(out_channels[-1])
+    fpn_dim = sum(int(c) for c in out_channels[1:]) if len(out_channels) > 1 else last_dim
+    return last_dim, fpn_dim
+
+
+def _infer_tile_classifier_use_fpn_from_state_dict(
+    state_dict: Optional[Dict[str, Any]],
+    *,
+    encoder_name: str,
+    in_channels: int,
+) -> Optional[bool]:
+    """Infer whether a TileClassifier checkpoint used FPN aggregation."""
+    classifier_in_features = _checkpoint_classifier_in_features(state_dict)
+    if classifier_in_features is None:
+        return None
+
+    feature_dims = _resolve_tile_classifier_feature_dims(encoder_name, int(in_channels))
+    if feature_dims is None:
+        return None
+    last_dim, fpn_dim = feature_dims
+
+    if classifier_in_features == last_dim:
+        return False
+    if classifier_in_features == fpn_dim and fpn_dim != last_dim:
+        return True
+    return None
+
+
+def _checkpoint_optional_bool(config_dict: Dict[str, Any], key: str) -> Optional[bool]:
+    value = config_dict.get(key)
+    return value if isinstance(value, bool) else None
+
+
+def resolve_tile_classifier_use_fpn(
+    configured_value: Optional[bool],
+    checkpoint_hints: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Resolve TileClassifier FPN flag from checkpoint hints, config, then fallback."""
+    if checkpoint_hints:
+        hint_value = checkpoint_hints.get("use_fpn_classifier")
+        if isinstance(hint_value, bool):
+            return hint_value
+    if isinstance(configured_value, bool):
+        return configured_value
+    return False
+
+
 def get_checkpoint_model_hints(weights_path: Path) -> Dict[str, Any]:
     """Extract optional model metadata from a checkpoint."""
     if not weights_path.exists():
@@ -2073,6 +2177,7 @@ def get_checkpoint_model_hints(weights_path: Path) -> Dict[str, Any]:
             "in_channels",
             "enable_attention",
             "attention_reduction",
+            "use_fpn_classifier",
             "task_type",
             "channel_names",
             "bands",
@@ -2088,6 +2193,18 @@ def get_checkpoint_model_hints(weights_path: Path) -> Dict[str, Any]:
     inferred_task = _infer_checkpoint_task_type_from_state_dict(state_dict)
     if inferred_task and "task_type" not in hints:
         hints["task_type"] = inferred_task
+    task_type = str(hints.get("task_type", inferred_task or "")).strip().lower()
+    if "use_fpn_classifier" not in hints and task_type == "tile_classification":
+        encoder_name = str(hints.get("encoder", "")).strip()
+        in_channels = hints.get("in_channels")
+        if encoder_name and isinstance(in_channels, int):
+            inferred_use_fpn = _infer_tile_classifier_use_fpn_from_state_dict(
+                state_dict,
+                encoder_name=encoder_name,
+                in_channels=in_channels,
+            )
+            if inferred_use_fpn is not None:
+                hints["use_fpn_classifier"] = inferred_use_fpn
     return hints
 
 
@@ -2327,6 +2444,26 @@ def load_weights(
         base_model = getattr(target_model, "base_model", target_model)
         return base_model.__class__.__name__
 
+    def _resolve_model_use_fpn(target_model: torch.nn.Module) -> Optional[bool]:
+        queue: List[torch.nn.Module] = [target_model]
+        visited: set[int] = set()
+        while queue:
+            current = queue.pop(0)
+            obj_id = id(current)
+            if obj_id in visited:
+                continue
+            visited.add(obj_id)
+
+            use_fpn = getattr(current, "use_fpn", None)
+            if isinstance(use_fpn, bool):
+                return use_fpn
+
+            for attr in ("base_model", "module"):
+                nested = getattr(current, attr, None)
+                if isinstance(nested, torch.nn.Module):
+                    queue.append(nested)
+        return None
+
     def _checkpoint_cfg(obj: Any) -> Dict[str, Any]:
         if not isinstance(obj, dict):
             return {}
@@ -2394,6 +2531,14 @@ def load_weights(
         ck_in_ch = ck_cfg.get("in_channels")
         model_encoder = _resolve_model_encoder_name(model)
         model_arch = _resolve_model_arch_name(model)
+        ck_use_fpn = _checkpoint_optional_bool(ck_cfg, "use_fpn_classifier")
+        if ck_use_fpn is None and model_encoder:
+            ck_use_fpn = _infer_tile_classifier_use_fpn_from_state_dict(
+                state,
+                encoder_name=model_encoder,
+                in_channels=expected_in_ch,
+            )
+        model_use_fpn = _resolve_model_use_fpn(model)
 
         if ck_encoder and model_encoder and ck_encoder != model_encoder:
             details.append(f"encoder mismatch (checkpoint={ck_encoder}, model={model_encoder})")
@@ -2401,12 +2546,16 @@ def load_weights(
             details.append(f"arch mismatch (checkpoint={ck_arch}, model={model_arch})")
         if isinstance(ck_in_ch, int) and ck_in_ch != expected_in_ch:
             details.append(f"in_channels mismatch (checkpoint={ck_in_ch}, model={expected_in_ch})")
+        if isinstance(ck_use_fpn, bool) and isinstance(model_use_fpn, bool) and ck_use_fpn != model_use_fpn:
+            details.append(
+                f"use_fpn_classifier mismatch (checkpoint={ck_use_fpn}, model={model_use_fpn})"
+            )
 
         error_head = str(last_error).splitlines()[0].strip()
         if details:
             raise RuntimeError(
                 f"Unable to load weights from {weights_path}: {error_head}. "
-                f"{'; '.join(details)}. Check --encoder/--arch/channel settings."
+                f"{'; '.join(details)}. Check --encoder/--arch/channel/use_fpn_classifier settings."
             ) from last_error
         raise RuntimeError(f"Unable to load weights from {weights_path}: {error_head}") from last_error
 
@@ -6647,6 +6796,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         ),
     )
     parser.add_argument(
+        "--use-fpn-classifier",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("use_fpn_classifier"),
+        dest="use_fpn_classifier",
+        help=cli_help(
+            "use_fpn_classifier",
+            "(TileClassifier icin; belirtilmezse checkpoint metadata/state_dict'ten otomatik cozulur).",
+        ),
+    )
+    parser.add_argument(
         "--weights-template",
         default=default_for("weights_template"),
         help=cli_help(
@@ -6900,6 +7059,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         hint_arch,
                     )
                     config.arch = hint_arch
+
+            hint_use_fpn = checkpoint_hints.get("use_fpn_classifier")
+            if isinstance(hint_use_fpn, bool) and hint_use_fpn != config.use_fpn_classifier:
+                if config.trained_model_only and "use_fpn_classifier" in cli_overrides:
+                    parser.error(
+                        f"trained_model_only checkpoint use_fpn_classifier='{hint_use_fpn}' bekliyor; "
+                        f"CLI use_fpn_classifier='{config.use_fpn_classifier}' kullanilamaz."
+                    )
+                else:
+                    LOGGER.info(
+                        "Checkpoint metadata: use_fpn_classifier '%s' bulundu, use_fpn_classifier '%s' -> '%s' guncellendi.",
+                        hint_use_fpn,
+                        config.use_fpn_classifier,
+                        hint_use_fpn,
+                    )
+                    config.use_fpn_classifier = hint_use_fpn
 
             hint_task = str(checkpoint_hints.get("task_type", "")).strip().lower()
             if hint_task and hint_task != str(config.dl_task).strip().lower():
@@ -7257,11 +7432,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 enable_tpi=config.enable_tpi
             )
             run_channel_names: Tuple[str, ...] = tuple(MODEL_CHANNEL_NAMES[:num_channels])
+            per_hints: Dict[str, Any] = {}
             if per_weights is not None:
                 per_hints = get_checkpoint_model_hints(per_weights)
                 hinted_names = per_hints.get("channel_names")
                 if isinstance(hinted_names, list) and len(hinted_names) == num_channels:
                     run_channel_names = tuple(str(v) for v in hinted_names)
+            per_use_fpn = resolve_tile_classifier_use_fpn(
+                config.use_fpn_classifier,
+                per_hints if per_weights is not None else None,
+            )
             
             if dl_task == "tile_classification":
                 if per_weights is not None:
@@ -7272,6 +7452,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         enable_attention=config.enable_attention,
                         attention_reduction=config.attention_reduction,
                         encoder_weights=None,
+                        use_fpn=per_use_fpn,
                     )
                     load_weights(model, per_weights, map_location=device)
                     wt = "trained"
@@ -7283,6 +7464,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         enable_attention=config.enable_attention,
                         attention_reduction=config.attention_reduction,
                         encoder_weights="imagenet",
+                        use_fpn=per_use_fpn,
                     )
                     wt = "imagenet"
                 else:
@@ -7296,6 +7478,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         enable_attention=config.enable_attention,
                         attention_reduction=config.attention_reduction,
                         encoder_weights=None,
+                        use_fpn=per_use_fpn,
                     )
                     wt = "random"
             else:
@@ -7482,6 +7665,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         enable_curvature=config.enable_curvature,
         enable_tpi=config.enable_tpi
     )
+    single_use_fpn = resolve_tile_classifier_use_fpn(
+        config.use_fpn_classifier,
+        checkpoint_hints if weights_path is not None else None,
+    )
     
     if enc_mode in ("", "none") and config.enable_deep_learning and weights_path is not None:
         ckpt_in_ch = checkpoint_hints.get("in_channels")
@@ -7511,6 +7698,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 enable_attention=config.enable_attention,
                 attention_reduction=config.attention_reduction,
                 encoder_weights=None,
+                use_fpn=single_use_fpn,
             )
         else:
             model = build_model(
@@ -7530,6 +7718,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 enable_attention=config.enable_attention,
                 attention_reduction=config.attention_reduction,
                 encoder_weights="imagenet",
+                use_fpn=single_use_fpn,
             )
         else:
             LOGGER.info(f"Zero-shot mode: using ImageNet-pretrained encoder inflated to {num_channels} channels.")
@@ -7551,6 +7740,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 enable_attention=config.enable_attention,
                 attention_reduction=config.attention_reduction,
                 encoder_weights=None,
+                use_fpn=single_use_fpn,
             )
         else:
             LOGGER.warning("No weights provided and zero_shot_imagenet is disabled; using random init model.")

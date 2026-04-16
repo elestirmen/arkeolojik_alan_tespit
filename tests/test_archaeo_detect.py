@@ -41,6 +41,7 @@ from archaeo_detect import (
     build_filename_with_params,
     compute_fused_probability,
     AttentionWrapper,
+    get_checkpoint_model_hints,
     load_weights,
     validate_checkpoint_metadata_consistency,
 )
@@ -635,6 +636,48 @@ class TestWeightLoadingCompatibility:
             load_weights(model, ckpt_path, map_location=torch.device("cpu"))
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_get_checkpoint_model_hints_infers_use_fpn_classifier(self, tmp_path: Path, monkeypatch):
+        """Classifier boyutundan TileClassifier FPN ipucu cikarilabilmeli."""
+
+        class DummyEncoder:
+            out_channels = (64, 256, 512, 1024, 2048)
+
+        class DummyEncoders:
+            @staticmethod
+            def get_encoder(encoder_name: str, in_channels: int, depth: int, weights):
+                assert encoder_name == "resnet50"
+                assert in_channels == 5
+                assert depth == 5
+                assert weights is None
+                return DummyEncoder()
+
+        class DummySmp:
+            encoders = DummyEncoders()
+
+        monkeypatch.setattr("archaeo_detect.smp", DummySmp())
+
+        ckpt_path = tmp_path / "tile_classifier_fpn_checkpoint.pth"
+        torch.save(
+            {
+                "config": {
+                    "arch": "TileClassifier",
+                    "encoder": "resnet50",
+                    "in_channels": 5,
+                    "task_type": "tile_classification",
+                },
+                "model_state_dict": {
+                    "encoder.conv1.weight": torch.zeros((64, 5, 7, 7)),
+                    "classifier.weight": torch.zeros((1, 3904)),
+                    "classifier.bias": torch.zeros((1,)),
+                },
+            },
+            ckpt_path,
+        )
+
+        hints = get_checkpoint_model_hints(ckpt_path)
+
+        assert hints["use_fpn_classifier"] is True
 
 
 # ============================================================================
