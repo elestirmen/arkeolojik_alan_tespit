@@ -101,8 +101,17 @@ except ImportError:
 
 try:
     from openpyxl import Workbook
+    from openpyxl.formatting.rule import ColorScaleRule
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.worksheet.table import Table, TableStyleInfo
 except ImportError:
     Workbook = None  # openpyxl is optional; a built-in XLSX writer is used as fallback
+    ColorScaleRule = None
+    Alignment = None
+    Font = None
+    PatternFill = None
+    Table = None
+    TableStyleInfo = None
 
 try:
     import fiona
@@ -196,6 +205,16 @@ def _candidate_table_base(path: Path) -> Path:
     return base_path.with_name(f"{base_path.name}_gps")
 
 
+def _combined_candidate_table_base(path: Path) -> Path:
+    base_path = _output_base_path(path)
+    return base_path.with_name(f"{base_path.name}_all_candidates")
+
+
+def _vector_package_base(path: Path) -> Path:
+    base_path = _output_base_path(path)
+    return base_path.with_name(f"{base_path.name}_layers")
+
+
 def _append_output_suffix(path: Path, suffix: str) -> Path:
     """Append a file suffix without truncating dotted base names."""
     if not suffix.startswith("."):
@@ -216,10 +235,102 @@ _CANDIDATE_TABLE_FIELD_ORDER = [
     "google_maps_url",
 ]
 
+_COMBINED_CANDIDATE_TABLE_FIELD_ORDER = [
+    "source_label",
+    "scale_level",
+    "scale_factor",
+    "candidate_id",
+    "area_m2",
+    "score_mean",
+    "center_x_native",
+    "center_y_native",
+    "native_crs",
+    "gps_lon",
+    "gps_lat",
+    "google_maps_url",
+]
+
+_COMBINED_CANDIDATE_PRIORITY_FIELD_ORDER = [
+    "rank",
+    "priority_band",
+    "source_label",
+    "scale_level",
+    "scale_factor",
+    "candidate_id",
+    "score_mean",
+    "area_m2",
+    "center_x_native",
+    "center_y_native",
+    "native_crs",
+    "gps_lon",
+    "gps_lat",
+    "google_maps_url",
+]
+
+_COMBINED_CANDIDATE_SUMMARY_FIELD_ORDER = [
+    "source_label",
+    "scale_level",
+    "scale_factor",
+    "candidate_count",
+    "high_priority_count",
+    "medium_priority_count",
+    "low_priority_count",
+    "score_mean_avg",
+    "score_mean_max",
+    "area_m2_sum",
+    "area_m2_max",
+]
+
+_COMBINED_CANDIDATE_CLUSTER_FIELD_ORDER = [
+    "cluster_id",
+    "priority_band",
+    "member_count",
+    "sources_seen",
+    "scale_levels_seen",
+    "scale_factors_seen",
+    "best_source_label",
+    "best_scale_level",
+    "best_scale_factor",
+    "best_candidate_id",
+    "best_score_mean",
+    "mean_score_mean",
+    "total_area_m2",
+    "max_area_m2",
+    "center_x_native",
+    "center_y_native",
+    "native_crs",
+    "gps_lon",
+    "gps_lat",
+    "google_maps_url",
+]
+
+_COMBINED_CANDIDATE_RAW_FIELD_ORDER = ["input_order"] + _COMBINED_CANDIDATE_TABLE_FIELD_ORDER
+
+_COMBINED_CANDIDATE_PRIORITY_HIGH = 0.80
+_COMBINED_CANDIDATE_PRIORITY_MEDIUM = 0.60
+_COMBINED_CANDIDATE_CLUSTER_DISTANCE_M = 20.0
+
 
 def _safe_token(value: str) -> str:
     token = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in value.strip())
     return token.strip("_")
+
+
+def _safe_gpkg_layer_name(value: str, max_len: int = 63) -> str:
+    token = _safe_token(value.replace("-", "_"))
+    if not token:
+        token = "layer"
+    return token[:max_len].rstrip("_") or "layer"
+
+
+def _vector_gpkg_path(path: Path) -> Path:
+    return _append_output_suffix(_vector_package_base(path), ".gpkg")
+
+
+def _format_gpkg_target(gpkg_path: Path, layer_name: Optional[str]) -> str:
+    if layer_name:
+        return f"{gpkg_path} [layer={layer_name}]"
+    return str(gpkg_path)
 
 
 def _fmt_float(value: float, decimals: int = 2) -> str:
@@ -655,12 +766,16 @@ class PipelineDefaults:
     # ===== VEKTÖRLEŞTİRME AYARLARI =====
     vectorize: bool = field(
         default=True,
-        metadata={"help": "Tespit maskelerini poligonlara dönüştürüp GeoPackage (.gpkg) olarak dışa aktar"},
+        metadata={"help": "Tespit maskelerini poligonlara dönüştürüp GeoPackage (.gpkg) olarak dışa aktar; dosyalama stratejisi gpkg_mode ile belirlenir."},
+    )
+    gpkg_mode: str = field(
+        default="single",
+        metadata={"help": "GeoPackage stratejisi: 'single' = tek GPKG içinde çok katman, 'split' = her çıktı için ayrı GPKG."},
     )
     export_candidate_excel: bool = field(
         default=True,
         metadata={
-            "help": "Vektörleşen adayları merkez koordinatları ve GPS (WGS84) kolonlarıyla Excel'e (.xlsx) aktar; openpyxl yoksa yerleşik XLSX yazıcı kullan."
+            "help": "Adayları merkez koordinatları ve GPS (WGS84) kolonlarıyla tek bir birlesik Excel'e (.xlsx) aktar; multi-scale aciksa scale_level/scale_factor kolonlari da eklenir. openpyxl yoksa yerlesik XLSX yazici kullan."
         },
     )
     min_area: float = field(
@@ -745,7 +860,7 @@ class PipelineDefaults:
     )
     multiscale_save_individual_outputs: bool = field(
         default=False,
-        metadata={"help": "Her ölçek için ayrı prob/mask çıktıları üret. vectorize/export_candidate_excel açıksa bu ölçekler için ayrı GPKG/XLSX de yazılır."},
+        metadata={"help": "Her ölçek için ayri prob/mask ciktisi uret. vectorize aciksa bu olcekler tek GPKG icinde katman ya da ayri GPKG dosyalari olarak yazilir; Excel adaylari ise tek bir birlesik dosyada scale kolonlariyla toplanir."},
     )
 
     # ===== CİHAZ SEÇİMİ =====
@@ -816,6 +931,10 @@ class PipelineDefaults:
         # Connectivity kontrolü
         if self.label_connectivity not in (4, 8):
             errors.append(f"label_connectivity 4 veya 8 olmalı, verilen: {self.label_connectivity}")
+
+        self.gpkg_mode = str(self.gpkg_mode).strip().lower() or "single"
+        if self.gpkg_mode not in ("single", "split"):
+            errors.append(f"gpkg_mode gecersiz: {self.gpkg_mode}. Gecerli degerler: 'single', 'split'")
         
         # Verbose seviyesi
         if self.verbose < 0 or self.verbose > 2:
@@ -2655,6 +2774,31 @@ class YoloOutputs:
     transform: Affine
     crs: Optional[RasterioCRS]
     threshold: float
+    label_records: Optional[List[Dict[str, Any]]] = None
+    labels_out_base: Optional[Path] = None
+
+
+@dataclass
+class MultiscaleSavedOutput:
+    scale_token: str
+    scale_factor: float
+    scale_level: int
+    outputs: InferenceOutputs
+
+
+@dataclass
+class VectorExportJob:
+    label: str
+    mask: Optional[np.ndarray]
+    prob_map: Optional[np.ndarray]
+    transform: Affine
+    crs: Optional[RasterioCRS]
+    out_base: Path
+    prob_path: Path
+    mask_path: Path
+    scale_level: Optional[int] = None
+    scale_factor: Optional[float] = None
+    gpkg_layer_name: Optional[str] = None
 
 
 def _resolve_importance_channel_names(
@@ -3830,51 +3974,11 @@ def infer_yolo_tiled(
             mask_path=mask_path,
         )
         
-        # Export labeled detections to GeoPackage
-        labels_path = None
+        # Collect labeled detections for downstream GeoPackage export
+        labels_out_base = None
         if save_labels and all_detections:
-            LOGGER.info("YOLO11 etiketli tespitler GeoPackage'e yazılıyor: %d nesne", len(all_detections))
-            labels_path = base_prefix.parent / f"{filename}_labels.gpkg"
-            
-            try:
-                if gpd is not None:
-                    # Create GeoDataFrame with all detections
-                    gdf = gpd.GeoDataFrame(all_detections, geometry='geometry', crs=crs)
-                    
-                    # Calculate area for each detection (in square meters)
-                    if crs and not crs.is_projected:
-                        # If geographic CRS, project to calculate area
-                        from pyproj import CRS as PyProjCRS
-                        area_crs = PyProjCRS.from_epsg(6933)  # Equal Area projection
-                        gdf['area_m2'] = gdf.geometry.to_crs(area_crs).area
-                    else:
-                        gdf['area_m2'] = gdf.geometry.area
-                    
-                    # Reorder columns for better readability
-                    column_order = [
-                        'id', 'class_id', 'class_name', 'confidence', 'area_m2',
-                        'center_x', 'center_y',
-                        'bbox_xmin', 'bbox_ymin', 'bbox_xmax', 'bbox_ymax',
-                        'tile_row', 'tile_col', 'geometry'
-                    ]
-                    gdf = gdf[[col for col in column_order if col in gdf.columns]]
-                    
-                    # Save to GeoPackage
-                    gdf.to_file(labels_path, driver="GPKG", layer="detections")
-                    LOGGER.info("✓ YOLO11 etiketli tespitler kaydedildi: %s", labels_path)
-                    
-                    # Print summary statistics
-                    class_counts = gdf['class_name'].value_counts()
-                    LOGGER.info("Tespit edilen sınıflar:")
-                    for class_name, count in class_counts.items():
-                        LOGGER.info("  - %s: %d adet", class_name, count)
-                
-                else:
-                    LOGGER.warning("GeoPandas yüklü değil, etiketli tespitler kaydedilemedi")
-                    
-            except Exception as e:
-                LOGGER.error("YOLO11 etiketli tespitler kaydedilirken hata: %s", e)
-        
+            labels_out_base = base_prefix.parent / f"{filename}_labels"
+            LOGGER.info("YOLO11 etiketli tespitler hazirlandi: %d nesne", len(all_detections))
         elif save_labels and not all_detections:
             LOGGER.info("YOLO11 hiç tespit bulamadı, etiketli çıktı yok")
         
@@ -3902,6 +4006,8 @@ def infer_yolo_tiled(
             transform=transform,
             crs=crs,
             threshold=conf_threshold,
+            label_records=all_detections if save_labels else None,
+            labels_out_base=labels_out_base,
         )
 
 
@@ -4481,6 +4587,187 @@ def _format_crs_label(crs: Optional[RasterioCRS]) -> str:
     return "unknown"
 
 
+def _resolve_area_transformers(
+    crs: Optional[RasterioCRS],
+) -> Tuple[Optional[CRS], Optional[Transformer], Optional[Transformer]]:
+    crs_obj: Optional[CRS] = None
+    if crs:
+        try:
+            crs_obj = CRS.from_wkt(crs.to_wkt())
+        except Exception:  # pragma: no cover - defensive
+            LOGGER.warning("Unable to parse CRS; assuming projected coordinates for area.")
+
+    to_area: Optional[Transformer] = None
+    to_native: Optional[Transformer] = None
+    if crs_obj and not crs_obj.is_projected:
+        area_crs = CRS.from_epsg(6933)
+        to_area = Transformer.from_crs(crs_obj, area_crs, always_xy=True)
+        to_native = Transformer.from_crs(area_crs, crs_obj, always_xy=True)
+    elif not crs_obj:
+        LOGGER.warning(
+            "Input CRS unknown; polygon areas assume coordinate units are meters."
+        )
+    return crs_obj, to_area, to_native
+
+
+def _normalize_gpkg_property_value(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float, str)) or value is None:
+        return value
+    return str(value)
+
+
+def _ordered_record_property_names(
+    records: Sequence[Dict[str, Any]],
+    column_order: Optional[Sequence[str]] = None,
+) -> List[str]:
+    available = {str(key) for rec in records for key in rec.keys() if str(key) != "geometry"}
+    ordered: List[str] = []
+    if column_order:
+        ordered.extend([str(key) for key in column_order if str(key) in available and str(key) != "geometry"])
+    extras = sorted(key for key in available if key not in ordered)
+    ordered.extend(extras)
+    return ordered
+
+
+def _infer_fiona_property_type(values: Sequence[Any]) -> str:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, bool):
+            return "int"
+        if isinstance(value, int):
+            return "int"
+        if isinstance(value, float):
+            return "float"
+        return "str"
+    return "str"
+
+
+def _resolve_fiona_geometry_type(records: Sequence[Dict[str, Any]]) -> str:
+    geom_types = {
+        str(getattr(rec.get("geometry"), "geom_type", "")).strip()
+        for rec in records
+        if rec.get("geometry") is not None and not getattr(rec.get("geometry"), "is_empty", False)
+    }
+    geom_types.discard("")
+    if not geom_types:
+        raise ValueError("No valid geometries available for GPKG export.")
+
+    if geom_types <= {"Polygon", "MultiPolygon"}:
+        return "MultiPolygon" if "MultiPolygon" in geom_types else "Polygon"
+    if geom_types <= {"LineString", "MultiLineString"}:
+        return "MultiLineString" if "MultiLineString" in geom_types else "LineString"
+    if geom_types <= {"Point", "MultiPoint"}:
+        return "MultiPoint" if "MultiPoint" in geom_types else "Point"
+    if len(geom_types) == 1:
+        return next(iter(geom_types))
+    raise ValueError(f"Unsupported mixed geometry types for GPKG export: {sorted(geom_types)}")
+
+
+def _write_records_to_gpkg(
+    *,
+    records: Sequence[Dict[str, Any]],
+    crs: Optional[RasterioCRS],
+    gpkg_path: Path,
+    layer_name: str,
+    column_order: Optional[Sequence[str]] = None,
+) -> Path:
+    if not records:
+        raise ValueError("No records available for GPKG export.")
+
+    safe_layer_name = _safe_gpkg_layer_name(layer_name)
+    property_names = _ordered_record_property_names(records, column_order=column_order)
+    gpkg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if gpd is not None:
+        gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
+        ordered_columns = [name for name in property_names if name in gdf.columns]
+        if "geometry" in gdf.columns:
+            ordered_columns.append("geometry")
+        gdf = gdf[ordered_columns]
+        gdf.to_file(gpkg_path, driver="GPKG", layer=safe_layer_name)
+        return gpkg_path
+
+    if fiona is None:
+        raise RuntimeError("Neither geopandas nor fiona is available for GPKG export.")
+
+    schema = {
+        "geometry": _resolve_fiona_geometry_type(records),
+        "properties": {
+            name: _infer_fiona_property_type([rec.get(name) for rec in records])
+            for name in property_names
+        },
+    }
+    crs_wkt = crs.to_wkt() if crs else None
+    with fiona.open(
+        gpkg_path,
+        mode="w",
+        driver="GPKG",
+        layer=safe_layer_name,
+        schema=schema,
+        crs_wkt=crs_wkt,
+    ) as dst:
+        for rec in records:
+            geom = rec.get("geometry")
+            if geom is None or getattr(geom, "is_empty", False):
+                continue
+            dst.write(
+                {
+                    "geometry": mapping(geom),
+                    "properties": {
+                        name: _normalize_gpkg_property_value(rec.get(name))
+                        for name in property_names
+                    },
+                }
+            )
+    return gpkg_path
+
+
+def _resolve_vector_gpkg_target(
+    *,
+    out_base: Path,
+    layer_name: str,
+    gpkg_mode: str,
+    single_gpkg_path: Optional[Path],
+) -> Tuple[Path, str]:
+    safe_layer_name = _safe_gpkg_layer_name(layer_name)
+    if str(gpkg_mode).strip().lower() == "single":
+        if single_gpkg_path is None:
+            raise ValueError("single_gpkg_path must be provided when gpkg_mode='single'.")
+        return single_gpkg_path, safe_layer_name
+    gpkg_path = _append_output_suffix(_output_base_path(out_base), ".gpkg")
+    return gpkg_path, safe_layer_name
+
+
+def _prepare_yolo_detection_records(
+    records: Sequence[Dict[str, Any]],
+    crs: Optional[RasterioCRS],
+) -> List[Dict[str, Any]]:
+    if not records:
+        return []
+
+    _crs_obj, to_area, _to_native = _resolve_area_transformers(crs)
+    prepared: List[Dict[str, Any]] = []
+    for rec in records:
+        geom = rec.get("geometry")
+        if geom is None or getattr(geom, "is_empty", False):
+            continue
+        if to_area:
+            area_m2 = float(shapely_transform(to_area.transform, geom).area)
+        else:
+            area_m2 = float(geom.area)
+        item = dict(rec)
+        item["area_m2"] = area_m2
+        prepared.append(item)
+    return prepared
+
+
 def _can_vectorize_predictions() -> Tuple[bool, Optional[str]]:
     """Return whether polygon vectorization dependencies are available."""
     if fiona is None and gpd is None:
@@ -4681,9 +4968,633 @@ def _write_candidate_location_rows_xlsx(
     return _write_builtin_xlsx(rows=rows, field_order=field_order, xlsx_path=xlsx_path)
 
 
+def _normalize_excel_cell_value(value: Any) -> Any:
+    """Convert numpy scalars and non-finite floats into Excel-safe primitives."""
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return None
+    return value
+
+
+def _candidate_row_number(row: Dict[str, Any], key: str) -> Optional[float]:
+    value = _normalize_excel_cell_value(row.get(key))
+    if value in (None, ""):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _candidate_row_int(row: Dict[str, Any], key: str) -> Optional[int]:
+    value = _candidate_row_number(row, key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _combined_candidate_priority_band(score: Optional[float]) -> str:
+    if score is None:
+        return "Bilinmiyor"
+    if score >= _COMBINED_CANDIDATE_PRIORITY_HIGH:
+        return "Yuksek"
+    if score >= _COMBINED_CANDIDATE_PRIORITY_MEDIUM:
+        return "Orta"
+    return "Dusuk"
+
+
+def _combined_candidate_sort_key(row: Dict[str, Any]) -> Tuple[float, float, str, int, int]:
+    score = _candidate_row_number(row, "score_mean")
+    area = _candidate_row_number(row, "area_m2")
+    source_label = str(row.get("source_label") or "")
+    scale_level = _candidate_row_int(row, "scale_level")
+    candidate_id = _candidate_row_int(row, "candidate_id")
+    return (
+        -(score if score is not None else -1.0),
+        -(area if area is not None else -1.0),
+        source_label,
+        scale_level if scale_level is not None else 999_999,
+        candidate_id if candidate_id is not None else 999_999,
+    )
+
+
+def _build_combined_priority_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ordered_rows = sorted((dict(row) for row in rows), key=_combined_candidate_sort_key)
+    priority_rows: List[Dict[str, Any]] = []
+    for rank, row in enumerate(ordered_rows, start=1):
+        review_row = dict(row)
+        review_row["rank"] = rank
+        review_row["priority_band"] = _combined_candidate_priority_band(
+            _candidate_row_number(row, "score_mean")
+        )
+        priority_rows.append(review_row)
+    return priority_rows
+
+
+def _build_combined_summary_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, Optional[int], Optional[float]], Dict[str, Any]] = {}
+    for row in rows:
+        source_label = str(row.get("source_label") or "")
+        scale_level = _candidate_row_int(row, "scale_level")
+        scale_factor = _candidate_row_number(row, "scale_factor")
+        key = (source_label, scale_level, scale_factor)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "source_label": source_label,
+                "scale_level": scale_level,
+                "scale_factor": scale_factor,
+                "candidate_count": 0,
+                "high_priority_count": 0,
+                "medium_priority_count": 0,
+                "low_priority_count": 0,
+                "score_sum": 0.0,
+                "score_count": 0,
+                "score_mean_max": None,
+                "area_m2_sum": 0.0,
+                "area_m2_max": None,
+            },
+        )
+
+        bucket["candidate_count"] += 1
+
+        score = _candidate_row_number(row, "score_mean")
+        if score is not None:
+            bucket["score_sum"] += score
+            bucket["score_count"] += 1
+            prev_max = bucket["score_mean_max"]
+            if prev_max is None or score > float(prev_max):
+                bucket["score_mean_max"] = score
+
+        area_m2 = _candidate_row_number(row, "area_m2")
+        if area_m2 is not None:
+            bucket["area_m2_sum"] += area_m2
+            prev_area_max = bucket["area_m2_max"]
+            if prev_area_max is None or area_m2 > float(prev_area_max):
+                bucket["area_m2_max"] = area_m2
+
+        priority_band = _combined_candidate_priority_band(score)
+        if priority_band == "Yuksek":
+            bucket["high_priority_count"] += 1
+        elif priority_band == "Orta":
+            bucket["medium_priority_count"] += 1
+        elif priority_band == "Dusuk":
+            bucket["low_priority_count"] += 1
+
+    summary_rows: List[Dict[str, Any]] = []
+    for bucket in grouped.values():
+        score_count = int(bucket.pop("score_count"))
+        score_sum = float(bucket.pop("score_sum"))
+        bucket["score_mean_avg"] = (score_sum / score_count) if score_count > 0 else None
+        summary_rows.append(bucket)
+
+    summary_rows.sort(
+        key=lambda row: (
+            -(_candidate_row_number(row, "score_mean_max") or -1.0),
+            -float(row.get("candidate_count") or 0),
+            str(row.get("source_label") or ""),
+            _candidate_row_int(row, "scale_level") if _candidate_row_int(row, "scale_level") is not None else 999_999,
+        )
+    )
+    return summary_rows
+
+
+def _cluster_combined_candidate_members(
+    rows: Sequence[Dict[str, Any]],
+    distance_threshold_m: float,
+) -> List[List[Dict[str, Any]]]:
+    clusters: List[List[Dict[str, Any]]] = []
+    grouped_by_crs: Dict[str, List[Tuple[Dict[str, Any], float, float]]] = {}
+
+    for row in rows:
+        x = _candidate_row_number(row, "center_x_native")
+        y = _candidate_row_number(row, "center_y_native")
+        native_crs = str(row.get("native_crs") or "").strip()
+        if x is None or y is None or not native_crs or native_crs.lower() == "unknown":
+            clusters.append([row])
+            continue
+        grouped_by_crs.setdefault(native_crs, []).append((row, x, y))
+
+    max_distance_sq = float(distance_threshold_m) ** 2
+    for items in grouped_by_crs.values():
+        item_count = len(items)
+        parents = list(range(item_count))
+
+        def _find(index: int) -> int:
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def _union(left: int, right: int) -> None:
+            left_root = _find(left)
+            right_root = _find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+        for left_idx in range(item_count):
+            _, left_x, left_y = items[left_idx]
+            for right_idx in range(left_idx + 1, item_count):
+                _, right_x, right_y = items[right_idx]
+                dx = left_x - right_x
+                dy = left_y - right_y
+                if (dx * dx) + (dy * dy) <= max_distance_sq:
+                    _union(left_idx, right_idx)
+
+        grouped_members: Dict[int, List[Dict[str, Any]]] = {}
+        for item_idx, (row, _, _) in enumerate(items):
+            grouped_members.setdefault(_find(item_idx), []).append(row)
+        clusters.extend(grouped_members.values())
+
+    return clusters
+
+
+def _format_scale_factor_token(scale_factor: Optional[float]) -> str:
+    if scale_factor is None:
+        return "-"
+    return f"{scale_factor:.2f}x"
+
+
+def _build_combined_cluster_rows(
+    rows: Sequence[Dict[str, Any]],
+    distance_threshold_m: float = _COMBINED_CANDIDATE_CLUSTER_DISTANCE_M,
+) -> List[Dict[str, Any]]:
+    cluster_members = _cluster_combined_candidate_members(rows, distance_threshold_m)
+    cluster_rows: List[Dict[str, Any]] = []
+
+    for members in cluster_members:
+        ordered_members = sorted(members, key=_combined_candidate_sort_key)
+        best_row = ordered_members[0]
+
+        score_values = [
+            score for score in (_candidate_row_number(member, "score_mean") for member in members) if score is not None
+        ]
+        area_values = [
+            area for area in (_candidate_row_number(member, "area_m2") for member in members) if area is not None
+        ]
+        center_points = [
+            (
+                _candidate_row_number(member, "center_x_native"),
+                _candidate_row_number(member, "center_y_native"),
+            )
+            for member in members
+        ]
+        center_points = [
+            (center_x, center_y)
+            for center_x, center_y in center_points
+            if center_x is not None and center_y is not None
+        ]
+        gps_points = [
+            (_candidate_row_number(member, "gps_lon"), _candidate_row_number(member, "gps_lat"))
+            for member in members
+        ]
+        gps_points = [(lon, lat) for lon, lat in gps_points if lon is not None and lat is not None]
+
+        source_labels = sorted(
+            {str(member.get("source_label") or "").strip() for member in members if str(member.get("source_label") or "").strip()}
+        )
+        scale_levels = sorted(
+            {
+                scale_level
+                for scale_level in (_candidate_row_int(member, "scale_level") for member in members)
+                if scale_level is not None
+            }
+        )
+        scale_factors = sorted(
+            {
+                scale_factor
+                for scale_factor in (_candidate_row_number(member, "scale_factor") for member in members)
+                if scale_factor is not None
+            }
+        )
+
+        cluster_center_x = (
+            float(np.mean([point[0] for point in center_points]))
+            if center_points
+            else _candidate_row_number(best_row, "center_x_native")
+        )
+        cluster_center_y = (
+            float(np.mean([point[1] for point in center_points]))
+            if center_points
+            else _candidate_row_number(best_row, "center_y_native")
+        )
+        gps_lon = (
+            float(np.mean([point[0] for point in gps_points]))
+            if gps_points
+            else _candidate_row_number(best_row, "gps_lon")
+        )
+        gps_lat = (
+            float(np.mean([point[1] for point in gps_points]))
+            if gps_points
+            else _candidate_row_number(best_row, "gps_lat")
+        )
+
+        google_maps_url = ""
+        if gps_lat is not None and gps_lon is not None:
+            google_maps_url = f"https://maps.google.com/?q={gps_lat:.8f},{gps_lon:.8f}"
+        elif best_row.get("google_maps_url"):
+            google_maps_url = str(best_row.get("google_maps_url"))
+
+        best_score = _candidate_row_number(best_row, "score_mean")
+        cluster_rows.append(
+            {
+                "cluster_id": 0,
+                "priority_band": _combined_candidate_priority_band(best_score),
+                "member_count": len(members),
+                "sources_seen": ", ".join(source_labels) if source_labels else str(best_row.get("source_label") or ""),
+                "scale_levels_seen": ", ".join(str(level) for level in scale_levels) if scale_levels else "-",
+                "scale_factors_seen": ", ".join(_format_scale_factor_token(scale) for scale in scale_factors)
+                if scale_factors
+                else "-",
+                "best_source_label": str(best_row.get("source_label") or ""),
+                "best_scale_level": _candidate_row_int(best_row, "scale_level"),
+                "best_scale_factor": _candidate_row_number(best_row, "scale_factor"),
+                "best_candidate_id": _candidate_row_int(best_row, "candidate_id"),
+                "best_score_mean": best_score,
+                "mean_score_mean": (float(np.mean(score_values)) if score_values else None),
+                "total_area_m2": float(sum(area_values)) if area_values else None,
+                "max_area_m2": max(area_values) if area_values else None,
+                "center_x_native": cluster_center_x,
+                "center_y_native": cluster_center_y,
+                "native_crs": str(best_row.get("native_crs") or "unknown"),
+                "gps_lon": gps_lon,
+                "gps_lat": gps_lat,
+                "google_maps_url": google_maps_url,
+            }
+        )
+
+    cluster_rows.sort(
+        key=lambda row: (
+            -(_candidate_row_number(row, "best_score_mean") or -1.0),
+            -float(row.get("member_count") or 0),
+            -(_candidate_row_number(row, "total_area_m2") or -1.0),
+            str(row.get("best_source_label") or ""),
+        )
+    )
+    for cluster_id, row in enumerate(cluster_rows, start=1):
+        row["cluster_id"] = cluster_id
+    return cluster_rows
+
+
+def _build_combined_summary_metrics(
+    rows: Sequence[Dict[str, Any]],
+    cluster_rows: Sequence[Dict[str, Any]],
+    distance_threshold_m: float,
+) -> List[Dict[str, Any]]:
+    scores = [score for score in (_candidate_row_number(row, "score_mean") for row in rows) if score is not None]
+    areas = [area for area in (_candidate_row_number(row, "area_m2") for row in rows) if area is not None]
+    source_labels = {
+        str(row.get("source_label") or "").strip()
+        for row in rows
+        if str(row.get("source_label") or "").strip()
+    }
+    scale_factors = {
+        scale_factor
+        for scale_factor in (_candidate_row_number(row, "scale_factor") for row in rows)
+        if scale_factor is not None
+    }
+
+    priority_counts = {"Yuksek": 0, "Orta": 0, "Dusuk": 0}
+    for row in rows:
+        band = _combined_candidate_priority_band(_candidate_row_number(row, "score_mean"))
+        if band in priority_counts:
+            priority_counts[band] += 1
+
+    return [
+        {"metric": "toplam_aday_sayisi", "value": len(rows)},
+        {"metric": "toplam_kume_sayisi", "value": len(cluster_rows)},
+        {"metric": "benzersiz_kaynak_sayisi", "value": len(source_labels)},
+        {"metric": "benzersiz_scale_sayisi", "value": len(scale_factors)},
+        {"metric": "yuksek_oncelik_aday_sayisi", "value": priority_counts["Yuksek"]},
+        {"metric": "orta_oncelik_aday_sayisi", "value": priority_counts["Orta"]},
+        {"metric": "dusuk_oncelik_aday_sayisi", "value": priority_counts["Dusuk"]},
+        {"metric": "score_mean_avg", "value": float(np.mean(scores)) if scores else None},
+        {"metric": "score_mean_max", "value": max(scores) if scores else None},
+        {"metric": "area_m2_sum", "value": float(sum(areas)) if areas else None},
+        {"metric": "cluster_distance_m", "value": float(distance_threshold_m)},
+    ]
+
+
+def _excel_number_format_for_field(field_name: str) -> Optional[str]:
+    if field_name in {
+        "rank",
+        "scale_level",
+        "candidate_id",
+        "cluster_id",
+        "member_count",
+        "best_scale_level",
+        "best_candidate_id",
+        "input_order",
+        "candidate_count",
+        "high_priority_count",
+        "medium_priority_count",
+        "low_priority_count",
+    }:
+        return "0"
+    if field_name in {
+        "score_mean",
+        "score_mean_avg",
+        "score_mean_max",
+        "best_score_mean",
+        "mean_score_mean",
+    }:
+        return "0.0%"
+    if field_name in {"scale_factor", "best_scale_factor"}:
+        return "0.00x"
+    if field_name in {"area_m2", "area_m2_sum", "area_m2_max", "total_area_m2", "max_area_m2"}:
+        return "#,##0.00"
+    if field_name in {"center_x_native", "center_y_native", "gps_lon", "gps_lat"}:
+        return "#,##0.000000"
+    return None
+
+
+def _style_excel_header_row(ws, *, row_idx: int, field_order: Sequence[str]) -> None:
+    for col_idx, field_name in enumerate(field_order, start=1):
+        cell = ws.cell(row=row_idx, column=col_idx, value=field_name)
+        if Font is not None:
+            cell.font = Font(bold=True, color="FFFFFF")
+        if PatternFill is not None:
+            cell.fill = PatternFill(fill_type="solid", fgColor="1F4E78")
+        if Alignment is not None:
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[row_idx].height = 20
+
+
+def _autosize_excel_columns(
+    ws,
+    *,
+    field_order: Sequence[str],
+    start_row: int,
+    end_row: int,
+) -> None:
+    for col_idx, field_name in enumerate(field_order, start=1):
+        max_len = len(str(field_name))
+        for row_idx in range(start_row + 1, end_row + 1):
+            cell_value = ws.cell(row=row_idx, column=col_idx).value
+            if cell_value is None:
+                continue
+            max_len = max(max_len, len(str(cell_value)))
+        max_len = max(max_len + 2, 10)
+        if field_name in {"google_maps_url"}:
+            max_len = max(max_len, 16)
+        if field_name in {"sources_seen", "scale_factors_seen", "scale_levels_seen"}:
+            max_len = min(max_len, 36)
+        else:
+            max_len = min(max_len, 24)
+        ws.column_dimensions[_xlsx_column_name(col_idx)].width = max_len
+
+
+def _add_excel_color_scale(
+    ws,
+    *,
+    field_order: Sequence[str],
+    start_row: int,
+    end_row: int,
+) -> None:
+    if ColorScaleRule is None or end_row <= start_row:
+        return
+    score_fields = {"score_mean", "score_mean_avg", "score_mean_max", "best_score_mean", "mean_score_mean"}
+    for col_idx, field_name in enumerate(field_order, start=1):
+        if field_name not in score_fields:
+            continue
+        col_letter = _xlsx_column_name(col_idx)
+        ws.conditional_formatting.add(
+            f"{col_letter}{start_row + 1}:{col_letter}{end_row}",
+            ColorScaleRule(
+                start_type="num",
+                start_value=0,
+                start_color="F8696B",
+                mid_type="num",
+                mid_value=_COMBINED_CANDIDATE_PRIORITY_MEDIUM,
+                mid_color="FFEB84",
+                end_type="num",
+                end_value=1,
+                end_color="63BE7B",
+            ),
+        )
+
+
+def _write_excel_table(
+    ws,
+    *,
+    rows: Sequence[Dict[str, Any]],
+    field_order: Sequence[str],
+    start_row: int,
+    table_name: Optional[str] = None,
+    hyperlink_display_text: Optional[str] = None,
+) -> int:
+    _style_excel_header_row(ws, row_idx=start_row, field_order=field_order)
+
+    for row_offset, row in enumerate(rows, start=1):
+        excel_row = start_row + row_offset
+        for col_idx, field_name in enumerate(field_order, start=1):
+            cell = ws.cell(row=excel_row, column=col_idx)
+            value = _normalize_excel_cell_value(row.get(field_name))
+            if field_name == "google_maps_url":
+                maps_url = str(value or "").strip()
+                if maps_url:
+                    cell.value = hyperlink_display_text or maps_url
+                    cell.hyperlink = maps_url
+                    cell.style = "Hyperlink"
+                else:
+                    cell.value = None
+            else:
+                cell.value = value
+
+            number_format = _excel_number_format_for_field(field_name)
+            if number_format:
+                cell.number_format = number_format
+            if Alignment is not None:
+                wrap_text = field_name in {"sources_seen", "scale_levels_seen", "scale_factors_seen"}
+                cell.alignment = Alignment(vertical="top", wrap_text=wrap_text)
+
+    end_row = start_row + max(len(rows), 0)
+    last_col = _xlsx_column_name(len(field_order))
+    data_ref = f"A{start_row}:{last_col}{max(start_row, end_row)}"
+
+    if table_name and Table is not None and TableStyleInfo is not None and len(rows) > 0:
+        excel_table = Table(displayName=table_name, ref=data_ref)
+        excel_table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        ws.add_table(excel_table)
+    else:
+        ws.auto_filter.ref = data_ref
+
+    _add_excel_color_scale(ws, field_order=field_order, start_row=start_row, end_row=end_row)
+    _autosize_excel_columns(ws, field_order=field_order, start_row=start_row, end_row=end_row)
+    return end_row
+
+
+def _apply_summary_metric_formats(
+    ws,
+    *,
+    metrics: Sequence[Dict[str, Any]],
+    start_row: int,
+) -> None:
+    for row_offset, metric_row in enumerate(metrics, start=1):
+        metric_name = str(metric_row.get("metric") or "")
+        value_cell = ws.cell(row=start_row + row_offset, column=2)
+        if metric_name in {"score_mean_avg", "score_mean_max"}:
+            value_cell.number_format = "0.0%"
+        elif metric_name in {"area_m2_sum", "cluster_distance_m"}:
+            value_cell.number_format = "#,##0.00"
+        else:
+            value_cell.number_format = "0"
+
+
+def _write_combined_candidate_review_workbook(
+    *,
+    rows: Sequence[Dict[str, Any]],
+    out_base: Path,
+) -> Optional[Path]:
+    xlsx_path = _append_output_suffix(out_base, ".xlsx")
+    if Workbook is None:
+        _warn_once(
+            "combined_candidate_excel_fallback",
+            "openpyxl kurulu degil; birlesik aday workbook'u tek sayfali fallback XLSX olarak yazilacak.",
+        )
+        return _write_builtin_xlsx(
+            rows=rows,
+            field_order=_COMBINED_CANDIDATE_TABLE_FIELD_ORDER,
+            xlsx_path=xlsx_path,
+        )
+
+    priority_rows = _build_combined_priority_rows(rows)
+    summary_rows = _build_combined_summary_rows(priority_rows)
+    cluster_rows = _build_combined_cluster_rows(
+        priority_rows,
+        distance_threshold_m=_COMBINED_CANDIDATE_CLUSTER_DISTANCE_M,
+    )
+    summary_metrics = _build_combined_summary_metrics(
+        priority_rows,
+        cluster_rows,
+        _COMBINED_CANDIDATE_CLUSTER_DISTANCE_M,
+    )
+    raw_rows: List[Dict[str, Any]] = []
+    for input_order, row in enumerate(rows, start=1):
+        raw_row = dict(row)
+        raw_row["input_order"] = input_order
+        raw_rows.append(raw_row)
+
+    wb = Workbook()
+
+    ws_priority = wb.active
+    ws_priority.title = "01_Oncelikli_Adaylar"
+    _write_excel_table(
+        ws_priority,
+        rows=priority_rows,
+        field_order=_COMBINED_CANDIDATE_PRIORITY_FIELD_ORDER,
+        start_row=1,
+        table_name="tblOncelikliAdaylar",
+        hyperlink_display_text="Haritada Ac",
+    )
+    ws_priority.freeze_panes = "A2"
+
+    ws_summary = wb.create_sheet("02_Ozet")
+    _write_excel_table(
+        ws_summary,
+        rows=summary_metrics,
+        field_order=("metric", "value"),
+        start_row=1,
+        table_name="tblGenelOzet",
+    )
+    _apply_summary_metric_formats(ws_summary, metrics=summary_metrics, start_row=1)
+    summary_start_row = len(summary_metrics) + 4
+    ws_summary.cell(row=summary_start_row - 1, column=1, value="kaynak_ozeti")
+    if Font is not None:
+        ws_summary.cell(row=summary_start_row - 1, column=1).font = Font(bold=True)
+    _write_excel_table(
+        ws_summary,
+        rows=summary_rows,
+        field_order=_COMBINED_CANDIDATE_SUMMARY_FIELD_ORDER,
+        start_row=summary_start_row,
+        table_name="tblKaynakOzet",
+    )
+    ws_summary.freeze_panes = "A2"
+
+    ws_cluster = wb.create_sheet("03_Kumelenmis_Adaylar")
+    _write_excel_table(
+        ws_cluster,
+        rows=cluster_rows,
+        field_order=_COMBINED_CANDIDATE_CLUSTER_FIELD_ORDER,
+        start_row=1,
+        table_name="tblKumelenmisAdaylar",
+        hyperlink_display_text="Haritada Ac",
+    )
+    ws_cluster.freeze_panes = "A2"
+
+    ws_raw = wb.create_sheet("99_Ham_Veriler")
+    _write_excel_table(
+        ws_raw,
+        rows=raw_rows,
+        field_order=_COMBINED_CANDIDATE_RAW_FIELD_ORDER,
+        start_row=1,
+        table_name="tblHamVeriler",
+    )
+    ws_raw.freeze_panes = "A2"
+
+    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(xlsx_path)
+    return xlsx_path
+
+
 def _build_candidate_location_rows(
     records: Sequence[Dict[str, Any]],
     crs: Optional[RasterioCRS],
+    extra_fields: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Build candidate location rows with native and optional WGS84 coordinates."""
     if not records:
@@ -4720,19 +5631,20 @@ def _build_candidate_location_rows(
         if gps_lat is not None and gps_lon is not None:
             google_maps_url = f"https://maps.google.com/?q={gps_lat:.8f},{gps_lon:.8f}"
 
-        rows.append(
-            {
-                "candidate_id": int(rec.get("id", len(rows) + 1)),
-                "area_m2": float(rec.get("area_m2", 0.0)),
-                "score_mean": float(rec.get("score_mean", 0.0)),
-                "center_x_native": center_x,
-                "center_y_native": center_y,
-                "native_crs": native_crs,
-                "gps_lon": gps_lon,
-                "gps_lat": gps_lat,
-                "google_maps_url": google_maps_url,
-            }
-        )
+        row = {
+            "candidate_id": int(rec.get("id", len(rows) + 1)),
+            "area_m2": float(rec.get("area_m2", 0.0)),
+            "score_mean": float(rec.get("score_mean", 0.0)),
+            "center_x_native": center_x,
+            "center_y_native": center_y,
+            "native_crs": native_crs,
+            "gps_lon": gps_lon,
+            "gps_lat": gps_lat,
+            "google_maps_url": google_maps_url,
+        }
+        if extra_fields:
+            row.update(extra_fields)
+        rows.append(row)
     return rows
 
 
@@ -4748,6 +5660,28 @@ def export_candidate_locations_table(
         field_order=_CANDIDATE_TABLE_FIELD_ORDER,
         out_base=out_base,
     )
+
+
+def write_combined_candidate_locations_table(
+    *,
+    rows: Sequence[Dict[str, Any]],
+    out_base: Path,
+) -> Optional[Path]:
+    """Write the consolidated candidate workbook with review, summary and raw sheets."""
+    return _write_combined_candidate_review_workbook(rows=rows, out_base=out_base)
+
+
+def _build_combined_candidate_extra_fields(
+    *,
+    source_label: str,
+    scale_level: Optional[int] = None,
+    scale_factor: Optional[float] = None,
+) -> Dict[str, Any]:
+    return {
+        "source_label": str(source_label),
+        "scale_level": scale_level,
+        "scale_factor": scale_factor,
+    }
 
 
 def write_empty_candidate_locations_table(
@@ -4793,9 +5727,39 @@ def export_candidate_locations_from_prediction(
     label_connectivity: int,
 ) -> Optional[Path]:
     """Export candidate table directly from raster predictions without polygon libraries."""
-    if mask.size == 0 or prob_map.size == 0:
-        LOGGER.warning("Bos mask/prob rasteri; aday Excel tablosu bos olarak yaziliyor.")
+    rows = build_candidate_location_rows_from_prediction(
+        mask=mask,
+        prob_map=prob_map,
+        transform=transform,
+        crs=crs,
+        min_area=min_area,
+        opening_size=opening_size,
+        label_connectivity=label_connectivity,
+    )
+    if not rows:
         return write_empty_candidate_locations_table(out_base=out_base)
+    return _write_candidate_location_rows_xlsx(
+        rows=rows,
+        field_order=_CANDIDATE_TABLE_FIELD_ORDER,
+        out_base=out_base,
+    )
+
+
+def build_candidate_location_rows_from_prediction(
+    *,
+    mask: np.ndarray,
+    prob_map: np.ndarray,
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    min_area: float,
+    opening_size: int,
+    label_connectivity: int,
+    extra_fields: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Build candidate rows directly from raster predictions without writing files."""
+    if mask.size == 0 or prob_map.size == 0:
+        LOGGER.warning("Bos mask/prob rasteri; aday satirlari bos donuyor.")
+        return []
 
     k = max(1, int(opening_size))
     cleaned_mask = grey_opening(mask.astype(np.uint8), size=(k, k))
@@ -4806,8 +5770,8 @@ def export_candidate_locations_from_prediction(
 
     labels, num_features = ndimage.label(cleaned_mask.astype(bool), structure=structure)
     if num_features == 0:
-        LOGGER.warning("Aday tablo icin esik ustunde bilesen bulunamadi; bos Excel yaziliyor.")
-        return write_empty_candidate_locations_table(out_base=out_base)
+        LOGGER.warning("Aday tablo icin esik ustunde bilesen bulunamadi; aday satirlari bos donuyor.")
+        return []
 
     label_ids = np.arange(1, num_features + 1)
     pixel_counts = np.asarray(
@@ -4845,8 +5809,8 @@ def export_candidate_locations_from_prediction(
         next_id += 1
 
     if not temp_rows:
-        LOGGER.warning("Aday tablo icin minimum alan filtresini gecen bilesen bulunamadi; bos Excel yaziliyor.")
-        return write_empty_candidate_locations_table(out_base=out_base)
+        LOGGER.warning("Aday tablo icin minimum alan filtresini gecen bilesen bulunamadi; aday satirlari bos donuyor.")
+        return []
 
     gps_lons, gps_lats = _transform_points_to_wgs84(native_xs, native_ys, crs)
     rows: List[Dict[str, Any]] = []
@@ -4856,24 +5820,21 @@ def export_candidate_locations_from_prediction(
         google_maps_url = ""
         if gps_lat is not None and gps_lon is not None:
             google_maps_url = f"https://maps.google.com/?q={gps_lat:.8f},{gps_lon:.8f}"
-        rows.append(
-            {
-                "candidate_id": candidate_id,
-                "area_m2": area_m2,
-                "score_mean": mean_score,
-                "center_x_native": center_x,
-                "center_y_native": center_y,
-                "native_crs": native_crs,
-                "gps_lon": gps_lon,
-                "gps_lat": gps_lat,
-                "google_maps_url": google_maps_url,
-            }
-        )
-    return _write_candidate_location_rows_xlsx(
-        rows=rows,
-        field_order=_CANDIDATE_TABLE_FIELD_ORDER,
-        out_base=out_base,
-    )
+        row = {
+            "candidate_id": candidate_id,
+            "area_m2": area_m2,
+            "score_mean": mean_score,
+            "center_x_native": center_x,
+            "center_y_native": center_y,
+            "native_crs": native_crs,
+            "gps_lon": gps_lon,
+            "gps_lat": gps_lat,
+            "google_maps_url": google_maps_url,
+        }
+        if extra_fields:
+            row.update(extra_fields)
+        rows.append(row)
+    return rows
 
 
 def load_prediction_arrays(
@@ -4933,6 +5894,8 @@ def vectorize_predictions(
     opening_size: int,
     label_connectivity: int,
     export_candidate_excel: bool = True,
+    gpkg_path: Optional[Path] = None,
+    gpkg_layer_name: Optional[str] = None,
 ) -> Optional[Path]:
     """Convert binary mask into polygons and write to GeoPackage."""
     table_base = _candidate_table_base(out_path)
@@ -5003,23 +5966,7 @@ def vectorize_predictions(
     pixel_counts = np.array(filtered_pixel_counts)
     prob_sums = np.array(filtered_prob_sums)
 
-    crs_obj: Optional[CRS] = None
-    if crs:
-        try:
-            crs_obj = CRS.from_wkt(crs.to_wkt())
-        except Exception:  # pragma: no cover - defensive
-            LOGGER.warning("Unable to parse CRS; assuming projected coordinates for area.")
-
-    to_area: Optional[Transformer] = None
-    to_native: Optional[Transformer] = None
-    if crs_obj and not crs_obj.is_projected:
-        area_crs = CRS.from_epsg(6933)
-        to_area = Transformer.from_crs(crs_obj, area_crs, always_xy=True)
-        to_native = Transformer.from_crs(area_crs, crs_obj, always_xy=True)
-    elif not crs_obj:
-        LOGGER.warning(
-            "Input CRS unknown; polygon areas assume coordinate units are meters."
-        )
+    _crs_obj, to_area, to_native = _resolve_area_transformers(crs)
 
     records = []
     LOGGER.info("Poligonlar oluşturuluyor...")
@@ -5076,53 +6023,23 @@ def vectorize_predictions(
         return None
 
     base_out_path = _output_base_path(out_path)
-    gpkg_path = _append_output_suffix(base_out_path, ".gpkg")
-    gpkg_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_gpkg_path = gpkg_path or _append_output_suffix(base_out_path, ".gpkg")
+    resolved_layer_name = gpkg_layer_name or base_out_path.name
     LOGGER.info("GeoPackage dosyası yazılıyor (%d poligon)...", len(records))
-    if gpd is not None:
-        gdf = gpd.GeoDataFrame(records, geometry="geometry", crs=crs)
-        gdf.to_file(gpkg_path, driver="GPKG")
-    else:
-        if fiona is None:
-            LOGGER.warning("Vector output skipped; fiona not available.")
-            return None
-        schema = {
-            "geometry": "MultiPolygon"
-            if any(rec["geometry"].geom_type == "MultiPolygon" for rec in records)
-            else "Polygon",
-            "properties": {
-                "id": "int",
-                "area_m2": "float",
-                "score_mean": "float",
-            },
-        }
-        crs_wkt = crs.to_wkt() if crs else None
-        gpkg_path.parent.mkdir(parents=True, exist_ok=True)
-        with fiona.open(
-            gpkg_path,
-            mode="w",
-            driver="GPKG",
-            schema=schema,
-            crs_wkt=crs_wkt,
-        ) as dst:
-            for rec in records:
-                dst.write(
-                    {
-                        "geometry": mapping(rec["geometry"]),
-                        "properties": {
-                            "id": rec["id"],
-                            "area_m2": rec["area_m2"],
-                            "score_mean": rec["score_mean"],
-                        },
-                    }
-                )
+    _write_records_to_gpkg(
+        records=records,
+        crs=crs,
+        gpkg_path=resolved_gpkg_path,
+        layer_name=resolved_layer_name,
+        column_order=("id", "area_m2", "score_mean"),
+    )
     if export_candidate_excel:
         table_base = _candidate_table_base(base_out_path)
         table_path = export_candidate_locations_table(records=records, crs=crs, out_base=table_base)
         if table_path:
             LOGGER.info("Aday konum tablosu yazıldı: %s", table_path)
 
-    return gpkg_path
+    return resolved_gpkg_path
 
 
 
@@ -6810,6 +7727,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("vectorize", "(set --no-vectorize to keep only raster outputs)."),
     )
     parser.add_argument(
+        "--gpkg-mode",
+        default=default_for("gpkg_mode"),
+        dest="gpkg_mode",
+        help=cli_help("gpkg_mode", "('single' = tek GPKG cok katman, 'split' = her cikti icin ayri GPKG)."),
+    )
+    parser.add_argument(
         "--export-candidate-excel",
         action=argparse.BooleanOptionalAction,
         default=default_for("export_candidate_excel"),
@@ -7191,6 +8114,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         dl_task=dl_task,
     )
     out_prefix = resolve_out_prefix(input_path, config.out_prefix, config)
+    single_vector_gpkg_path: Optional[Path] = None
+    if config.gpkg_mode == "single" and (config.vectorize or config.enable_yolo):
+        single_vector_gpkg_path = _vector_gpkg_path(out_prefix)
+        try:
+            single_vector_gpkg_path.unlink(missing_ok=True)
+        except Exception as exc:
+            LOGGER.warning("Tekil GPKG kapsayicisi sifirlanamadi (%s): %s", single_vector_gpkg_path, exc)
 
     # Heuristic: treat very large rasters differently to avoid OOM in downstream steps (fusion/vectorization).
     raster_pixels = 0
@@ -7404,6 +8334,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 deriv_band_count = len(dict(raster_info.get("band_map", {})))
                 model_ch = get_num_channels(config.enable_curvature, config.enable_tpi)
                 LOGGER.info("✓ Raster-cache hazır (deriv=%d band, model=%d kanal): %s", deriv_band_count, model_ch, derivative_cache_tif)
+
+    combined_candidate_rows: List[Dict[str, Any]] = []
 
     # Derin öğrenme etkinse modelleri çalıştır
     if config.enable_deep_learning and ran_multi:
@@ -7628,14 +8560,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
                 if mask_arr is None or prob_arr is None:
                     LOGGER.warning("[%s] Vekt?r/Excel ??kt?s? atland?; rasterlar okunamad?.", suffix)
-                    if config.export_candidate_excel:
-                        ensure_candidate_locations_table_exists(
-                            out_base=_candidate_table_base(vector_base),
-                            log_prefix=f"[{suffix}]",
-                            reason="Rasterlar okunamadigi icin bos Excel olusturuluyor.",
-                        )
                 elif config.vectorize and vector_ok:
                     try:
+                        gpkg_path, gpkg_layer_name = _resolve_vector_gpkg_target(
+                            out_base=vector_base,
+                            layer_name=f"dl_{suffix}",
+                            gpkg_mode=config.gpkg_mode,
+                            single_gpkg_path=single_vector_gpkg_path,
+                        )
                         gpkg = vectorize_predictions(
                             mask=mask_arr,
                             prob_map=prob_arr,
@@ -7646,44 +8578,36 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                             simplify_tol=config.simplify,
                             opening_size=config.vector_opening_size,
                             label_connectivity=config.label_connectivity,
-                            export_candidate_excel=config.export_candidate_excel,
+                            export_candidate_excel=False,
+                            gpkg_path=gpkg_path,
+                            gpkg_layer_name=gpkg_layer_name,
                         )
                     except Exception as e:
-                        LOGGER.warning("[%s] Vekt?r/Excel aktarimi basarisiz: %s", suffix, e)
+                        LOGGER.warning("[%s] Vekt?r aktarimi basarisiz: %s", suffix, e)
                         gpkg = None
                     if gpkg:
-                        LOGGER.info("[%s] ? Vekt?r dosyas?: %s", suffix, gpkg)
-                    if config.export_candidate_excel:
-                        ensure_candidate_locations_table_exists(
-                            out_base=_candidate_table_base(vector_base),
-                            log_prefix=f"[{suffix}]",
-                            reason="Excel dosyasi bulunamadi; bos Excel olusturuluyor.",
-                        )
-                elif config.export_candidate_excel:
-                    table_base = _candidate_table_base(vector_base)
-                    table_path = export_candidate_locations_from_prediction_safe(
-                        mask=mask_arr,
-                        prob_map=prob_arr,
-                        transform=outputs.transform,
-                        crs=outputs.crs,
-                        out_base=table_base,
-                        min_area=config.min_area,
-                        opening_size=config.vector_opening_size,
-                        label_connectivity=config.label_connectivity,
-                        log_prefix=f"[{suffix}]",
-                    )
-                    if table_path:
-                        LOGGER.info("[%s] ? Excel aday tablosu: %s", suffix, table_path)
-                    if config.vectorize:
-                        LOGGER.warning(
-                            "[%s] GeoPackage atland? (%s); yaln?zca Excel aday tablosu ?retildi.",
-                            suffix,
-                            vector_reason,
-                        )
-                    else:
-                        LOGGER.info("[%s] Vekt?r ??kt?s? kapal?; yaln?zca Excel aday tablosu ?retildi.", suffix)
+                        LOGGER.info("[%s] ? Vekt?r dosyas?: %s", suffix, _format_gpkg_target(gpkg, gpkg_layer_name))
                 else:
                     LOGGER.warning("[%s] Vekt?r ??kt?s? atland? (%s).", suffix, vector_reason)
+
+                if mask_arr is not None and prob_arr is not None and config.export_candidate_excel:
+                    try:
+                        job_rows = build_candidate_location_rows_from_prediction(
+                            mask=mask_arr,
+                            prob_map=prob_arr,
+                            transform=outputs.transform,
+                            crs=outputs.crs,
+                            min_area=config.min_area,
+                            opening_size=config.vector_opening_size,
+                            label_connectivity=config.label_connectivity,
+                            extra_fields=_build_combined_candidate_extra_fields(
+                                source_label=f"dl_{suffix}",
+                            ),
+                        )
+                        combined_candidate_rows.extend(job_rows)
+                        LOGGER.info("[%s] Tek Excel listesine eklenen aday sayisi: %d", suffix, len(job_rows))
+                    except Exception as e:
+                        LOGGER.warning("[%s] Tek Excel satirlari hazirlanamadi: %s", suffix, e)
 
         if not dl_runs:
             parser.error(
@@ -7698,6 +8622,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         # Multi-encoder loop tamamlandı
         # Klasik yöntemler kapalıysa burada çık, açıksa devam et
         if not config.enable_classic:
+            if config.export_candidate_excel:
+                combined_table_path = write_combined_candidate_locations_table(
+                    rows=combined_candidate_rows,
+                    out_base=_combined_candidate_table_base(out_prefix),
+                )
+                if combined_table_path:
+                    LOGGER.info("Tek birlesik Excel aday tablosu yazildi: %s", combined_table_path)
             LOGGER.info("Klasik yöntemler kapalı, işlem tamamlandı.")
             return
     
@@ -7808,7 +8739,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     # Derin öğrenme çıkarımını çalıştır (etkinse)
     outputs = None
-    multiscale_saved_outputs: List[Tuple[str, InferenceOutputs]] = []
+    run_multiscale = False
+    ms_scales: Tuple[float, ...] = (1.0,)
+    multiscale_saved_outputs: List[MultiscaleSavedOutput] = []
     if enc_mode in ("", "none") and config.enable_deep_learning and model is not None:
         # Weight type belirleme (eğitilmiş mi, ImageNet mi)
         single_wt = "trained" if weights_path is not None else ("imagenet" if config.zero_shot_imagenet else "random")
@@ -7908,13 +8841,55 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 if reference_outputs is None:
                     reference_outputs = scale_outputs
                 if config.multiscale_save_individual_outputs:
-                    multiscale_saved_outputs.append((scale_token, scale_outputs))
+                    multiscale_saved_outputs.append(
+                        MultiscaleSavedOutput(
+                            scale_token=scale_token,
+                            scale_factor=float(scale),
+                            scale_level=si + 1,
+                            outputs=scale_outputs,
+                        )
+                    )
                     LOGGER.info(
                         "Ölçek %.2fx ayrı raster çıktılarını yazdı: %s, %s",
                         scale,
                         scale_outputs.prob_path,
                         scale_outputs.mask_path,
                     )
+                elif config.export_candidate_excel:
+                    try:
+                        scale_mask_for_rows = scale_outputs.mask
+                        scale_prob_for_rows = scale_outputs.prob_map
+                        if scale_mask_for_rows is None or scale_prob_for_rows is None:
+                            scale_mask_for_rows, scale_prob_for_rows = load_prediction_arrays(
+                                prob_path=scale_outputs.prob_path,
+                                mask_path=scale_outputs.mask_path,
+                            )
+                        scale_rows = build_candidate_location_rows_from_prediction(
+                            mask=scale_mask_for_rows,
+                            prob_map=scale_prob_for_rows,
+                            transform=scale_outputs.transform,
+                            crs=scale_outputs.crs,
+                            min_area=config.min_area,
+                            opening_size=config.vector_opening_size,
+                            label_connectivity=config.label_connectivity,
+                            extra_fields=_build_combined_candidate_extra_fields(
+                                source_label=f"dl_{scale_token}",
+                                scale_level=si + 1,
+                                scale_factor=float(scale),
+                            ),
+                        )
+                        combined_candidate_rows.extend(scale_rows)
+                        LOGGER.info(
+                            "Ölçek %.2fx adayları tek Excel listesine eklendi: %d satır",
+                            scale,
+                            len(scale_rows),
+                        )
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "Ölçek %.2fx için birlesik Excel satirlari hazirlanamadi: %s",
+                            scale,
+                            exc,
+                        )
 
                 if scale_outputs.prob_map is not None:
                     native_prob = scale_outputs.prob_map
@@ -8066,6 +9041,55 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             
             LOGGER.info("✓ YOLO11 olasılık haritası: %s", yolo_outputs.prob_path)
             LOGGER.info("✓ YOLO11 ikili maske: %s", yolo_outputs.mask_path)
+            if yolo_outputs.label_records:
+                try:
+                    detection_records = _prepare_yolo_detection_records(
+                        yolo_outputs.label_records,
+                        yolo_outputs.crs,
+                    )
+                    if detection_records:
+                        labels_out_base = yolo_outputs.labels_out_base or _output_base_path(yolo_outputs.mask_path)
+                        labels_gpkg_path, labels_layer_name = _resolve_vector_gpkg_target(
+                            out_base=labels_out_base,
+                            layer_name="yolo11_detections",
+                            gpkg_mode=config.gpkg_mode,
+                            single_gpkg_path=single_vector_gpkg_path,
+                        )
+                        _write_records_to_gpkg(
+                            records=detection_records,
+                            crs=yolo_outputs.crs,
+                            gpkg_path=labels_gpkg_path,
+                            layer_name=labels_layer_name,
+                            column_order=(
+                                "id",
+                                "class_id",
+                                "class_name",
+                                "confidence",
+                                "area_m2",
+                                "center_x",
+                                "center_y",
+                                "bbox_xmin",
+                                "bbox_ymin",
+                                "bbox_xmax",
+                                "bbox_ymax",
+                                "tile_row",
+                                "tile_col",
+                            ),
+                        )
+                        LOGGER.info(
+                            "✓ YOLO11 etiketli tespitler kaydedildi: %s",
+                            _format_gpkg_target(labels_gpkg_path, labels_layer_name),
+                        )
+                        class_counts: Dict[str, int] = {}
+                        for rec in detection_records:
+                            class_name = str(rec.get("class_name", "unknown"))
+                            class_counts[class_name] = class_counts.get(class_name, 0) + 1
+                        if class_counts:
+                            LOGGER.info("Tespit edilen sınıflar:")
+                            for class_name, count in sorted(class_counts.items()):
+                                LOGGER.info("  - %s: %d adet", class_name, count)
+                except Exception as e:
+                    LOGGER.error("YOLO11 etiketli tespitler kaydedilirken hata: %s", e)
 
     # Fusion (birleştirme) çalıştır (etkinse ve her iki yöntem de çalıştıysa)
     if fuse_enabled and classic_outputs is not None:
@@ -8174,175 +9198,200 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.info("=" * 70)
         LOGGER.info("VEKTÖRLEŞTİRME BAŞLATILIYOR")
         LOGGER.info("=" * 70)
-        vector_jobs: List[
-            Tuple[
-                str,
-                Optional[np.ndarray],
-                Optional[np.ndarray],
-                Affine,
-                Optional[RasterioCRS],
-                Path,
-                Path,
-                Path,
-            ]
-        ] = []
+        vector_jobs: List[VectorExportJob] = []
         
         # Çoklu-encoder modunda DL çıktıları döngü sırasında vektörleştirildi; tekrar etmeyelim
         if outputs is not None and not ran_multi:
-            vector_jobs.append((
-                "dl",
-                outputs.mask,
-                outputs.prob_map,
-                outputs.transform,
-                outputs.crs,
-                _output_base_path(outputs.mask_path),
-                outputs.prob_path,
-                outputs.mask_path,
-            ))
-        for scale_label, scale_outputs in multiscale_saved_outputs:
-            vector_jobs.append((
-                f"dl_{scale_label}",
-                scale_outputs.mask,
-                scale_outputs.prob_map,
-                scale_outputs.transform,
-                scale_outputs.crs,
-                _output_base_path(scale_outputs.mask_path),
-                scale_outputs.prob_path,
-                scale_outputs.mask_path,
-            ))
+            vector_jobs.append(
+                VectorExportJob(
+                    label="dl_multiscale_merged" if run_multiscale else "dl",
+                    mask=outputs.mask,
+                    prob_map=outputs.prob_map,
+                    transform=outputs.transform,
+                    crs=outputs.crs,
+                    out_base=_output_base_path(outputs.mask_path),
+                    prob_path=outputs.prob_path,
+                    mask_path=outputs.mask_path,
+                    gpkg_layer_name="dl_multiscale_merged" if run_multiscale else "dl",
+                )
+            )
+        for saved_scale in multiscale_saved_outputs:
+            vector_jobs.append(
+                VectorExportJob(
+                    label=f"dl_{saved_scale.scale_token}",
+                    mask=saved_scale.outputs.mask,
+                    prob_map=saved_scale.outputs.prob_map,
+                    transform=saved_scale.outputs.transform,
+                    crs=saved_scale.outputs.crs,
+                    out_base=_output_base_path(saved_scale.outputs.mask_path),
+                    prob_path=saved_scale.outputs.prob_path,
+                    mask_path=saved_scale.outputs.mask_path,
+                    scale_level=saved_scale.scale_level,
+                    scale_factor=saved_scale.scale_factor,
+                    gpkg_layer_name=f"dl_{saved_scale.scale_token}",
+                )
+            )
         if yolo_outputs is not None:
-            vector_jobs.append((
-                "yolo11",
-                yolo_outputs.mask,
-                yolo_outputs.prob_map,
-                yolo_outputs.transform,
-                yolo_outputs.crs,
-                _output_base_path(yolo_outputs.mask_path),
-                yolo_outputs.prob_path,
-                yolo_outputs.mask_path,
-            ))
+            vector_jobs.append(
+                VectorExportJob(
+                    label="yolo11",
+                    mask=yolo_outputs.mask,
+                    prob_map=yolo_outputs.prob_map,
+                    transform=yolo_outputs.transform,
+                    crs=yolo_outputs.crs,
+                    out_base=_output_base_path(yolo_outputs.mask_path),
+                    prob_path=yolo_outputs.prob_path,
+                    mask_path=yolo_outputs.mask_path,
+                    gpkg_layer_name="yolo11_mask_polygons",
+                )
+            )
         if classic_outputs is not None:
             vector_jobs.append(
-                (
-                    "classic",
-                    classic_outputs.mask,
-                    classic_outputs.prob_map,
-                    classic_outputs.transform,
-                    classic_outputs.crs,
-                    _output_base_path(classic_outputs.mask_path),
-                    classic_outputs.prob_path,
-                    classic_outputs.mask_path,
+                VectorExportJob(
+                    label="classic",
+                    mask=classic_outputs.mask,
+                    prob_map=classic_outputs.prob_map,
+                    transform=classic_outputs.transform,
+                    crs=classic_outputs.crs,
+                    out_base=_output_base_path(classic_outputs.mask_path),
+                    prob_path=classic_outputs.prob_path,
+                    mask_path=classic_outputs.mask_path,
+                    gpkg_layer_name="classic",
                 )
             )
             if config.classic_save_intermediate:
                 for mode_name, mode_out in classic_outputs.per_mode.items():
                     vector_jobs.append(
-                        (
-                            f"classic_{mode_name}",
-                            mode_out.mask,
-                            mode_out.prob_map,
-                            classic_outputs.transform,
-                            classic_outputs.crs,
-                            _output_base_path(mode_out.mask_path),
-                            mode_out.prob_path,
-                            mode_out.mask_path,
+                        VectorExportJob(
+                            label=f"classic_{mode_name}",
+                            mask=mode_out.mask,
+                            prob_map=mode_out.prob_map,
+                            transform=classic_outputs.transform,
+                            crs=classic_outputs.crs,
+                            out_base=_output_base_path(mode_out.mask_path),
+                            prob_path=mode_out.prob_path,
+                            mask_path=mode_out.mask_path,
+                            gpkg_layer_name=f"classic_{mode_name}",
                         )
                     )
         if fusion_outputs is not None:
             vector_jobs.append(
-                (
-                    "fused",
-                    fusion_outputs.mask,
-                    fusion_outputs.prob_map,
-                    fusion_outputs.transform,
-                    fusion_outputs.crs,
-                    _output_base_path(fusion_outputs.mask_path),
-                    fusion_outputs.prob_path,
-                    fusion_outputs.mask_path,
+                VectorExportJob(
+                    label="fused",
+                    mask=fusion_outputs.mask,
+                    prob_map=fusion_outputs.prob_map,
+                    transform=fusion_outputs.transform,
+                    crs=fusion_outputs.crs,
+                    out_base=_output_base_path(fusion_outputs.mask_path),
+                    prob_path=fusion_outputs.prob_path,
+                    mask_path=fusion_outputs.mask_path,
+                    gpkg_layer_name="fused",
                 )
             )
         if multi_fused_results:
             for enc_label, fused in multi_fused_results:
                 vector_jobs.append(
-                    (
-                        f"fused_{enc_label}",
-                        fused.mask,
-                        fused.prob_map,
-                        fused.transform,
-                        fused.crs,
-                        _output_base_path(fused.mask_path),
-                        fused.prob_path,
-                        fused.mask_path,
+                    VectorExportJob(
+                        label=f"fused_{enc_label}",
+                        mask=fused.mask,
+                        prob_map=fused.prob_map,
+                        transform=fused.transform,
+                        crs=fused.crs,
+                        out_base=_output_base_path(fused.mask_path),
+                        prob_path=fused.prob_path,
+                        mask_path=fused.mask_path,
+                        gpkg_layer_name=f"fused_{enc_label}",
                     )
                 )
         # 'fused_multi' tekrarını engelle: zaten her encoder için 'fused_{enc_label}' eklendi
 
-        for label, mask_arr, prob_arr, transform, crs_obj, out_base, prob_path, mask_path in vector_jobs:
+        vector_ok, vector_reason = _can_vectorize_predictions()
+        if config.vectorize and not vector_ok:
+            LOGGER.warning("GeoPackage export kullanilamiyor: %s. Adaylar varsa tek Excel yine yazilacak.", vector_reason)
+
+        for job in vector_jobs:
+            label = job.label
+            mask_arr = job.mask
+            prob_arr = job.prob_map
             if mask_arr is None or prob_arr is None:
                 try:
-                    mask_arr, prob_arr = load_prediction_arrays(prob_path=prob_path, mask_path=mask_path)
+                    mask_arr, prob_arr = load_prediction_arrays(
+                        prob_path=job.prob_path,
+                        mask_path=job.mask_path,
+                    )
                 except Exception as e:
                     LOGGER.warning("Could not load rasters for vectorization (%s): %s", label, e)
-                    if config.export_candidate_excel:
-                        ensure_candidate_locations_table_exists(
-                            out_base=_candidate_table_base(out_base),
-                            log_prefix=f"({label})",
-                            reason="Rasterlar okunamadigi icin bos Excel olusturuluyor.",
-                        )
                     continue
 
-            vector_ok, vector_reason = _can_vectorize_predictions()
             if config.vectorize and vector_ok:
                 LOGGER.info(f"  ? {label} poligonla?t?r?l?yor...")
                 try:
+                    gpkg_path, gpkg_layer_name = _resolve_vector_gpkg_target(
+                        out_base=job.out_base,
+                        layer_name=job.gpkg_layer_name or label,
+                        gpkg_mode=config.gpkg_mode,
+                        single_gpkg_path=single_vector_gpkg_path,
+                    )
                     vector_file = vectorize_predictions(
                         mask=mask_arr,
                         prob_map=prob_arr,
-                        transform=transform,
-                        crs=crs_obj,
-                        out_path=out_base,
+                        transform=job.transform,
+                        crs=job.crs,
+                        out_path=job.out_base,
                         min_area=config.min_area,
                         simplify_tol=config.simplify,
                         opening_size=config.vector_opening_size,
                         label_connectivity=config.label_connectivity,
-                        export_candidate_excel=config.export_candidate_excel,
+                        export_candidate_excel=False,
+                        gpkg_path=gpkg_path,
+                        gpkg_layer_name=gpkg_layer_name,
                     )
                 except Exception as e:
-                    LOGGER.warning("Vector/Excel export failed (%s): %s", label, e)
+                    LOGGER.warning("Vector export failed (%s): %s", label, e)
                     vector_file = None
                 if vector_file:
-                    LOGGER.info("    ? Vekt?r ??kt?s? (%s): %s", label, vector_file)
-                if config.export_candidate_excel:
-                    ensure_candidate_locations_table_exists(
-                        out_base=_candidate_table_base(out_base),
-                        log_prefix=f"({label})",
-                        reason="Excel dosyasi bulunamadi; bos Excel olusturuluyor.",
+                    LOGGER.info(
+                        "    ? Vekt?r ??kt?s? (%s): %s",
+                        label,
+                        _format_gpkg_target(vector_file, gpkg_layer_name),
                     )
-            elif config.export_candidate_excel:
-                if config.vectorize:
-                    LOGGER.info(f"  ? {label} i?in Excel aday tablosu olu?turuluyor...")
-                else:
-                    LOGGER.info(f"  ? {label} i?in yaln?zca Excel aday tablosu olu?turuluyor...")
-                table_base = _candidate_table_base(out_base)
-                table_path = export_candidate_locations_from_prediction_safe(
-                    mask=mask_arr,
-                    prob_map=prob_arr,
-                    transform=transform,
-                    crs=crs_obj,
-                    out_base=table_base,
-                    min_area=config.min_area,
-                    opening_size=config.vector_opening_size,
-                    label_connectivity=config.label_connectivity,
-                    log_prefix=f"({label})",
-                )
-                if table_path:
-                    LOGGER.info("    ? Excel aday tablosu (%s): %s", label, table_path)
-                if config.vectorize:
-                    LOGGER.warning("    GeoPackage atland? (%s); yaln?zca Excel aday tablosu ?retildi.", vector_reason)
-                else:
-                    LOGGER.info("    Vekt?r ??kt?s? kapal?; yaln?zca Excel aday tablosu ?retildi.")
-            else:
+            elif config.vectorize:
                 LOGGER.warning("    Vekt?r ??kt?s? atland? (%s).", vector_reason)
+
+            if config.export_candidate_excel:
+                if config.vectorize and vector_ok:
+                    LOGGER.info(f"  ? {label} adaylar? tek Excel i?in haz?rlan?yor...")
+                elif config.vectorize:
+                    LOGGER.info(f"  ? {label} i?in GeoPackage atland?; adaylar tek Excel'e eklenecek...")
+                else:
+                    LOGGER.info(f"  ? {label} i?in adaylar tek Excel'e ekleniyor...")
+                try:
+                    job_rows = build_candidate_location_rows_from_prediction(
+                        mask=mask_arr,
+                        prob_map=prob_arr,
+                        transform=job.transform,
+                        crs=job.crs,
+                        min_area=config.min_area,
+                        opening_size=config.vector_opening_size,
+                        label_connectivity=config.label_connectivity,
+                        extra_fields=_build_combined_candidate_extra_fields(
+                            source_label=label,
+                            scale_level=job.scale_level,
+                            scale_factor=job.scale_factor,
+                        ),
+                    )
+                    combined_candidate_rows.extend(job_rows)
+                    LOGGER.info("    Tek Excel listesine eklenen aday sayisi (%s): %d", label, len(job_rows))
+                except Exception as e:
+                    LOGGER.warning("Combined Excel row export failed (%s): %s", label, e)
+
+        if config.export_candidate_excel:
+            combined_table_path = write_combined_candidate_locations_table(
+                rows=combined_candidate_rows,
+                out_base=_combined_candidate_table_base(out_prefix),
+            )
+            if combined_table_path:
+                LOGGER.info("Tek birlesik Excel aday tablosu yazildi: %s", combined_table_path)
         LOGGER.info("")
         LOGGER.info("=" * 70)
         LOGGER.info("✅ TÜM İŞLEMLER TAMAMLANDI!")

@@ -201,7 +201,7 @@ encoders: "none"
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "checkpoints/best_TileClassifier_resnet50_5ch.pth"
+weights: "checkpoints/epochs/epoch_022_TileClassifier_resnet50_5ch.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
@@ -727,7 +727,8 @@ multiscale_merge: "max"
 multiscale_weights: null
 
 # multiscale_save_individual_outputs: Her ölçek için ayrı çıktı seti üret
-# - true: Her ölçek için ayrı prob/mask dosyası yazar; vectorize açıksa ayrı GPKG/XLSX de üretir
+# - true: Her ölçek için ayrı prob/mask dosyası yazar; vectorize açıksa
+#         gpkg_mode=single ise tek GPKG içinde ayrı layer'lar, gpkg_mode=split ise ayrı GPKG'ler üretir
 # - false: Sadece birleşik (merged) nihai çıktı seti bırakılır
 # ÖNERİ: Ölçekleri tek tek karşılaştırmak istiyorsanız true kullanın
 multiscale_save_individual_outputs: true
@@ -813,10 +814,11 @@ rgb_only: false               # true yaparsan SVF/SLRM (ve ilgili türetilmiş t
 # GIS yazılımlarında (QGIS, ArcGIS) kullanım için yararlıdır.
 
 # vectorize: Vektörleştirme etkin mi?
-# - true: Maskeleri poligonlara çevirir ve GeoPackage (.gpkg) dosyası üretir
+# - true: Maskeleri poligonlara çevirir ve GeoPackage (.gpkg) çıktıları üretir
 # - false: Sadece raster (GeoTIFF) çıktıları üretilir
 # ÇIKTI DOSYASI:
-#   - kesif_alani_mask.gpkg (veya benzeri)
+#   - gpkg_mode: "single" ise tek bir <prefix>_layers.gpkg
+#   - gpkg_mode: "split" ise her çıktı için ayrı .gpkg
 #   - QGIS, ArcGIS gibi yazılımlarda doğrudan açılabilir
 # AVANTAJLAR:
 #   + Poligonlar üzerinde alan hesaplama, filtreleme yapabilirsiniz
@@ -825,8 +827,16 @@ rgb_only: false               # true yaparsan SVF/SLRM (ve ilgili türetilmiş t
 # ÖNERİ: Sonuçları GIS'te analiz edecekseniz true yapın
 vectorize: true
 
+# gpkg_mode: GeoPackage dosyalama stratejisi
+# - "single": Tüm vektör katmanlarını tek bir GeoPackage içinde topla
+#             Örnek layer'lar: dl_multiscale_merged, dl_scale1p0, classic, fused,
+#             yolo11_mask_polygons, yolo11_detections
+# - "split" : Her çıktı için ayrı GeoPackage dosyası üret
+# ÖNERİ: QGIS'te karşılaştırma ve paylaşım için "single" daha düzenlidir
+gpkg_mode: "single"
+
 # export_candidate_excel: Vektor adaylarini GPS koordinat tablosu olarak disa aktar
-# - true: Her *.gpkg icin aday merkezlerini iceren *_gps.xlsx uretir
+# - true: Tum adaylari tek bir birlesik Excel dosyasinda toplar
 # - false: GPS/Excel tablo ciktisi uretilmez
 export_candidate_excel: true
 
