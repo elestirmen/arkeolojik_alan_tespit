@@ -726,6 +726,12 @@ multiscale_merge: "max"
 # ÖRNEK: [0.5, 0.3, 0.2] → orijinal ölçeğe %50, 0.5x'e %30, 0.25x'e %20 ağırlık
 multiscale_weights: null
 
+# multiscale_save_individual_outputs: Her ölçek için ayrı çıktı seti üret
+# - true: Her ölçek için ayrı prob/mask dosyası yazar; vectorize açıksa ayrı GPKG/XLSX de üretir
+# - false: Sadece birleşik (merged) nihai çıktı seti bırakılır
+# ÖNERİ: Ölçekleri tek tek karşılaştırmak istiyorsanız true kullanın
+multiscale_save_individual_outputs: true
+
 
 # ============================================================================
 # BÖLÜM 8: NORMALİZASYON AYARLARI

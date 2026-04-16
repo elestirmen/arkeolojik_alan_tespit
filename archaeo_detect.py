@@ -743,6 +743,10 @@ class PipelineDefaults:
         default=None,
         metadata={"help": "weighted_mean için ölçek ağırlıkları. None ise eşit ağırlık. Sırası scales ile aynı olmalı."},
     )
+    multiscale_save_individual_outputs: bool = field(
+        default=False,
+        metadata={"help": "Her ölçek için ayrı prob/mask çıktıları üret. vectorize/export_candidate_excel açıksa bu ölçekler için ayrı GPKG/XLSX de yazılır."},
+    )
 
     # ===== CİHAZ SEÇİMİ =====
     device: Optional[str] = field(
@@ -3326,14 +3330,10 @@ def infer_tiled(
 
         prob_map = prob_acc
 
-        base_prefix = _output_base_path(out_prefix)
-        base_prefix.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Parametreli dosya adı oluştur
-        filename = build_filename_with_params(
-            base_name=base_prefix.name,
-            mode_suffix="dlcls" if task_key == "tile_classification" else "dl",
-            arch="TileClassifier" if task_key == "tile_classification" else arch,
+        filename, prob_path, mask_path = build_dl_output_paths(
+            out_prefix=out_prefix,
+            task_type=task_key,
+            arch=arch,
             encoder=encoder,
             weight_type=weight_type,
             threshold=threshold,
@@ -3352,16 +3352,13 @@ def infer_tiled(
                 ),
             )
             band_importance_txt_path, band_importance_json_path = _write_band_importance_report(
-                out_dir=base_prefix.parent,
+                out_dir=_output_base_path(out_prefix).parent,
                 filename_stem=filename,
                 summary=summary,
             )
             if band_importance_txt_path is not None:
                 LOGGER.info("Band onem raporu yazildi: %s", band_importance_txt_path)
         
-        prob_path = base_prefix.parent / f"{filename}_prob.tif"
-        mask_path = base_prefix.parent / f"{filename}_mask.tif"
-
         write_prob_and_mask_rasters(
             prob_map=prob_map,
             mask=binary_mask,
@@ -5515,6 +5512,51 @@ def build_filename_with_params(
         parts.append(f"minarea{int(min_area)}")
     
     return "_".join(parts)
+
+
+def _format_multiscale_scale_token(scale: float) -> str:
+    """Create a stable filename token for a multi-scale factor."""
+    scale_text = f"{float(scale):.6f}".rstrip("0").rstrip(".")
+    return f"scale{scale_text.replace('.', 'p')}"
+
+
+def _append_output_token(path: Path, token: str) -> Path:
+    """Append a safe token to an output prefix without stripping existing dotted parts."""
+    base_path = _output_base_path(path)
+    safe_token = _safe_token(token)
+    if not safe_token:
+        return base_path
+    return base_path.parent / f"{base_path.name}_{safe_token}"
+
+
+def build_dl_output_paths(
+    *,
+    out_prefix: Path,
+    task_type: str,
+    arch: Optional[str],
+    encoder: Optional[str],
+    weight_type: Optional[str],
+    threshold: float,
+    tile: int,
+    min_area: Optional[float],
+) -> Tuple[str, Path, Path]:
+    """Build standard DL probability/mask output paths."""
+    base_prefix = _output_base_path(out_prefix)
+    base_prefix.parent.mkdir(parents=True, exist_ok=True)
+    task_key = str(task_type).strip().lower()
+    filename = build_filename_with_params(
+        base_name=base_prefix.name,
+        mode_suffix="dlcls" if task_key == "tile_classification" else "dl",
+        arch="TileClassifier" if task_key == "tile_classification" else arch,
+        encoder=encoder,
+        weight_type=weight_type,
+        threshold=threshold,
+        tile=tile,
+        min_area=min_area,
+    )
+    prob_path = base_prefix.parent / f"{filename}_prob.tif"
+    mask_path = base_prefix.parent / f"{filename}_mask.tif"
+    return filename, prob_path, mask_path
 
 
 def _stat_mtime_ns(stat_result: os.stat_result) -> int:
@@ -7766,6 +7808,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     # Derin öğrenme çıkarımını çalıştır (etkinse)
     outputs = None
+    multiscale_saved_outputs: List[Tuple[str, InferenceOutputs]] = []
     if enc_mode in ("", "none") and config.enable_deep_learning and model is not None:
         # Weight type belirleme (eğitilmiş mi, ImageNet mi)
         single_wt = "trained" if weights_path is not None else ("imagenet" if config.zero_shot_imagenet else "random")
@@ -7824,14 +7867,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
             with rasterio.open(input_path) as _src:
                 orig_h, orig_w = _src.height, _src.width
+                orig_transform = _src.transform
+                orig_crs = _src.crs
 
             scale_prob_maps: List[np.ndarray] = []
-            base_outputs: Optional[InferenceOutputs] = None
+            reference_outputs: Optional[InferenceOutputs] = None
             tmp_dir = Path(tempfile.mkdtemp(prefix="multiscale_"))
 
             for si, scale in enumerate(ms_scales):
                 LOGGER.info("")
                 LOGGER.info("--- Ölçek %d/%d: %.2fx ---", si + 1, len(ms_scales), scale)
+                scale_token = _format_multiscale_scale_token(scale)
+                scale_infer_kwargs = dict(_infer_kwargs)
+                if config.multiscale_save_individual_outputs:
+                    scale_infer_kwargs["out_prefix"] = _append_output_token(out_prefix, scale_token)
 
                 if abs(scale - 1.0) < 1e-6:
                     scale_outputs = infer_tiled(
@@ -7839,15 +7888,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         precomputed_deriv=precomputed_deriv,
                         derivative_cache_tif=derivative_cache_tif,
                         derivative_cache_meta=derivative_cache_meta,
-                        **_infer_kwargs,
+                        **scale_infer_kwargs,
                     )
-                    if base_outputs is None:
-                        base_outputs = scale_outputs
-                    if scale_outputs.prob_map is not None:
-                        scale_prob_maps.append(scale_outputs.prob_map)
-                    else:
-                        with rasterio.open(scale_outputs.prob_path) as _ps:
-                            scale_prob_maps.append(_ps.read(1).astype(np.float32))
                 else:
                     scaled_path = tmp_dir / f"scaled_{scale:.2f}_{input_path.name}"
                     _downsample_raster(input_path, scale, scaled_path)
@@ -7856,21 +7898,35 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         precomputed_deriv=None,
                         derivative_cache_tif=None,
                         derivative_cache_meta=None,
-                        **_infer_kwargs,
+                        **scale_infer_kwargs,
                     )
-                    if base_outputs is None:
-                        base_outputs = scale_outputs
-                    if scale_outputs.prob_map is not None:
-                        small_prob = scale_outputs.prob_map
-                    else:
-                        with rasterio.open(scale_outputs.prob_path) as _ps:
-                            small_prob = _ps.read(1).astype(np.float32)
-                    upsampled = _upsample_prob_map(small_prob, orig_h, orig_w)
-                    scale_prob_maps.append(upsampled)
                     try:
                         scaled_path.unlink(missing_ok=True)
                     except Exception:
                         pass
+
+                if reference_outputs is None:
+                    reference_outputs = scale_outputs
+                if config.multiscale_save_individual_outputs:
+                    multiscale_saved_outputs.append((scale_token, scale_outputs))
+                    LOGGER.info(
+                        "Ölçek %.2fx ayrı raster çıktılarını yazdı: %s, %s",
+                        scale,
+                        scale_outputs.prob_path,
+                        scale_outputs.mask_path,
+                    )
+
+                if scale_outputs.prob_map is not None:
+                    native_prob = scale_outputs.prob_map
+                else:
+                    with rasterio.open(scale_outputs.prob_path) as _ps:
+                        native_prob = _ps.read(1).astype(np.float32)
+
+                if abs(scale - 1.0) < 1e-6:
+                    scale_prob_maps.append(native_prob)
+                else:
+                    upsampled = _upsample_prob_map(native_prob, orig_h, orig_w)
+                    scale_prob_maps.append(upsampled)
 
             LOGGER.info("")
             LOGGER.info("Ölçekler birleştiriliyor: %s ...", config.multiscale_merge)
@@ -7884,23 +7940,38 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
             merged_mask = (merged_prob >= config.th).astype(np.uint8)
 
-            assert base_outputs is not None
-            with rasterio.open(base_outputs.prob_path, "r+") as dst:
-                dst.write(merged_prob.astype(np.float32), 1)
-            with rasterio.open(base_outputs.mask_path, "r+") as dst:
-                dst.write(merged_mask, 1)
+            assert reference_outputs is not None
+            _, merged_prob_path, merged_mask_path = build_dl_output_paths(
+                out_prefix=out_prefix,
+                task_type=dl_task,
+                arch="TileClassifier" if dl_task == "tile_classification" else config.arch,
+                encoder=config.encoder,
+                weight_type=single_wt,
+                threshold=config.th,
+                tile=config.tile,
+                min_area=config.min_area,
+            )
+            write_prob_and_mask_rasters(
+                prob_map=merged_prob.astype(np.float32),
+                mask=merged_mask,
+                transform=orig_transform,
+                crs=orig_crs,
+                prob_path=merged_prob_path,
+                mask_path=merged_mask_path,
+            )
 
             outputs = InferenceOutputs(
-                prob_path=base_outputs.prob_path,
-                mask_path=base_outputs.mask_path,
+                prob_path=merged_prob_path,
+                mask_path=merged_mask_path,
                 prob_map=merged_prob,
                 mask=merged_mask,
-                transform=base_outputs.transform,
-                crs=base_outputs.crs,
-                band_importance_txt=base_outputs.band_importance_txt,
-                band_importance_json=base_outputs.band_importance_json,
+                transform=orig_transform,
+                crs=orig_crs,
+                band_importance_txt=reference_outputs.band_importance_txt,
+                band_importance_json=reference_outputs.band_importance_json,
             )
             LOGGER.info("Multi-scale birleştirme tamamlandı. %d ölçek → merged prob map.", len(ms_scales))
+            LOGGER.info("Birleşik raster çıktıları: %s, %s", merged_prob_path, merged_mask_path)
 
             try:
                 import shutil
@@ -8127,6 +8198,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 _output_base_path(outputs.mask_path),
                 outputs.prob_path,
                 outputs.mask_path,
+            ))
+        for scale_label, scale_outputs in multiscale_saved_outputs:
+            vector_jobs.append((
+                f"dl_{scale_label}",
+                scale_outputs.mask,
+                scale_outputs.prob_map,
+                scale_outputs.transform,
+                scale_outputs.crs,
+                _output_base_path(scale_outputs.mask_path),
+                scale_outputs.prob_path,
+                scale_outputs.mask_path,
             ))
         if yolo_outputs is not None:
             vector_jobs.append((
