@@ -48,9 +48,9 @@ _LAS_DEFAULT_CELL = 0.5
 # Komut satiri argumanlari her zaman bu degerleri ezer.
 CONFIG: dict[str, Any] = {
     # Girdi DSM GeoTIFF veya LAS/LAZ yolu.
-    "input": "/on_veri/karlik_vadi_dsm.tif",
+    "input": "/workspace/on_veri/karlik_vadi_dsm.tif",
     # Uretilecek DTM GeoTIFF yolu.
-    "output": "/on_veri/karlik_vadi_dtm.tif",
+    "output": "/workspace/on_veri/karlik_vadi_dtm.tif",
     # Isleme yontemi:
     # - "auto": Once SMRF dener, hata olursa (allow_fallback=True ise) fallback'e gecer.
     # - "smrf": Yalnizca SMRF (hata olursa durur).

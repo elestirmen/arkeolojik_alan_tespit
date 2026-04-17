@@ -26,6 +26,7 @@ from archaeo_detect import (
     apply_trained_only_metadata_locks,
     build_config_from_args,
     compute_derivatives_with_rvt,
+    default_config_path,
     export_candidate_locations_table,
     percentile_clip,
     compute_ndsm,
@@ -33,6 +34,7 @@ from archaeo_detect import (
     _otsu_threshold_0to1,
     robust_norm,
     robust_norm_fixed,
+    stack_channels,
     fill_nodata,
     _local_variance,
     _hessian_response,
@@ -231,6 +233,29 @@ class TestNormalizationFunctions:
         assert result.shape == arr.shape
         assert result.min() >= 0.0
         assert result.max() <= 1.0
+
+    def test_stack_channels_canonical_order(self):
+        """stack_channels R,G,B,SVF,SLRM sırasını korumalı."""
+        rgb = np.array(
+            [
+                [[1, 2], [3, 4]],
+                [[5, 6], [7, 8]],
+                [[9, 10], [11, 12]],
+            ],
+            dtype=np.float32,
+        )
+        svf = np.array([[13, 14], [15, 16]], dtype=np.float32)
+        slrm = np.array([[17, 18], [19, 20]], dtype=np.float32)
+
+        result = stack_channels(rgb, svf, slrm)
+
+        assert result.shape == (5, 2, 2)
+        assert result.dtype == np.float32
+        assert np.array_equal(result[0], rgb[0])
+        assert np.array_equal(result[1], rgb[1])
+        assert np.array_equal(result[2], rgb[2])
+        assert np.array_equal(result[3], svf)
+        assert np.array_equal(result[4], slrm)
 
 
 # ============================================================================
@@ -685,6 +710,19 @@ class TestWeightLoadingCompatibility:
 # ============================================================================
 
 class TestConfigOverride:
+    def test_default_config_prefers_local_override(self, tmp_path: Path, monkeypatch):
+        """Varsa config.local.yaml, varsayilan config olarak tercih edilmeli."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.local.yaml").write_text("input: local.tif\n", encoding="utf-8")
+
+        assert default_config_path() == "config.local.yaml"
+
+    def test_default_config_falls_back_to_repo_config(self, tmp_path: Path, monkeypatch):
+        """Yerel override yoksa varsayilan config.yaml kullanilmali."""
+        monkeypatch.chdir(tmp_path)
+
+        assert default_config_path() == "config.yaml"
+
     def test_cli_overrides_yaml_even_when_default_values(self, tmp_path: Path):
         """CLI override, YAML'daki ayarları default değerle de olsa ezebilmeli."""
         yaml_path = tmp_path / "config.yaml"

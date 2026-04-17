@@ -1,8 +1,8 @@
 # IDE-first trained tile-classification profile
 # 5-channel tile stack: R, G, B, SVF, SLRM (GeoTIFF bands 1–5). Weights/checkpoints use 5ch, not 12ch.
-input: "on_veri/karlik_vadi_rgb_svf_slrm_5band.tif"
-weights: "checkpoints/active/model.pth"
-training_metadata: "checkpoints/active/training_metadata.json"
+input: "workspace/on_veri/karlik_vadi_rgb_svf_slrm_5band.tif"
+weights: "workspace/checkpoints/active/model.pth"
+training_metadata: "workspace/checkpoints/active/training_metadata.json"
 
 enable_deep_learning: true
 enable_classic: false

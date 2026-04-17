@@ -1,35 +1,32 @@
-﻿# Her şeyi ignore et
+# Source files and docs
 *
-
-# Klasörleri beyaz listele (izinli uzantılara erişebilmek için)
 !*/
-
-# Yalnızca aşağıdaki dosya türleri izinli
 !*.py
 !*.md
 !*.yaml
 !*.yml
+!*.sh
+!*.bat
 !requirements.txt
 !LICENSE
-
-# Meta dosyaları da izinli
 !.gitignore
 !.gitattributes
 
-# Yerel conda ortamı (repo'ya gönderilmesin)
+# Local environments and caches
 .conda_pdal_env/
-
-# Sanal ortamlar ve geçici çalışma çıktıları
-.venv310/
 .venv/
+.venv310/
 venv/
 archeo/
 .pytest_cache/
 .ruff_cache/
 __pycache__/
 .cursor/
-cache/
-checkpoints/
-ciktilar/
-training_data/
-on_veri/
+.vscode/
+
+# Repo-local workspace for data, models, outputs, and other large artifacts
+workspace/*
+!workspace/README.md
+
+# Optional local config override
+config.local.yaml

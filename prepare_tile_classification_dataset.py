@@ -62,7 +62,7 @@ except ImportError:
 
 CONFIG = {
     "pairs": [],
-    "output_dir": "training_data_classification",
+    "output_dir": "workspace/training_data_classification",
     "tile_size": 256,
     "overlap": 128,
     "bands": "1,2,3,4,5",

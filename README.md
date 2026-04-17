@@ -1,107 +1,109 @@
-# 🏛️ Archaeological Site Detection (Deep Learning + Classical Image Processing)
+﻿# ğŸ›ï¸ Archaeological Site Detection (Deep Learning + Classical Image Processing)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Turkish documentation: [`README_TR.md`](README_TR.md).
 
-> **Advanced AI system for automatic detection of archaeological structures from multi-band GeoTIFF data. Primarily designed for derivatives built from UAV (drone) nadir imagery—orthophotos, DSM/DTM, and stacked relief channels. Satellite imagery and other aerial/LiDAR sources are also supported when provided in the same multi-band GeoTIFF format.**
+> **Advanced AI system for automatic detection of archaeological structures from multi-band GeoTIFF data. Primarily designed for derivatives built from UAV (drone) nadir imageryâ€”orthophotos, DSM/DTM, and stacked relief channels. Satellite imagery and other aerial/LiDAR sources are also supported when provided in the same multi-band GeoTIFF format.**
 
 This project combines **deep learning** and **classical image processing** methods to detect archaeological traces (tumuli, ditches, mounds, wall remains, etc.) from multi-band GeoTIFF data (RGB, DSM, DTM). Input data is most commonly produced from **UAV photogrammetry**; **satellite imagery or other aerial products** can also be used as long as the band layout and georeferencing are compatible.
 
 ### Current default workflow (repository `config.yaml`)
 
+If `config.local.yaml` exists, the CLI prefers it automatically; otherwise it falls back to `config.yaml`.
+
 The checked-in profile targets **tile-level classification** (`dl_task: tile_classification`) with a **single trained checkpoint** (`trained_model_only: true`). In that mode:
 
 - Use **`weights`** (your `.pth` file) and **`training_metadata`** (JSON from training).
-- **`tile`**, **`overlap`**, and **`bands`** are taken from `training_metadata.json` during inference—do not “fix” mismatches by editing overlap in YAML; retrain with the desired overlap if needed.
-- After a successful `training.py` run, the best weights are published to `checkpoints/active/model.pth` and metadata to `checkpoints/active/training_metadata.json` (you may point `weights` to another file in `checkpoints/active/` if you prefer).
+- **`tile`**, **`overlap`**, and **`bands`** are taken from `training_metadata.json` during inferenceâ€”do not â€œfixâ€ mismatches by editing overlap in YAML; retrain with the desired overlap if needed.
+- After a successful `training.py` run, the best weights are published to `workspace/checkpoints/active/model.pth` and metadata to `workspace/checkpoints/active/training_metadata.json` (you may point `weights` to another file in `workspace/checkpoints/active/` if you prefer).
 
-**Model input channels (current code):** the deep-learning stack is **5 channels** — **R, G, B, SVF, SLRM** — in that order (`archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`). The GeoTIFF remains **5 bands** (RGB + DSM + DTM). **SVF** (Sky-View Factor) and **SLRM** (Simple Local Relief Model from RVT, computed on DTM) are **derived inside** `archaeo_detect.py` / the dataset scripts; they are not separate GeoTIFF bands. Older documentation that referred to a 12-channel tensor (nDSM, multi-scale TPI, extra RVT openness channels, etc.) describes a **previous schema**, not the current training + inference path.
+**Model input channels (current code):** the deep-learning stack is **5 channels** â€” **R, G, B, SVF, SLRM** â€” in that order (`archeo_shared/channels.py` â†’ `MODEL_CHANNEL_NAMES`). The GeoTIFF remains **5 bands** (RGB + DSM + DTM). **SVF** (Sky-View Factor) and **SLRM** (Simple Local Relief Model from RVT, computed on DTM) are **derived inside** `archaeo_detect.py` / the dataset scripts; they are not separate GeoTIFF bands. Older documentation that referred to a 12-channel tensor (nDSM, multi-scale TPI, extra RVT openness channels, etc.) describes a **previous schema**, not the current training + inference path.
 
 ---
 
-## 📑 Table of Contents
+## ğŸ“‘ Table of Contents
 
-- [✨ Features](#-features)
-- [🎯 What It Does](#-what-it-does)
-- [🚀 Quick Start](#-quick-start)
-- [📦 Installation](#-installation)
-- [🔗 Band Merge Tool (`veri_birlestir_rgb_dsm_dtm.py`)](#-band-merge-tool-veri_birlestir_rgb_dsm_dtmpy)
+- [âœ¨ Features](#-features)
+- [ğŸ¯ What It Does](#-what-it-does)
+- [ğŸš€ Quick Start](#-quick-start)
+- [ğŸ“¦ Installation](#-installation)
+- [ğŸ”— Band Merge Tool (`veri_birlestir_rgb_dsm_dtm.py`)](#-band-merge-tool-veri_birlestir_rgb_dsm_dtmpy)
 - [DSM to DTM Preprocessing (`dtm_uret.py`)](#dsm-to-dtm-preprocessing-dtm_uretpy)
-- [🏷️ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-labeling-tool-ground_truth_kare_etiketleme_qtpy)
-- [🗂️ Tile Classification Dataset Tool (`prepare_tile_classification_dataset.py`)](#%EF%B8%8F-tile-classification-dataset-tool-prepare_tile_classification_datasetpy)
-- [🎮 Usage](#-usage)
-- [⚙️ Configuration](#️-configuration)
-- [📂 Output Files](#-output-files)
-- [🔬 How It Works](#-how-it-works)
-- [💡 Use Cases](#-use-cases)
-- [🎨 Visualization](#-visualization)
-- [⚡ Performance Optimization](#-performance-optimization)
-- [🐛 Troubleshooting](#-troubleshooting)
-- [❓ FAQ](#-faq)
-- [🎓 Model Training Guide](#-model-training-guide)
-- [🔬 Advanced Features](#-advanced-features)
-- [📚 Technical Details](#-technical-details)
-- [🤝 Contributing](#-contributing)
-- [📄 License](#-license)
+- [ğŸ·ï¸ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-labeling-tool-ground_truth_kare_etiketleme_qtpy)
+- [ğŸ—‚ï¸ Tile Classification Dataset Tool (`prepare_tile_classification_dataset.py`)](#%EF%B8%8F-tile-classification-dataset-tool-prepare_tile_classification_datasetpy)
+- [ğŸ® Usage](#-usage)
+- [âš™ï¸ Configuration](#ï¸-configuration)
+- [ğŸ“‚ Output Files](#-output-files)
+- [ğŸ”¬ How It Works](#-how-it-works)
+- [ğŸ’¡ Use Cases](#-use-cases)
+- [ğŸ¨ Visualization](#-visualization)
+- [âš¡ Performance Optimization](#-performance-optimization)
+- [ğŸ› Troubleshooting](#-troubleshooting)
+- [â“ FAQ](#-faq)
+- [ğŸ“ Model Training Guide](#-model-training-guide)
+- [ğŸ”¬ Advanced Features](#-advanced-features)
+- [ğŸ“š Technical Details](#-technical-details)
+- [ğŸ¤ Contributing](#-contributing)
+- [ğŸ“„ License](#-license)
 
 ---
 
-## ✨ Features
+## âœ¨ Features
 
-### 🧠 Four Powerful Methods
+### ğŸ§  Four Powerful Methods
 - **Deep Learning**: U-Net, DeepLabV3+ and other modern segmentation architectures
-- **YOLO11 (NEW!)**: Fast object detection and segmentation with Ultralytics YOLO11 + labeled terrain inventory 🏷️
-  - ⚠️ **Note:** Fine-tuning required for nadir (bird's-eye) imagery (see YOLO11_NADIR_TRAINING.md)
+- **YOLO11 (NEW!)**: Fast object detection and segmentation with Ultralytics YOLO11 + labeled terrain inventory ğŸ·ï¸
+  - âš ï¸ **Note:** Fine-tuning required for nadir (bird's-eye) imagery (see docs/YOLO11_NADIR_TRAINING.md)
 - **Classical Image Processing**: RVT (Relief Visualization Toolbox), Hessian matrix, Morphological operators
 - **Hybrid Fusion**: Smart fusion combining strengths of each method
 
-### 🎯 Smart Detection Features
-- ✅ **Multi-Encoder Support**: ResNet, EfficientNet, VGG, DenseNet, MobileNet and more
-- ✅ **Zero-Shot Learning**: Works even without trained models using ImageNet weights
-- ✅ **Ensemble Learning**: Combines results from multiple encoders for more reliable detection
-- ✅ **Multi-Scale Analysis**: Detects structures of different sizes
-- ✅ **🆕 Labeled Object Detection**: Automatic labeling of 80 different object classes (trees, buildings, vehicles, etc.) with YOLO11
-- ✅ **🆕 5-channel DL stack**: R, G, B from the raster plus **SVF** and **SLRM** (from DTM via RVT), assembled in code—not extra GeoTIFF bands
-- ✅ **🆕 CBAM attention (optional)**: Supported in `training.py` when attention is enabled (off in the checked-in `CONFIG` by default)
+### ğŸ¯ Smart Detection Features
+- âœ… **Multi-Encoder Support**: ResNet, EfficientNet, VGG, DenseNet, MobileNet and more
+- âœ… **Zero-Shot Learning**: Works even without trained models using ImageNet weights
+- âœ… **Ensemble Learning**: Combines results from multiple encoders for more reliable detection
+- âœ… **Multi-Scale Analysis**: Detects structures of different sizes
+- âœ… **ğŸ†• Labeled Object Detection**: Automatic labeling of 80 different object classes (trees, buildings, vehicles, etc.) with YOLO11
+- âœ… **ğŸ†• 5-channel DL stack**: R, G, B from the raster plus **SVF** and **SLRM** (from DTM via RVT), assembled in codeâ€”not extra GeoTIFF bands
+- âœ… **ğŸ†• CBAM attention (optional)**: Supported in `training.py` when attention is enabled (off in the checked-in `CONFIG` by default)
 
-### 🔧 Technical Features
-- 🚀 **Tile-Based Processing**: Memory-efficient processing for large images
-- 🎨 **Seamless Mosaicking**: No artifacts at tile boundaries with cosine feathering
-- 📊 **Robust Normalization**: Global or local percentile-based normalization
-- ⚡ **Cache System**: 10-100x speedup by caching RVT calculations
-- 🎯 **Smart Masking**: Automatic filtering of tall structures (trees, buildings)
-- 📐 **Vectorization**: Converts results to GIS-compatible polygons
-- 🏷️ **Ground Truth Labeling**: Interactive Qt-based GeoTIFF annotation tool with layer management
+### ğŸ”§ Technical Features
+- ğŸš€ **Tile-Based Processing**: Memory-efficient processing for large images
+- ğŸ¨ **Seamless Mosaicking**: No artifacts at tile boundaries with cosine feathering
+- ğŸ“Š **Robust Normalization**: Global or local percentile-based normalization
+- âš¡ **Cache System**: 10-100x speedup by caching RVT calculations
+- ğŸ¯ **Smart Masking**: Automatic filtering of tall structures (trees, buildings)
+- ğŸ“ **Vectorization**: Converts results to GIS-compatible polygons
+- ğŸ·ï¸ **Ground Truth Labeling**: Interactive Qt-based GeoTIFF annotation tool with layer management
 
-### 🌐 GIS Integration
-- 📁 Vector output in GeoPackage (.gpkg) format
-- 🗺️ Geographic coordinate system (CRS) preserved
-- 📏 Area calculation and filtering
-- 🎯 Compatible with QGIS, ArcGIS and similar software
+### ğŸŒ GIS Integration
+- ğŸ“ Vector output in GeoPackage (.gpkg) format
+- ğŸ—ºï¸ Geographic coordinate system (CRS) preserved
+- ğŸ“ Area calculation and filtering
+- ğŸ¯ Compatible with QGIS, ArcGIS and similar software
 
 ---
 
-## 🎯 What It Does
+## ğŸ¯ What It Does
 
 This system can detect the following archaeological features:
 
 | Structure Type | Description | Detection Method |
 |----------------|-------------|------------------|
-| 🏔️ **Tumuli** | Raised burial mounds | RVT + Hessian + DL |
-| 🏛️ **Mounds** | Settlement mounds | All methods |
-| 🧱 **Wall Remains** | Linear structure traces | Hessian + DL |
-| ⭕ **Ring Ditches** | Circular defensive structures | Morphological + DL |
-| 🏰 **Fortress Remains** | Large structure complexes | Fusion (most effective) |
-| 🏺 **Settlement Traces** | Irregular topographic anomalies | Classical + DL |
-| 🛤️ **Ancient Roads** | Linear elevation changes | Hessian + RVT |
+| ğŸ”ï¸ **Tumuli** | Raised burial mounds | RVT + Hessian + DL |
+| ğŸ›ï¸ **Mounds** | Settlement mounds | All methods |
+| ğŸ§± **Wall Remains** | Linear structure traces | Hessian + DL |
+| â­• **Ring Ditches** | Circular defensive structures | Morphological + DL |
+| ğŸ° **Fortress Remains** | Large structure complexes | Fusion (most effective) |
+| ğŸº **Settlement Traces** | Irregular topographic anomalies | Classical + DL |
+| ğŸ›¤ï¸ **Ancient Roads** | Linear elevation changes | Hessian + RVT |
 
 ---
 
-## 🚀 Quick Start
+## ğŸš€ Quick Start
 
-### End-to-end: labels → tiles → train → detect
+### End-to-end: labels â†’ tiles â†’ train â†’ detect
 
 ```bash
 pip install -r requirements.txt
@@ -110,28 +112,28 @@ pip install -r requirements.txt
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
-  --output training_data
+  --output workspace/training_data
 
 # 1b) Direct tile-classification dataset with explicit Positive/Negative folders
 python prepare_tile_classification_dataset.py \
   --pair kesif_alani.tif ground_truth.tif \
-  --output-dir training_data_cls \
+  --output-dir workspace/training_data_classification \
   --sampling-mode selected_regions \
   --overwrite
 
 # 2) Train (training.py now accepts both layouts)
-python training.py --data training_data_cls --task tile_classification --epochs 50
+python training.py --data workspace/training_data_classification --task tile_classification --epochs 50
 
-# 3) Inference (uses config.yaml; publishes to checkpoints/active/ are described in training output)
+# 3) Inference (uses config.yaml; publishes to workspace/checkpoints/active/ are described in training output)
 python archaeo_detect.py
 ```
 
 Artifacts after training:
 
-- `checkpoints/active/model.pth` — best checkpoint copied for inference
-- `checkpoints/active/training_metadata.json` — **source of truth** for `tile` / `overlap` / `bands` when `trained_model_only: true`
+- `workspace/checkpoints/active/model.pth` â€” best checkpoint copied for inference
+- `workspace/checkpoints/active/training_metadata.json` â€” **source of truth** for `tile` / `overlap` / `bands` when `trained_model_only: true`
 
-**Important:** With `trained_model_only: true`, do not raise `overlap` only in YAML to “match” training—metadata locks those fields. Change overlap in data prep + retrain if you need a different overlap.
+**Important:** With `trained_model_only: true`, do not raise `overlap` only in YAML to â€œmatchâ€ trainingâ€”metadata locks those fields. Change overlap in data prep + retrain if you need a different overlap.
 
 **Without a trained model yet:** use zero-shot / classical paths (see [Usage](#-usage)) or start from `configs/tile_classification_baseline.example.yaml` if provided.
 
@@ -141,15 +143,15 @@ Artifacts after training:
 python archaeo_detect.py
 ```
 
-Uses `config.yaml` (paths to input raster, methods, thresholds). Outputs go under `ciktilar/<session>/`.
+Uses `config.yaml` (paths to input raster, methods, thresholds). Outputs go under `workspace/ciktilar/<session>/`.
 
 ### IDE / no CLI for data prep
 
-`egitim_verisi_olusturma.py` includes a `CONFIG` dict (default `input`, `mask`, `output`, `tile_size`, `overlap`, `bands`, …). If you run the script without `--input` / `--mask`, it **requires** those keys to be set in `CONFIG`—there is no interactive file dialog for paths.
+`egitim_verisi_olusturma.py` includes a `CONFIG` dict (default `input`, `mask`, `output`, `tile_size`, `overlap`, `bands`, â€¦). If you run the script without `--input` / `--mask`, it **requires** those keys to be set in `CONFIG`â€”there is no interactive file dialog for paths.
 
 ---
 
-## 📦 Installation
+## ğŸ“¦ Installation
 
 ### System Requirements
 
@@ -162,14 +164,14 @@ Uses `config.yaml` (paths to input raster, methods, thresholds). Outputs go unde
 
 ### Step-by-Step Installation
 
-#### 1️⃣ Check Python and Pip
+#### 1ï¸âƒ£ Check Python and Pip
 
 ```bash
 python --version  # Should be Python 3.10 or higher
 pip --version     # pip should be installed
 ```
 
-#### 2️⃣ Create Virtual Environment (Recommended)
+#### 2ï¸âƒ£ Create Virtual Environment (Recommended)
 
 ```bash
 # Windows
@@ -183,7 +185,7 @@ source .venv310/bin/activate
 
 **Note:** `.venv310` is optional. If you use Conda (e.g., `archeo`), you can skip/remove `.venv310`.
 
-#### 3️⃣ Install Required Packages
+#### 3ï¸âƒ£ Install Required Packages
 
 ```bash
 pip install -r requirements.txt
@@ -203,7 +205,7 @@ pip install -r requirements.txt
 - `rvt-py>=1.2.0` (Python < 3.11) or `rvt>=2.0.0` (Python >= 3.11) - Relief Visualization Toolbox
 - `pyyaml>=6.0` - YAML configuration files
 
-#### 4️⃣ GDAL Installation (Optional but Recommended)
+#### 4ï¸âƒ£ GDAL Installation (Optional but Recommended)
 
 **Windows:**
 ```bash
@@ -222,7 +224,7 @@ sudo apt-get install gdal-bin python3-gdal
 brew install gdal
 ```
 
-#### 5️⃣ GPU Support (Optional)
+#### 5ï¸âƒ£ GPU Support (Optional)
 
 If you have an NVIDIA GPU, install CUDA:
 
@@ -242,7 +244,7 @@ print(torch.cuda.is_available())  # Should be True
 
 ---
 
-## 🔗 Band Merge Tool (`veri_birlestir_rgb_dsm_dtm.py`)
+## ğŸ”— Band Merge Tool (`veri_birlestir_rgb_dsm_dtm.py`)
 
 `veri_birlestir_rgb_dsm_dtm.py` combines separate RGB, DSM, and DTM GeoTIFF files into a single 5-band GeoTIFF ready for the detection and training pipeline.
 
@@ -376,30 +378,30 @@ python dtm_uret.py \
 
 ---
 
-## 🏷️ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)
+## ğŸ·ï¸ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)
 
 Interactive Qt-based tool for creating binary ground truth masks on GeoTIFF imagery. Draw rectangles on a preview of your raster data and export pixel-accurate GeoTIFF masks for model training.
 
-### ✨ Key Features
+### âœ¨ Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **🖱️ Rectangle Drawing** | Left-click + drag to draw/erase annotation rectangles |
-| **🔍 Zoom & Pan** | Mouse wheel to zoom, right-click to pan |
-| **📐 Square Lock** | Constrain drawing to perfect squares |
-| **↩️ Undo** | Full undo history (Ctrl+Z) |
-| **🎨 Band Selection** | Auto-detects bands; dialog for multi-band files (RGB, BGR, NIR presets) |
-| **🗂️ Layer Panel** | Side panel with visibility toggles, opacity slider, drag-reorder |
-| **➕ Extra Layers** | Load additional GeoTIFF rasters as overlay layers |
-| **💾 GeoTIFF Export** | Saves mask with source CRS, transform, and DEFLATE compression |
-| **🖼️ Drag & Drop** | Drop `.tif` files directly onto the window |
-| **🎨 Light Theme** | Modern light UI with gradient toolbar and styled controls |
-| **🔌 Dual Backend** | Works with PySide6 or PyQt6 |
+| **ğŸ–±ï¸ Rectangle Drawing** | Left-click + drag to draw/erase annotation rectangles |
+| **ğŸ” Zoom & Pan** | Mouse wheel to zoom, right-click to pan |
+| **ğŸ“ Square Lock** | Constrain drawing to perfect squares |
+| **â†©ï¸ Undo** | Full undo history (Ctrl+Z) |
+| **ğŸ¨ Band Selection** | Auto-detects bands; dialog for multi-band files (RGB, BGR, NIR presets) |
+| **ğŸ—‚ï¸ Layer Panel** | Side panel with visibility toggles, opacity slider, drag-reorder |
+| **â• Extra Layers** | Load additional GeoTIFF rasters as overlay layers |
+| **ğŸ’¾ GeoTIFF Export** | Saves mask with source CRS, transform, and DEFLATE compression |
+| **ğŸ–¼ï¸ Drag & Drop** | Drop `.tif` files directly onto the window |
+| **ğŸ¨ Light Theme** | Modern light UI with gradient toolbar and styled controls |
+| **ğŸ”Œ Dual Backend** | Works with PySide6 or PyQt6 |
 
-### 🚀 Quick Start
+### ğŸš€ Quick Start
 
 ```bash
-# No arguments — opens file dialog
+# No arguments â€” opens file dialog
 python ground_truth_kare_etiketleme_qt.py
 
 # With arguments
@@ -418,7 +420,7 @@ python ground_truth_kare_etiketleme_qt.py \
   --preview-max-size 4096
 ```
 
-### ⌨️ Keyboard Shortcuts
+### âŒ¨ï¸ Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
@@ -432,7 +434,7 @@ python ground_truth_kare_etiketleme_qt.py \
 | `F` | Fit to window |
 | `W` | Invert mouse wheel direction |
 
-### 📋 CLI Parameters
+### ğŸ“‹ CLI Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|--------:|
@@ -441,41 +443,41 @@ python ground_truth_kare_etiketleme_qt.py \
 | `--existing-mask` | Pre-existing mask to continue editing | _(none)_ |
 | `--preview-max-size` | Max preview dimension in pixels (0 = full res) | `0` |
 | `--bands` | Comma-separated band indices for RGB display | `1,2,3` |
-| `--positive-value` | Pixel value for positive class (1–255) | `1` |
+| `--positive-value` | Pixel value for positive class (1â€“255) | `1` |
 | `--square-mode` | Start with square lock enabled | `false` |
 
-### 🎵 Band Selection
+### ğŸµ Band Selection
 
 When opening a file, the tool automatically detects the number of bands:
 
 | Band Count | Behavior |
 |:----------:|----------|
-| **1** | Automatic grayscale — no dialog |
-| **2** | Uses bands 1,2 — no dialog |
+| **1** | Automatic grayscale â€” no dialog |
+| **2** | Uses bands 1,2 â€” no dialog |
 | **3+** | Shows **Band Selection Dialog** with presets |
 
 **Available Presets (3+ bands):**
-- **RGB (1, 2, 3)** — standard true-color
-- **BGR (3, 2, 1)** — reversed band order
-- **NIR (4, 3, 2)** — near-infrared false color (5+ bands)
-- **Grayscale (Band 1)** — single band
-- **Custom** — pick any band for R/G/B via spin boxes
+- **RGB (1, 2, 3)** â€” standard true-color
+- **BGR (3, 2, 1)** â€” reversed band order
+- **NIR (4, 3, 2)** â€” near-infrared false color (5+ bands)
+- **Grayscale (Band 1)** â€” single band
+- **Custom** â€” pick any band for R/G/B via spin boxes
 
-### 🗂️ Layer Panel
+### ğŸ—‚ï¸ Layer Panel
 
 The left-side panel manages display layers:
 
-- **☑️ Visibility** — checkbox per layer to show/hide
-- **🔀 Reorder** — drag items or use ⬆/⬇ buttons (top = foreground)
-- **🎚️ Opacity** — slider (0–100%) per selected layer
-- **➕ Add Layer** — load extra GeoTIFFs as visual overlays
-- **➖ Remove Layer** — delete extra layers (base image and mask cannot be removed)
+- **â˜‘ï¸ Visibility** â€” checkbox per layer to show/hide
+- **ğŸ”€ Reorder** â€” drag items or use â¬†/â¬‡ buttons (top = foreground)
+- **ğŸšï¸ Opacity** â€” slider (0â€“100%) per selected layer
+- **â• Add Layer** â€” load extra GeoTIFFs as visual overlays
+- **â– Remove Layer** â€” delete extra layers (base image and mask cannot be removed)
 
 Default layers:
-1. 🔴 **Maske** — the annotation overlay (red, semi-transparent)
-2. 🖼️ **Ana Görüntü** — the base raster
+1. ğŸ”´ **Maske** â€” the annotation overlay (red, semi-transparent)
+2. ğŸ–¼ï¸ **Ana GÃ¶rÃ¼ntÃ¼** â€” the base raster
 
-### 🔧 Dependencies
+### ğŸ”§ Dependencies
 
 ```bash
 pip install rasterio opencv-python numpy
@@ -484,7 +486,7 @@ pip install PySide6   # or: pip install PyQt6
 
 ---
 
-## 🗂️ Tile Classification Dataset Tool (`prepare_tile_classification_dataset.py`)
+## ğŸ—‚ï¸ Tile Classification Dataset Tool (`prepare_tile_classification_dataset.py`)
 
 Dedicated script for building an **explicit Positive/Negative tile classification dataset** from one or more raster + mask pairs. Unlike `egitim_verisi_olusturma.py` (which produces paired images/masks for segmentation or legacy tile_classification), this script outputs pre-sorted `Positive/` and `Negative/` folders directly, which is the canonical layout for `training.py --task tile_classification`.
 
@@ -493,12 +495,12 @@ Dedicated script for building an **explicit Positive/Negative tile classificatio
 ```
 output_dir/
   train/
-    Positive/   ← tiles where positive_ratio >= threshold
+    Positive/   â† tiles where positive_ratio >= threshold
     Negative/
   val/
     Positive/
     Negative/
-  test/          ← optional (when --test-ratio > 0)
+  test/          â† optional (when --test-ratio > 0)
     Positive/
     Negative/
   metadata.json
@@ -514,7 +516,7 @@ Each tile is a 5-channel `.npz` (or `.npy`) file compatible with `training.py ti
 # Single raster + mask pair
 python prepare_tile_classification_dataset.py \
   --pair kesif_alani.tif ground_truth.tif \
-  --output-dir training_data_cls \
+  --output-dir workspace/training_data_classification \
   --sampling-mode selected_regions \
   --overwrite
 
@@ -522,7 +524,7 @@ python prepare_tile_classification_dataset.py \
 python prepare_tile_classification_dataset.py \
   --pair bolge1.tif bolge1_mask.tif \
   --pair bolge2.tif bolge2_mask.tif \
-  --output-dir training_data_cls \
+  --output-dir workspace/training_data_classification \
   --train-negative-keep-ratio 0.35
 ```
 
@@ -538,7 +540,7 @@ python prepare_tile_classification_dataset.py \
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--pair RASTER MASK` | _(required)_ | Raster + mask pair; repeat for multiple sources |
-| `--output-dir` | `training_data_classification` | Output root directory |
+| `--output-dir` | `workspace/training_data_classification` | Output root directory |
 | `--tile-size` | `256` | Tile size in pixels |
 | `--overlap` | `128` | Sliding-window overlap in pixels |
 | `--bands` | `1,2,3,4,5` | 1-based band indices: R, G, B, DSM, DTM |
@@ -555,7 +557,7 @@ python prepare_tile_classification_dataset.py \
 | `--format` | `npz` | Output format: `npz` or `npy` |
 | `--num-workers` | auto | Parallel worker processes |
 | `--derivative-cache-mode` | `auto` | `none` \| `auto` \| `npz` \| `raster` |
-| `--derivative-cache-dir` | _(sibling `cache/`)_ | Where to store/read RVT derivative cache |
+| `--derivative-cache-dir` | _(sibling `workspace/cache/`)_ | Where to store/read RVT derivative cache |
 | `--recalculate-derivative-cache` | off | Force re-computation even if cache exists |
 | `--tile-prefix` | `""` | Optional prefix for tile filenames |
 | `--seed` | `42` | Random seed for reproducible splits |
@@ -565,12 +567,12 @@ python prepare_tile_classification_dataset.py \
 
 The script writes two companion CSV files alongside `metadata.json`:
 
-- **`tiles_manifest.csv`** — full record per tile: `tile_name`, `split`, `label`, `image_relpath`, `source_name`, `row_off`, `col_off`, `positive_ratio`, `valid_ratio`
-- **`tile_labels.csv`** — compact label index: `tile_name`, `split`, `tile_label`, `positive_ratio`, used by `training.py` for fast label counts without scanning files
+- **`tiles_manifest.csv`** â€” full record per tile: `tile_name`, `split`, `label`, `image_relpath`, `source_name`, `row_off`, `col_off`, `positive_ratio`, `valid_ratio`
+- **`tile_labels.csv`** â€” compact label index: `tile_name`, `split`, `tile_label`, `positive_ratio`, used by `training.py` for fast label counts without scanning files
 
 ---
 
-## 🎮 Usage
+## ğŸ® Usage
 
 ### Basic Usage
 
@@ -603,7 +605,7 @@ python archaeo_detect.py --th 0.7 --tile 1024 --enable-fusion -v
 
 ### Common Usage Examples
 
-#### 🔰 Example 1: First-Time Use (Zero-Shot)
+#### ğŸ”° Example 1: First-Time Use (Zero-Shot)
 
 Without trained models, using only ImageNet weights:
 
@@ -616,7 +618,7 @@ python archaeo_detect.py \
   -v
 ```
 
-#### 🎯 Example 2: Classical Method Only (Fast)
+#### ğŸ¯ Example 2: Classical Method Only (Fast)
 
 If no GPU or for quick testing:
 
@@ -628,7 +630,7 @@ python archaeo_detect.py \
   --cache-derivatives
 ```
 
-#### 🚀 Example 3: Ensemble (Multi-Encoder)
+#### ğŸš€ Example 3: Ensemble (Multi-Encoder)
 
 For highest accuracy with multiple encoders:
 
@@ -643,7 +645,7 @@ python archaeo_detect.py \
   -v
 ```
 
-#### 🎨 Example 4: With Custom Trained Model
+#### ğŸ¨ Example 4: With Custom Trained Model
 
 With your own trained model:
 
@@ -657,7 +659,7 @@ python archaeo_detect.py \
   --alpha 0.7
 ```
 
-#### 📊 Example 5: Large Area Analysis (Optimized)
+#### ğŸ“Š Example 5: Large Area Analysis (Optimized)
 
 Optimized settings for a wide area:
 
@@ -696,7 +698,7 @@ python archaeo_detect.py --help
 
 ---
 
-## ⚙️ Configuration
+## âš™ï¸ Configuration
 
 ### config.yaml File
 
@@ -708,17 +710,17 @@ System behavior is controlled by the `config.yaml` file. This file is **richly d
 
 1. **Input/Output**: File paths and band selection
 2. **Method Selection**: `enable_deep_learning`, `enable_classic`, `enable_yolo`, `enable_fusion`
-3. **DL task**: `dl_task` — `segmentation` (per-pixel) or `tile_classification` (tile score → risk map with overlap blending)
-4. **Trained-only mode**: `trained_model_only` — when `true`, enforces a single checkpoint + metadata (`weights`, `training_metadata`); locks tile/overlap/bands from metadata
+3. **DL task**: `dl_task` â€” `segmentation` (per-pixel) or `tile_classification` (tile score â†’ risk map with overlap blending)
+4. **Trained-only mode**: `trained_model_only` â€” when `true`, enforces a single checkpoint + metadata (`weights`, `training_metadata`); locks tile/overlap/bands from metadata
 5. **Deep Learning**: Architecture, encoder, weights, `zero_shot_imagenet`, attention / band importance (`save_band_importance`, `band_importance_max_tiles`)
 6. **Classical Methods**: RVT, Hessian, Morphology parameters
 7. **Advanced Topographic Analysis (legacy / off in default preset)**: `enable_curvature`, `enable_tpi`, `tpi_radii` still exist in `config.yaml` and `archaeo_detect.py` for experimentation, but the **checked-in 5-channel DL schema does not add curvature/TPI to the model tensor** (see comments at the top of `config.yaml`).
-8. **Fusion**: Hybrid combination settings (`alpha`, …) — requires both DL and classic enabled
+8. **Fusion**: Hybrid combination settings (`alpha`, â€¦) â€” requires both DL and classic enabled
 9. **YOLO11** (optional): Separate RGB-only inventory / segmentation path; usually off for the tile-classification preset
 10. **Tile Processing**: Memory and performance optimization (`tile` / `overlap` documented vs metadata-locked)
 11. **Normalization**: Data preprocessing
 12. **Masking**: Filtering tall structures (`mask_talls`, `rgb_only`)
-13. **Vectorization**: GIS output (`vectorize`, `min_area`, `export_candidate_excel`, …)
+13. **Vectorization**: GIS output (`vectorize`, `min_area`, `export_candidate_excel`, â€¦)
 14. **Performance**: Device, `half`, `seed`, `verbose`; automatic OOM guard for large rasters (full-raster derivative precompute is skipped if available RAM is insufficient)
 15. **Cache**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster cache tuning
 
@@ -756,10 +758,10 @@ cache_derivatives: true
 
 #### Input File Requirements:
 
-✅ **GeoTIFF format** (.tif or .tiff)  
-✅ **Multi-band** (at least 3 bands: RGB)  
-✅ **Same grid** (all bands same resolution and extent)  
-✅ **Geographic reference** (CRS/EPSG code)
+âœ… **GeoTIFF format** (.tif or .tiff)  
+âœ… **Multi-band** (at least 3 bands: RGB)  
+âœ… **Same grid** (all bands same resolution and extent)  
+âœ… **Geographic reference** (CRS/EPSG code)
 
 #### Recommended Band Structure:
 
@@ -787,14 +789,14 @@ gdal_edit.py -a_srs EPSG:32635 output.tif
 
 ---
 
-## 📂 Output Files
+## ğŸ“‚ Output Files
 
 When the system runs, the following files are created:
 
 All outputs are written under:
 
 ```
-ciktilar/<session_folder>/<out_name>*
+workspace/ciktilar/<session_folder>/<out_name>*
 ```
 
 `<session_folder>` uses a compact format:
@@ -811,14 +813,14 @@ This file contains all effective run parameters (final config values, parsed ban
 If enabled (`save_band_importance: true`), DL runs also write
 `*_band_importance.txt` and `*_band_importance.json`.
 
-### 📊 Raster Outputs (GeoTIFF)
+### ğŸ“Š Raster Outputs (GeoTIFF)
 
-#### 1️⃣ Deep Learning Outputs
+#### 1ï¸âƒ£ Deep Learning Outputs
 
 **Single Encoder:**
 ```
-kesif_alani_prob.tif     → Probability map (continuous values 0.0-1.0)
-kesif_alani_mask.tif     → Binary mask (0: not archaeological, 1: archaeological area)
+kesif_alani_prob.tif     â†’ Probability map (continuous values 0.0-1.0)
+kesif_alani_mask.tif     â†’ Binary mask (0: not archaeological, 1: archaeological area)
 ```
 
 **Multi-Encoder:**
@@ -831,55 +833,55 @@ kesif_alani_efficientnet-b3_prob.tif
 kesif_alani_efficientnet-b3_mask.tif
 ```
 
-#### 2️⃣ Classical Method Outputs
+#### 2ï¸âƒ£ Classical Method Outputs
 
 ```
-kesif_alani_classic_prob.tif     → Combined classical probability
-kesif_alani_classic_mask.tif     → Classical binary mask
+kesif_alani_classic_prob.tif     â†’ Combined classical probability
+kesif_alani_classic_mask.tif     â†’ Classical binary mask
 ```
 
 **Intermediate Files (classic_save_intermediate: true):**
 ```
-kesif_alani_classic_rvtlog_prob.tif    → RVT method only
-kesif_alani_classic_hessian_prob.tif   → Hessian method only
-kesif_alani_classic_morph_prob.tif     → Morphology method only
+kesif_alani_classic_rvtlog_prob.tif    â†’ RVT method only
+kesif_alani_classic_hessian_prob.tif   â†’ Hessian method only
+kesif_alani_classic_morph_prob.tif     â†’ Morphology method only
 ```
 
-#### 3️⃣ Fusion Outputs
+#### 3ï¸âƒ£ Fusion Outputs
 
 ```
 kesif_alani_fused_resnet34_prob.tif
 kesif_alani_fused_resnet34_mask.tif
 ```
 
-### 📍 Vector Outputs (GeoPackage)
+### ğŸ“ Vector Outputs (GeoPackage)
 
 ```
-kesif_alani_mask.gpkg                → DL vector polygons
-kesif_alani_classic_mask.gpkg        → Classical vector polygons
-kesif_alani_fused_resnet34_mask.gpkg → Fusion vector polygons
+kesif_alani_mask.gpkg                â†’ DL vector polygons
+kesif_alani_classic_mask.gpkg        â†’ Classical vector polygons
+kesif_alani_fused_resnet34_mask.gpkg â†’ Fusion vector polygons
 ```
 
 When `export_candidate_excel: true` in `config.yaml`, companion `*_gps.xlsx` files are written next to the vector outputs (candidate centers / GPS-style tables for field checks).
 
 **GeoPackage Features:**
 - Polygon geometry
-- Area information (in m²)
+- Area information (in mÂ²)
 - CRS information preserved
 - Can be opened directly in QGIS/ArcGIS
 
-### 💾 Cache Files
+### ğŸ’¾ Cache Files
 
 **Cache Directory Structure:**
 ```
-cache/
-├── kesif_alani.a1b2c3d4e5f6.derivatives.npz    → RVT derivatives cache
-└── karlik_vadi.f6e5d4c3b2a1.derivatives.npz   → RVT derivatives cache
+workspace/cache/
+â”œâ”€â”€ kesif_alani.a1b2c3d4e5f6.derivatives.npz    â†’ RVT derivatives cache
+â””â”€â”€ karlik_vadi.f6e5d4c3b2a1.derivatives.npz   â†’ RVT derivatives cache
 ```
 
 **Cache System:**
 - RVT calculations are cached in `.npz` format
-- Cache files are stored in the `cache/` directory (configurable via `cache_dir` in config.yaml)
+- Cache files are stored in the `workspace/cache/` directory (configurable via `cache_dir` in config.yaml)
 - Cache validation checks file name and modification time
 - **Important:** Cache files are reusable even if the project folder is moved (file name-based validation)
 - Provides 10-100x speedup on subsequent runs
@@ -888,11 +890,11 @@ cache/
 **Cache Configuration:**
 ```yaml
 cache_derivatives: true      # Enable caching
-cache_dir: "cache/"          # Cache directory (relative to project root)
+cache_dir: "workspace/cache/"          # Cache directory (relative to project root)
 recalculate_cache: false     # Don't recalculate if cache exists
 ```
 
-### 📋 File Naming Logic
+### ğŸ“‹ File Naming Logic
 
 Output files are automatically named in the following format:
 
@@ -914,60 +916,60 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
 
 ---
 
-## 🔬 How It Works
+## ğŸ”¬ How It Works
 
 ### Workflow Overview
 
 ```
-┌─────────────────────┐
-│  GeoTIFF Input      │
-│ (RGB, DSM, DTM)     │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│  Data Preprocessing │
-│  - Band reading     │
-│  - Normalization    │
-│  - Masking          │
-└──────────┬──────────┘
-           │
-     ┌─────┴─────┐
-     ▼           ▼
-┌─────────┐ ┌──────────┐
-│ Deep    │ │ Classical│
-│ Learning│ │ Methods  │
-│ (U-Net) │ │ (RVT)    │
-└────┬────┘ └────┬─────┘
-     │           │
-     └─────┬─────┘
-           ▼
-   ┌───────────────┐
-   │    Fusion     │
-   │  (Combine)    │
-   └───────┬───────┘
-           │
-           ▼
-   ┌───────────────┐
-   │  Thresholding │
-   │  (Prob → Mask)│
-   └───────┬───────┘
-           │
-           ▼
-   ┌───────────────┐
-   │ Vectorization │
-   │  (GeoPackage) │
-   └───────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  GeoTIFF Input      â”‚
+â”‚ (RGB, DSM, DTM)     â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+           â”‚
+           â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  Data Preprocessing â”‚
+â”‚  - Band reading     â”‚
+â”‚  - Normalization    â”‚
+â”‚  - Masking          â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+           â”‚
+     â”Œâ”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”
+     â–¼           â–¼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚ Deep    â”‚ â”‚ Classicalâ”‚
+â”‚ Learningâ”‚ â”‚ Methods  â”‚
+â”‚ (U-Net) â”‚ â”‚ (RVT)    â”‚
+â””â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”˜
+     â”‚           â”‚
+     â””â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”˜
+           â–¼
+   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+   â”‚    Fusion     â”‚
+   â”‚  (Combine)    â”‚
+   â””â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”˜
+           â”‚
+           â–¼
+   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+   â”‚  Thresholding â”‚
+   â”‚  (Prob â†’ Mask)â”‚
+   â””â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”˜
+           â”‚
+           â–¼
+   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+   â”‚ Vectorization â”‚
+   â”‚  (GeoPackage) â”‚
+   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
-### 1️⃣ Deep Learning Method
+### 1ï¸âƒ£ Deep Learning Method
 
 **Steps:**
 
 1. **Build the 5-channel DL tensor**
    - Read **RGB** and **DSM/DTM** from the GeoTIFF (bands chosen in `config.yaml`)
    - On the filled DTM, compute **SVF** and **SLRM** with RVT (`compute_derivatives_with_rvt` in `archaeo_detect.py`)
-   - Concatenate with `stack_channels(rgb, svf, slrm)` → shape `(5, H, W)` in channel order `MODEL_CHANNEL_NAMES`
+   - Concatenate with `stack_channels(rgb, svf, slrm)` â†’ shape `(5, H, W)` in channel order `MODEL_CHANNEL_NAMES`
 
    Other RVT products (openness, slope, etc.) may still be used on **classical** or experimental code paths; they are **not** separate planes in this DL stack.
 
@@ -985,10 +987,10 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
    - Seamless mosaic created
 
 5. **Thresholding**
-   - Probability > threshold → Mask = 1
-   - Probability ≤ threshold → Mask = 0
+   - Probability > threshold â†’ Mask = 1
+   - Probability â‰¤ threshold â†’ Mask = 0
 
-### 2️⃣ Classical Image Processing
+### 2ï¸âƒ£ Classical Image Processing
 
 **Three Sub-Methods:**
 
@@ -1012,11 +1014,11 @@ kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
 - Scores averaged (combo mode)
 - Otsu or manual thresholding applied
 
-### 3️⃣ Fusion (Hybrid Combination)
+### 3ï¸âƒ£ Fusion (Hybrid Combination)
 
 **Formula:**
 ```
-P_fused = α × P_deep_learning + (1 - α) × P_classic
+P_fused = Î± Ã— P_deep_learning + (1 - Î±) Ã— P_classic
 ```
 
 **Advantages:**
@@ -1025,15 +1027,15 @@ P_fused = α × P_deep_learning + (1 - α) × P_classic
 - Fusion: Strengths of both
 
 **Example:**
-- α = 0.5: Equal weight
-- α = 0.7: Priority to DL
-- α = 0.3: Priority to classical
+- Î± = 0.5: Equal weight
+- Î± = 0.7: Priority to DL
+- Î± = 0.3: Priority to classical
 
 ---
 
-## 💡 Use Cases
+## ğŸ’¡ Use Cases
 
-### 📍 Scenario 1: New Area Discovery
+### ğŸ“ Scenario 1: New Area Discovery
 
 **Situation:** First scan of an unexplored area
 
@@ -1057,7 +1059,7 @@ python archaeo_detect.py \
 - Low min_area: Don't miss small structures
 - Cache: Speedup for repeated analysis
 
-### 🎯 Scenario 2: Detailed Analysis of Known Area
+### ğŸ¯ Scenario 2: Detailed Analysis of Known Area
 
 **Situation:** Detailed examination of a previously detected area
 
@@ -1079,7 +1081,7 @@ python archaeo_detect.py \
 - High threshold: Only reliable detections
 - Simplify: Clean polygons
 
-### ⚡ Scenario 3: Quick Preliminary Assessment
+### âš¡ Scenario 3: Quick Preliminary Assessment
 
 **Situation:** To quickly get an idea
 
@@ -1099,7 +1101,7 @@ python archaeo_detect.py \
 - Small tiles: Less memory
 - No vector: Time saving
 
-### 🔬 Scenario 4: Research and Comparison
+### ğŸ”¬ Scenario 4: Research and Comparison
 
 **Situation:** Comparative analysis of different methods
 
@@ -1122,14 +1124,14 @@ python archaeo_detect.py \
 
 ---
 
-## 🎨 Visualization
+## ğŸ¨ Visualization
 
 ### Viewing in QGIS
 
-#### 1️⃣ Loading Probability Maps
+#### 1ï¸âƒ£ Loading Probability Maps
 
 ```
-Layer → Add Layer → Add Raster Layer
+Layer â†’ Add Layer â†’ Add Raster Layer
 ```
 
 **Recommended Color Scheme:**
@@ -1138,18 +1140,18 @@ Layer → Add Layer → Add Raster Layer
 - 0.5-0.7: Orange (High probability)
 - 0.7-1.0: Red (Very high probability)
 
-#### 2️⃣ Viewing Vector Polygons
+#### 2ï¸âƒ£ Viewing Vector Polygons
 
 ```
-Layer → Add Layer → Add Vector Layer → Select GeoPackage
+Layer â†’ Add Layer â†’ Add Vector Layer â†’ Select GeoPackage
 ```
 
 **Style Suggestions:**
 - Fill: Semi-transparent red (opacity: 50%)
 - Line: Thick red (2 pixels)
-- Label: Area value (m²)
+- Label: Area value (mÂ²)
 
-#### 3️⃣ Overlay with Base Map
+#### 3ï¸âƒ£ Overlay with Base Map
 
 ```python
 # QGIS Python Console
@@ -1219,7 +1221,7 @@ for idx, row in gdf.iterrows():
             'weight': 2,
             'fillOpacity': 0.5
         },
-        tooltip=f"Area: {row.get('area', 0):.1f} m²"
+        tooltip=f"Area: {row.get('area', 0):.1f} mÂ²"
     ).add_to(m)
 
 # Save
@@ -1229,7 +1231,7 @@ print("Map created: interactive_map.html")
 
 ---
 
-## ⚡ Performance Optimization
+## âš¡ Performance Optimization
 
 ### GPU Usage
 
@@ -1287,7 +1289,7 @@ python archaeo_detect.py --recalculate-cache
 
 **Cache Benefits:**
 - RVT derivatives are calculated once and cached
-- Cache files stored in `cache/` directory
+- Cache files stored in `workspace/cache/` directory
 - Cache validation is flexible: works even if project folder is moved
 - File name and modification time are checked for validation
 - Significant time savings on repeated runs
@@ -1312,15 +1314,15 @@ wait
 | **Balanced** (GPU, 1024 tile) | ~5 min | 8 GB | Medium |
 | **Maximum** (GPU, 2048 tile, ensemble) | ~15 min | 16 GB | High |
 
-*Estimated times for 10 km² area (1m resolution)*
+*Estimated times for 10 kmÂ² area (1m resolution)*
 
 ---
 
-## 🐛 Troubleshooting
+## ğŸ› Troubleshooting
 
 ### Common Errors and Solutions
 
-#### ❌ Error 1: CUDA Out of Memory
+#### âŒ Error 1: CUDA Out of Memory
 
 ```
 RuntimeError: CUDA out of memory. Tried to allocate X GB
@@ -1338,7 +1340,7 @@ python archaeo_detect.py --half
 python archaeo_detect.py --device cpu
 ```
 
-#### ❌ Error 2: RVT Import Error
+#### âŒ Error 2: RVT Import Error
 
 ```
 ModuleNotFoundError: No module named 'rvt'
@@ -1356,7 +1358,7 @@ pip install rvt
 conda install -c conda-forge rvt
 ```
 
-#### ❌ Error 3: Empty Output
+#### âŒ Error 3: Empty Output
 
 ```
 Warning: No detections found
@@ -1378,7 +1380,7 @@ Warning: No detections found
    python archaeo_detect.py -v
    ```
 
-#### ❌ Error 4: Classical Method Not Working
+#### âŒ Error 4: Classical Method Not Working
 
 ```
 Error: DTM band not found
@@ -1392,7 +1394,7 @@ bands: "1,2,3,4,5"  # Band 5 should be DTM
 # If missing, generate/provide a valid DTM band first.
 ```
 
-#### ❌ Error 5: Lines at Tile Boundaries
+#### âŒ Error 5: Lines at Tile Boundaries
 
 **Solution:**
 ```bash
@@ -1400,14 +1402,14 @@ bands: "1,2,3,4,5"  # Band 5 should be DTM
 python archaeo_detect.py --overlap 512 --feather
 ```
 
-#### ❌ Error 6: Cache Not Being Used
+#### âŒ Error 6: Cache Not Being Used
 
 **Symptoms:** System recalculates RVT derivatives even when cache files exist
 
 **Solutions:**
 1. Check cache directory path in `config.yaml`:
    ```yaml
-   cache_dir: "cache/"  # Should match your cache directory
+   cache_dir: "workspace/cache/"  # Should match your cache directory
    ```
 
 2. Verify cache file naming:
@@ -1429,12 +1431,12 @@ python archaeo_detect.py --overlap 512 --feather
    python archaeo_detect.py --cache-derivatives -v
    ```
 
-#### ❌ Error 7: Training Script Import Errors
+#### âŒ Error 7: Training Script Import Errors
 
 **Symptoms:**
 ```
-HATA: segmentation-models-pytorch kurulu değil!
-HATA: archaeo_detect.py'den attention modülleri import edilemedi.
+HATA: segmentation-models-pytorch kurulu deÄŸil!
+HATA: archaeo_detect.py'den attention modÃ¼lleri import edilemedi.
 ```
 
 **Solutions:**
@@ -1447,7 +1449,7 @@ HATA: archaeo_detect.py'den attention modülleri import edilemedi.
 
 3. **Verify installation**: Run `python -c "import segmentation_models_pytorch as smp; print(smp.__version__)"`
 
-#### ❌ Error 8: Training Data Format Mismatch
+#### âŒ Error 8: Training Data Format Mismatch
 
 **Symptoms:**
 ```
@@ -1474,11 +1476,11 @@ This command writes all debug messages to both screen and `debug_log.txt` file.
 **Check training data:**
 ```bash
 # Verify training data structure
-ls -R training_data/
+ls -R workspace/training_data/
 # Should show: train/images/, train/masks/, val/images/, val/masks/
 
 # Check metadata
-cat training_data/metadata.json | python -m json.tool
+cat workspace/training_data/metadata.json | python -m json.tool
 ```
 
 **Test data loading:**
@@ -1487,7 +1489,7 @@ cat training_data/metadata.json | python -m json.tool
 import numpy as np
 from pathlib import Path
 
-data_dir = Path("training_data")
+data_dir = Path("workspace/training_data")
 train_images = list((data_dir / "train" / "images").glob("*.npz"))
 if train_images:
     sample = np.load(train_images[0])
@@ -1501,14 +1503,14 @@ if train_images:
 **Monitor training in real-time:**
 ```bash
 # Watch training history file
-watch -n 5 'tail -20 checkpoints/training_history.json'
+watch -n 5 'tail -20 workspace/checkpoints/training_history.json'
 ```
 
 ---
 
-## ❓ FAQ
+## â“ FAQ
 
-### 🤔 General Questions
+### ğŸ¤” General Questions
 
 **Q: I don't have a trained model, can I still use it?**  
 A: Yes! Use `zero_shot_imagenet: true` to use ImageNet weights. Also, classical methods don't require models.
@@ -1519,10 +1521,10 @@ A: Yes, but it will be slower. Prefer classical methods or use small tile size.
 **Q: Which method gives the best results?**  
 A: Generally **fusion** (DL + Classical) gives the best results. However, it varies based on your data quality and region.
 
-**Q: UAV vs satellite—which source does this work with?**  
-A: The system is **primarily designed for UAV (drone) nadir imagery** (orthomosaic, DSM, DTM, and the derived channels this repo generates). **Satellite imagery is also supported**—provide a compatible multi-band GeoTIFF (RGB, plus DSM/DTM if available) on an aligned grid and the same pipeline runs. LiDAR-based surfaces and other sensors work the same way. What matters is consistent band structure and georeferencing, not the platform.
+**Q: UAV vs satelliteâ€”which source does this work with?**  
+A: The system is **primarily designed for UAV (drone) nadir imagery** (orthomosaic, DSM, DTM, and the derived channels this repo generates). **Satellite imagery is also supported**â€”provide a compatible multi-band GeoTIFF (RGB, plus DSM/DTM if available) on an aligned grid and the same pipeline runs. LiDAR-based surfaces and other sensors work the same way. What matters is consistent band structure and georeferencing, not the platform.
 
-### 🔧 Technical Questions
+### ğŸ”§ Technical Questions
 
 **Q: How many bands are required?**  
 A: Minimum 3 bands (RGB). For the current pipeline, use **5 bands** (RGB + DSM + DTM). The **model tensor** is **5 channels**: R, G, B plus **SVF** and **SLRM** computed from the DTM inside the code (see `stack_channels()` in `archaeo_detect.py`).
@@ -1546,7 +1548,7 @@ A: There is no file-picker dialog. Either pass `--input`, `--mask`, and `--outpu
 **Q: What if I don't have ground truth masks?**  
 A: You can still use the system with zero-shot ImageNet weights (`zero_shot_imagenet: true`) or classical methods only. However, for best results, train a custom model with your own labeled data.
 
-### 📊 Data Questions
+### ğŸ“Š Data Questions
 
 **Q: What is the minimum area resolution?**  
 A: Recommended: 0.5-2 meters/pixel. At lower resolution, small structures may not be detected.
@@ -1559,23 +1561,23 @@ A: Yes, input CRS is preserved and transferred to output.
 
 ---
 
-## 🎓 Model Training Guide
+## ğŸ“ Model Training Guide
 
 This guide walks you through training custom models with your own labeled data. Follow the steps below to go from raw data to a trained model.
 
 ---
 
-### ⚡ Quick Start (TL;DR)
+### âš¡ Quick Start (TL;DR)
 
 For experienced users, here's the minimal workflow:
 
 ```bash
 # 1. Prepare your data (GeoTIFF + binary mask)
 # 2. Generate training tiles
-python egitim_verisi_olusturma.py --input data.tif --mask mask.tif --output training_data
+python egitim_verisi_olusturma.py --input data.tif --mask mask.tif --output workspace/training_data
 
 # 3. Train the model
-python training.py --data training_data --task tile_classification --epochs 50
+python training.py --data workspace/training_data --task tile_classification --epochs 50
 
 # 4. Use your trained model
 python archaeo_detect.py --input new_area.tif
@@ -1583,31 +1585,31 @@ python archaeo_detect.py --input new_area.tif
 
 ---
 
-### 📋 Overview
+### ğŸ“‹ Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         MODEL TRAINING WORKFLOW                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐              │
-│   │  STEP 1      │      │  STEP 2      │      │  STEP 3      │              │
-│   │  Prepare     │ ───► │  Generate    │ ───► │  Train       │              │
-│   │  Masks       │      │  Tiles       │      │  Model       │              │
-│   └──────────────┘      └──────────────┘      └──────────────┘              │
-│         │                     │                     │                        │
-│         ▼                     ▼                     ▼                        │
-│   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐              │
-│   │ GeoTIFF +    │      │ 5-channel    │      │ Trained      │              │
-│   │ Binary Mask  │      │ NPZ tiles    │      │ .pth model   │              │
-│   └──────────────┘      └──────────────┘      └──────────────┘              │
-│                                                      │                       │
-│                                                      ▼                       │
-│                                               ┌──────────────┐              │
-│                                               │  STEP 4      │              │
-│                                               │  Use Model   │              │
-│                                               └──────────────┘              │
-└─────────────────────────────────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                         MODEL TRAINING WORKFLOW                              â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚                                                                              â”‚
+â”‚   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”              â”‚
+â”‚   â”‚  STEP 1      â”‚      â”‚  STEP 2      â”‚      â”‚  STEP 3      â”‚              â”‚
+â”‚   â”‚  Prepare     â”‚ â”€â”€â”€â–º â”‚  Generate    â”‚ â”€â”€â”€â–º â”‚  Train       â”‚              â”‚
+â”‚   â”‚  Masks       â”‚      â”‚  Tiles       â”‚      â”‚  Model       â”‚              â”‚
+â”‚   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜              â”‚
+â”‚         â”‚                     â”‚                     â”‚                        â”‚
+â”‚         â–¼                     â–¼                     â–¼                        â”‚
+â”‚   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”              â”‚
+â”‚   â”‚ GeoTIFF +    â”‚      â”‚ 5-channel    â”‚      â”‚ Trained      â”‚              â”‚
+â”‚   â”‚ Binary Mask  â”‚      â”‚ NPZ tiles    â”‚      â”‚ .pth model   â”‚              â”‚
+â”‚   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜              â”‚
+â”‚                                                      â”‚                       â”‚
+â”‚                                                      â–¼                       â”‚
+â”‚                                               â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”              â”‚
+â”‚                                               â”‚  STEP 4      â”‚              â”‚
+â”‚                                               â”‚  Use Model   â”‚              â”‚
+â”‚                                               â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜              â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 **What you need:**
@@ -1618,7 +1620,7 @@ python archaeo_detect.py --input new_area.tif
 
 ---
 
-### 🛠️ Step 1: Prepare Ground Truth Masks
+### ğŸ› ï¸ Step 1: Prepare Ground Truth Masks
 
 Create a binary mask where archaeological features are marked as **1** (white) and everything else as **0** (black).
 
@@ -1628,19 +1630,19 @@ Create a binary mask where archaeological features are marked as **1** (white) a
 
 **Step 1: Open your orthophoto**
 ```
-Menu: Layer → Add Layer → Add Raster Layer...
-Navigate to your GeoTIFF file → Click "Add"
+Menu: Layer â†’ Add Layer â†’ Add Raster Layer...
+Navigate to your GeoTIFF file â†’ Click "Add"
 ```
 Your image should now appear on the map canvas. Use mouse wheel to zoom, hold middle button to pan.
 
 **Step 2: Create a new polygon layer for digitizing**
 ```
-Menu: Layer → Create Layer → New Shapefile Layer...
+Menu: Layer â†’ Create Layer â†’ New Shapefile Layer...
 ```
 In the dialog:
 - **File name:** Click "..." and choose where to save (e.g., `archaeological_mask.shp`)
 - **Geometry type:** Select "Polygon"
-- **CRS:** Click the globe icon → search for your raster's coordinate system (check raster properties if unsure)
+- **CRS:** Click the globe icon â†’ search for your raster's coordinate system (check raster properties if unsure)
 - Click "OK"
 
 A new empty layer appears in the Layers panel.
@@ -1648,7 +1650,7 @@ A new empty layer appears in the Layers panel.
 **Step 3: Start digitizing (drawing polygons)**
 ```
 1. Select your new layer in the Layers panel (click on it)
-2. Menu: Layer → Toggle Editing (or click the pencil icon)
+2. Menu: Layer â†’ Toggle Editing (or click the pencil icon)
 3. Look for "Add Polygon Feature" button in the toolbar (polygon with + sign)
 4. Click it, then start clicking on the map to draw vertices
 5. Right-click to finish each polygon
@@ -1663,13 +1665,13 @@ A new empty layer appears in the Layers panel.
 
 **Step 4: Save your edits**
 ```
-Menu: Layer → Toggle Editing → Click "Save" when prompted
+Menu: Layer â†’ Toggle Editing â†’ Click "Save" when prompted
 Or: Click the floppy disk icon in the toolbar
 ```
 
 **Step 5: Convert polygons to raster (the mask)**
 ```
-Menu: Raster → Conversion → Rasterize (Vector to Raster)...
+Menu: Raster â†’ Conversion â†’ Rasterize (Vector to Raster)...
 ```
 In the dialog:
 - **Input layer:** Your polygon layer (`archaeological_mask`)
@@ -1678,15 +1680,15 @@ In the dialog:
 - **Output raster size units:** Georeferenced units
 - **Width/Horizontal resolution:** Same as your input raster (e.g., `1.0` for 1m resolution)
 - **Height/Vertical resolution:** Same value (e.g., `1.0`)
-- **Output extent:** Click "..." → "Calculate from Layer" → Select your input raster
-- **Rasterized:** Click "..." → Save to File → name it `ground_truth.tif`
+- **Output extent:** Click "..." â†’ "Calculate from Layer" â†’ Select your input raster
+- **Rasterized:** Click "..." â†’ Save to File â†’ name it `ground_truth.tif`
 - Click "Run"
 
 **Step 6: Fill NoData with zeros**
 
 The rasterize tool creates NoData where there are no polygons. We need those to be 0.
 ```
-Menu: Raster → Raster Calculator...
+Menu: Raster â†’ Raster Calculator...
 ```
 Enter this expression (replace with your actual layer name):
 ```
@@ -1694,13 +1696,13 @@ Enter this expression (replace with your actual layer name):
 ```
 Or use:
 ```
-Menu: Processing → Toolbox → Search "Fill nodata"
+Menu: Processing â†’ Toolbox â†’ Search "Fill nodata"
 Use "Fill NoData cells" tool with fill value = 0
 ```
 
 **Verify your mask:**
 - Values should be only 0 and 1
-- Right-click layer → Properties → Symbology → check min/max values
+- Right-click layer â†’ Properties â†’ Symbology â†’ check min/max values
 - Dimensions should match your input raster exactly
 
 ---
@@ -1711,16 +1713,16 @@ Use "Fill NoData cells" tool with fill value = 0
 
 **Step 1: Create a new project and add your data**
 ```
-1. Open ArcGIS Pro → New Project → Map
-2. Give it a name and location → OK
-3. Map tab → Add Data → Browse to your GeoTIFF → Add
+1. Open ArcGIS Pro â†’ New Project â†’ Map
+2. Give it a name and location â†’ OK
+3. Map tab â†’ Add Data â†’ Browse to your GeoTIFF â†’ Add
 ```
 Your orthophoto should appear on the map. Use scroll wheel to zoom, hold wheel to pan.
 
 **Step 2: Check your raster's properties (important for later)**
 ```
-1. In Contents pane, right-click your raster → Properties
-2. Go to "Source" tab → Note the:
+1. In Contents pane, right-click your raster â†’ Properties
+2. Go to "Source" tab â†’ Note the:
    - Cell Size (e.g., 1.0 x 1.0)
    - Extent (Top, Left, Right, Bottom coordinates)
    - Spatial Reference (e.g., EPSG:32635)
@@ -1730,15 +1732,15 @@ Write these down - you'll need them to match your mask.
 **Step 3: Create a new feature class for digitizing**
 ```
 1. In Catalog pane, expand your project's geodatabase (.gdb)
-2. Right-click the geodatabase → New → Feature Class
+2. Right-click the geodatabase â†’ New â†’ Feature Class
 ```
 In the wizard:
 - **Name:** `archaeological_features`
 - **Alias:** Archaeological Features (optional)
 - **Feature Class Type:** Polygon
 - Click "Next"
-- **Fields:** Skip (we'll add later) → Click "Next"
-- **Spatial Reference:** Click the globe → Import → Select your raster
+- **Fields:** Skip (we'll add later) â†’ Click "Next"
+- **Spatial Reference:** Click the globe â†’ Import â†’ Select your raster
 - Click "Finish"
 
 The new empty layer appears in Contents.
@@ -1746,7 +1748,7 @@ The new empty layer appears in Contents.
 **Step 4: Start digitizing**
 ```
 1. In Contents, click on your new layer to select it
-2. Edit tab → Create (opens Create Features pane)
+2. Edit tab â†’ Create (opens Create Features pane)
 3. Click on "archaeological_features" in the Create Features pane
 4. Select "Polygon" tool
 5. Click on the map to add vertices, double-click to finish
@@ -1761,12 +1763,12 @@ The new empty layer appears in Contents.
 
 **Step 5: Save your edits**
 ```
-Edit tab → Save → Save Edits
+Edit tab â†’ Save â†’ Save Edits
 ```
 
 **Step 6: Add a field for the raster value**
 ```
-1. In Contents, right-click your layer → Attribute Table
+1. In Contents, right-click your layer â†’ Attribute Table
 2. Click "Add Field" button (top of table)
 3. Field Name: burn_value
 4. Data Type: Short (Integer)
@@ -1784,12 +1786,12 @@ All rows should now show `1` in the burn_value column.
 
 **Step 8: Convert to raster**
 ```
-Analysis tab → Tools → Search "Polygon to Raster"
+Analysis tab â†’ Tools â†’ Search "Polygon to Raster"
 ```
 In the tool dialog:
 - **Input Features:** archaeological_features
 - **Value field:** burn_value
-- **Output Raster Dataset:** Browse → Save as `ground_truth.tif`
+- **Output Raster Dataset:** Browse â†’ Save as `ground_truth.tif`
 - **Cell assignment type:** CELL_CENTER
 - **Priority field:** NONE
 - **Cellsize:** Same as your input raster (e.g., `1`)
@@ -1807,11 +1809,11 @@ Click "Run"
 
 By default, areas outside polygons become NoData. We need them to be 0.
 ```
-Analysis tab → Tools → Search "Reclassify"
+Analysis tab â†’ Tools â†’ Search "Reclassify"
 ```
 Or use Raster Calculator:
 ```
-Analysis tab → Tools → Search "Raster Calculator"
+Analysis tab â†’ Tools â†’ Search "Raster Calculator"
 Expression: Con(IsNull("ground_truth.tif"), 0, "ground_truth.tif")
 Output: ground_truth_final.tif
 ```
@@ -1829,10 +1831,10 @@ Alternative with Reclassify:
 **Step 10: Verify your mask**
 ```
 1. Add the final mask to your map
-2. Right-click → Properties → Source → Check:
-   - Cell size matches input ✓
-   - Extent matches input ✓
-   - Values are only 0 and 1 ✓
+2. Right-click â†’ Properties â†’ Source â†’ Check:
+   - Cell size matches input âœ“
+   - Extent matches input âœ“
+   - Values are only 0 and 1 âœ“
 ```
 
 **Common issues:**
@@ -1866,7 +1868,7 @@ with rasterio.open('mask.tif', 'w', driver='GTiff',
 
 ---
 
-### 📦 Step 2: Generate Training Tiles
+### ğŸ“¦ Step 2: Generate Training Tiles
 
 The script `egitim_verisi_olusturma.py` converts your GeoTIFF + mask into **5-channel** training tiles (R, G, B, SVF, SLRM).
 
@@ -1876,7 +1878,7 @@ The script `egitim_verisi_olusturma.py` converts your GeoTIFF + mask into **5-ch
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
-  --output training_data
+  --output workspace/training_data
 ```
 
 #### IDE / CLI Mode
@@ -1887,7 +1889,7 @@ The script is non-interactive. Use explicit arguments:
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
-  --output training_data
+  --output workspace/training_data
 ```
 
 #### What Happens Inside
@@ -1915,7 +1917,7 @@ Input GeoTIFF (5 bands)          Ground Truth Mask
 +--------+---------+
          |
          v
-   training_data/
+   workspace/training_data/
    |-- train/images/*.npz  (5, 256, 256)
    |-- train/masks/*.npz   (256, 256)
    |-- val/images/*.npz
@@ -1930,13 +1932,13 @@ Run `python egitim_verisi_olusturma.py --help` for the full list. Common options
 | Parameter | Default (see script `CONFIG`) | Description |
 |-----------|------------------------------|-------------|
 | `--input` / `-i` | _(required via CLI or `CONFIG`)_ | Multi-band GeoTIFF (RGB + DSM + DTM) |
-| `--mask` / `-m` | _(required via CLI or `CONFIG`)_ | Ground-truth mask (values ≠ 0 treated as positive, then binarized) |
-| `--output` / `-o` | `training_data` | Output root (`train/`, `val/`, `metadata.json`, …) |
+| `--mask` / `-m` | _(required via CLI or `CONFIG`)_ | Ground-truth mask (values â‰  0 treated as positive, then binarized) |
+| `--output` / `-o` | `workspace/training_data` | Output root (`train/`, `val/`, `metadata.json`, â€¦) |
 | `--tile-size` / `-t` | `256` | Tile size in pixels |
 | `--overlap` | `128` | Sliding-window overlap in pixels (must stay consistent with training/inference metadata) |
 | `--bands` / `-b` | `1,2,3,4,5` | 1-based GeoTIFF band indices: R, G, B, DSM, DTM |
 | `--min-positive` | `0.0` | Minimum fraction of positive pixels in a tile to keep it (0 = allow all-negative tiles subject to negative sampling) |
-| `--tile-label-min-positive-ratio` | _(from `CONFIG`)_ | For tile-level labels: minimum positive ratio for the tile’s class label (0 = any positive pixel) |
+| `--tile-label-min-positive-ratio` | _(from `CONFIG`)_ | For tile-level labels: minimum positive ratio for the tileâ€™s class label (0 = any positive pixel) |
 | `--max-nodata` | `0.3` | Maximum allowed NoData fraction per tile |
 | `--train-ratio` | `0.8` | Train fraction |
 | `--train-negative-keep-ratio` | `1.0` | Fraction of all-negative **train** tiles to retain (`0` = drop all, `1` = keep all) |
@@ -1945,7 +1947,7 @@ Run `python egitim_verisi_olusturma.py --help` for the full list. Common options
 | `--no-normalize` | off | Skip `robust_norm` on the stacked channels |
 | `--format` | `npz` | `npz` (compressed) or `npy` |
 | `--num-workers` | CPU-based default | Worker processes for tile generation |
-| `--tile-prefix` | `""` | Optional prefix for tile filenames (empty → auto prefix with tile/overlap/bands/timestamp) |
+| `--tile-prefix` | `""` | Optional prefix for tile filenames (empty â†’ auto prefix with tile/overlap/bands/timestamp) |
 | `--append` / `--no-append` | clean rebuild | Append tiles without deleting existing outputs vs full regenerate |
 
 #### Recommended Settings by Scenario
@@ -1961,7 +1963,7 @@ Run `python egitim_verisi_olusturma.py --help` for the full list. Common options
 
 | # | Channel | Role |
 |---|---------|------|
-| 0–2 | R, G, B | Orthophoto color/texture |
+| 0â€“2 | R, G, B | Orthophoto color/texture |
 | 3 | SVF | Sky-View Factor (relief visibility; mounds, local dominance) |
 | 4 | SLRM | Simple Local Relief Model (local height anomalies on DTM) |
 
@@ -1969,23 +1971,23 @@ DSM/DTM **bands** are still required in the GeoTIFF for correct masking and for 
 
 ---
 
-### 🚀 Step 3: Train the Model
+### ğŸš€ Step 3: Train the Model
 
 Use `training.py` to train a U-Net (SMP) model on your **5-channel** tiles.
 
 #### Basic Training
 
 ```bash
-python training.py --data training_data
+python training.py --data workspace/training_data
 ```
 
-This uses the checked-in `CONFIG` in `training.py` (currently: **U-Net**, **ResNet50**, **BCE** loss, **patience 20**, **CBAM off** via `no_attention: true`, **AMP on** unless you disable it). Successful runs **publish** the best weights to `checkpoints/active/` when `publish_active` is true.
+This uses the checked-in `CONFIG` in `training.py` (currently: **U-Net**, **ResNet50**, **BCE** loss, **patience 20**, **CBAM off** via `no_attention: true`, **AMP on** unless you disable it). Successful runs **publish** the best weights to `workspace/checkpoints/active/` when `publish_active` is true.
 
 #### Full Command with Options
 
 ```bash
 python training.py \
-  --data training_data \
+  --data workspace/training_data \
   --arch Unet \
   --encoder resnet50 \
   --epochs 50 \
@@ -1999,7 +2001,7 @@ python training.py \
 
 | Parameter | Default | Options / Notes |
 |-----------|---------|-----------------|
-| `--data` | `training_data` | Path to Step 2 output (paired or Positive/Negative layout) |
+| `--data` | `workspace/training_data` | Path to Step 2 output (paired or Positive/Negative layout) |
 | `--task` | `tile_classification` | `segmentation` or `tile_classification` |
 | `--arch` | `Unet` | `Unet`, `UnetPlusPlus`, `DeepLabV3Plus`, `FPN` |
 | `--encoder` | `resnet50` | `resnet34`, `efficientnet-b3`, `densenet121` |
@@ -2012,8 +2014,8 @@ python training.py \
 | `--max-auto-pos-weight` | `100.0` | Clamp for auto-computed pos_weight to avoid destabilizing training |
 | `--patience` | `20` | Early stopping after N epochs without improvement |
 | `--metric-threshold` | `0.5` | Probability threshold used to compute IoU/F1/Precision/Recall metrics |
-| `--val-threshold-sweep` | on | Sweep thresholds 0.1–0.9 on val and report best IoU + threshold |
-| `--no-attention` | on | Matches `CONFIG["no_attention"]` (default **true** → CBAM **off**; set `no_attention: false` in `CONFIG` to enable attention) |
+| `--val-threshold-sweep` | on | Sweep thresholds 0.1â€“0.9 on val and report best IoU + threshold |
+| `--no-attention` | on | Matches `CONFIG["no_attention"]` (default **true** â†’ CBAM **off**; set `no_attention: false` in `CONFIG` to enable attention) |
 | `--no-amp` | Off | Disable mixed precision (FP16) |
 | `--train-neg-to-pos-ratio` | `2` | Sub-sample negatives to this multiple of positives in train (`None` = keep all) |
 | `--train-neg-sample-seed` | `42` | RNG seed for negative sub-sampling |
@@ -2022,9 +2024,9 @@ python training.py \
 | `--tile-label-min-positive-ratio` | `0.02` | Minimum positive-pixel ratio to label a tile as Positive (paired layout) |
 | `--monitor-channel-importance` | on | Track and log per-channel gradient importance during training |
 | `--channel-importance-max-batches` | `12` | Max batches for gradient-based channel importance (0 = all) |
-| `--deterministic-rotate-step-deg` | `30.0` | Augmentation rotation step (0 = disabled; 30 → 12 views per sample) |
+| `--deterministic-rotate-step-deg` | `30.0` | Augmentation rotation step (0 = disabled; 30 â†’ 12 views per sample) |
 | `--allow-all-negative` | off | Continue training even if all labels are negative (guards against bad data) |
-| `--save-every-epoch` | on | Save a per-epoch checkpoint under `checkpoints/epochs/` |
+| `--save-every-epoch` | on | Save a per-epoch checkpoint under `workspace/checkpoints/epochs/` |
 
 #### Choosing the Right Settings
 
@@ -2055,17 +2057,17 @@ python training.py \
 #### Training Output
 
 ```
-checkpoints/
-├── active/model.pth                         ← copy of best weights for inference (`publish_active` in training.py)
-├── active/training_metadata.json           ← tile / overlap / bands (+ schema) for trained_model_only mode
-├── active/published_from.json              ← manifest pointing at the source checkpoint used for the copy
-├── epochs/                                  ← per-epoch checkpoints when `save_every_epoch` is true (default in CONFIG)
-└── training_history.json                    ← training metrics
+workspace/checkpoints/
+â”œâ”€â”€ active/model.pth                         â† copy of best weights for inference (`publish_active` in training.py)
+â”œâ”€â”€ active/training_metadata.json           â† tile / overlap / bands (+ schema) for trained_model_only mode
+â”œâ”€â”€ active/published_from.json              â† manifest pointing at the source checkpoint used for the copy
+â”œâ”€â”€ epochs/                                  â† per-epoch checkpoints when `save_every_epoch` is true (default in CONFIG)
+â””â”€â”€ training_history.json                    â† training metrics
 ```
 
-You may set `weights` in `config.yaml` to `checkpoints/active/model.pth` **or** to a specific run under `checkpoints/epochs/`; in both cases **`training_metadata.json` must describe the same architecture, channel count, tile size, overlap, and bands** as that run.
+You may set `weights` in `config.yaml` to `workspace/checkpoints/active/model.pth` **or** to a specific run under `workspace/checkpoints/epochs/`; in both cases **`training_metadata.json` must describe the same architecture, channel count, tile size, overlap, and bands** as that run.
 
-`channel_importance_history.json` may also appear under `checkpoints/` and stores per-epoch band importance rankings when enabled.
+`channel_importance_history.json` may also appear under `workspace/checkpoints/` and stores per-epoch band importance rankings when enabled.
 
 #### Monitoring Training
 
@@ -2073,9 +2075,9 @@ Watch the console output:
 
 ```
 Epoch  1/50 | Train Loss: 0.45 | Val Loss: 0.39 | Val IoU: 0.62 | LR: 1e-04
-  → Best model saved
+  â†’ Best model saved
 Epoch  2/50 | Train Loss: 0.38 | Val Loss: 0.34 | Val IoU: 0.68 | LR: 1e-04
-  → Best model saved
+  â†’ Best model saved
 ...
 Early stopping: Best model at epoch 15 (Val IoU: 0.79)
 ```
@@ -2087,14 +2089,14 @@ Early stopping: Best model at epoch 15 (Val IoU: 0.79)
 
 ---
 
-### 📊 Step 4: Use Your Trained Model
+### ğŸ“Š Step 4: Use Your Trained Model
 
 #### Command Line
 
 ```bash
 python archaeo_detect.py \
-  --weights checkpoints/active/model.pth \
-  --training-metadata checkpoints/active/training_metadata.json \
+  --weights workspace/checkpoints/active/model.pth \
+  --training-metadata workspace/checkpoints/active/training_metadata.json \
   --input new_area.tif \
   --th 0.6
 ```
@@ -2104,13 +2106,13 @@ python archaeo_detect.py \
 For the IDE-first trained profile:
 
 - keep `trained_model_only: true`
-- keep `weights: "checkpoints/active/model.pth"`
-- keep `training_metadata: "checkpoints/active/training_metadata.json"`
+- keep `weights: "workspace/checkpoints/active/model.pth"`
+- keep `training_metadata: "workspace/checkpoints/active/training_metadata.json"`
 - treat `tile`, `overlap`, and `bands` as metadata-locked values during inference
 
 ```yaml
-weights: "checkpoints/active/model.pth"
-training_metadata: "checkpoints/active/training_metadata.json"
+weights: "workspace/checkpoints/active/model.pth"
+training_metadata: "workspace/checkpoints/active/training_metadata.json"
 zero_shot_imagenet: false
 trained_model_only: true
 ```
@@ -2122,7 +2124,7 @@ python archaeo_detect.py
 
 ---
 
-### 🔧 Troubleshooting
+### ğŸ”§ Troubleshooting
 
 #### Data Preparation Issues
 
@@ -2146,19 +2148,19 @@ python archaeo_detect.py
 
 ```bash
 # Check training data structure
-ls -R training_data/
+ls -R workspace/training_data/
 
 # View metadata
-cat training_data/metadata.json | python -m json.tool
+cat workspace/training_data/metadata.json | python -m json.tool
 
 # Test data loading
-python -c "import numpy as np; d=np.load('training_data/train/images/tile_00000_00000.npz'); print(d['image'].shape)"
+python -c "import numpy as np; d=np.load('workspace/training_data/train/images/tile_00000_00000.npz'); print(d['image'].shape)"
 # Expected: (5, 256, 256)
 ```
 
 ---
 
-### 💡 Best Practices
+### ğŸ’¡ Best Practices
 
 #### Data Quality Checklist
 
@@ -2171,8 +2173,8 @@ python -c "import numpy as np; d=np.load('training_data/train/images/tile_00000_
 #### Training Workflow
 
 ```
-1. Quick test (5 epochs)     → Verify everything works
-2. Baseline (50 epochs)      → Establish benchmark
+1. Quick test (5 epochs)     â†’ Verify everything works
+2. Baseline (50 epochs)      â†’ Establish benchmark
 3. Optimize (try better encoder/architecture)
 4. Fine-tune (lower LR if needed)
 ```
@@ -2188,20 +2190,20 @@ python -c "import numpy as np; d=np.load('training_data/train/images/tile_00000_
 
 ---
 
-### 📚 Complete Example: End-to-End
+### ğŸ“š Complete Example: End-to-End
 
 ```bash
 # 1. Generate training data (single balancing mechanism: train-negative filtering)
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
-  --output training_data \
+  --output workspace/training_data \
   --tile-size 256 \
   --train-negative-keep-ratio 0.3
 
 # 2. Train model
 python training.py \
-  --data training_data \
+  --data workspace/training_data \
   --arch Unet \
   --encoder resnet34 \
   --epochs 50 \
@@ -2210,8 +2212,8 @@ python training.py \
 
 # 3. Run inference on new area
 python archaeo_detect.py \
-  --weights checkpoints/active/model.pth \
-  --training-metadata checkpoints/active/training_metadata.json \
+  --weights workspace/checkpoints/active/model.pth \
+  --training-metadata workspace/checkpoints/active/training_metadata.json \
   --input new_area.tif \
   --th 0.6 \
   --enable-fusion
@@ -2225,11 +2227,11 @@ python archaeo_detect.py \
 
 ---
 
-## 🔬 Advanced Features
+## ğŸ”¬ Advanced Features
 
 ### Custom Model Training
 
-> **📖 For detailed training guide, see [Model Training Guide](#-model-training-guide) section above.**
+> **ğŸ“– For detailed training guide, see [Model Training Guide](#-model-training-guide) section above.**
 
 The project includes two dedicated scripts for training custom models:
 
@@ -2240,21 +2242,21 @@ The project includes two dedicated scripts for training custom models:
 
 ```bash
 # 1. Create training data
-python egitim_verisi_olusturma.py --input area.tif --mask mask.tif --output training_data
+python egitim_verisi_olusturma.py --input area.tif --mask mask.tif --output workspace/training_data
 
 # 2. Train model
-python training.py --data training_data --task tile_classification --epochs 50
+python training.py --data workspace/training_data --task tile_classification --epochs 50
 
 # 3. Use trained model
 python archaeo_detect.py
 ```
 
 **Key Features:**
-- ✅ 5-channel input (R, G, B, SVF, SLRM) aligned with inference
-- ✅ Optional CBAM attention on the SMP model (`training.py`)
-- ✅ Losses: **BCE / Focal** for `tile_classification`; **BCE / Dice / Combined / Focal** for `segmentation`
-- ✅ Mixed precision training
-- ✅ Early stopping and checkpointing
+- âœ… 5-channel input (R, G, B, SVF, SLRM) aligned with inference
+- âœ… Optional CBAM attention on the SMP model (`training.py`)
+- âœ… Losses: **BCE / Focal** for `tile_classification`; **BCE / Dice / Combined / Focal** for `segmentation`
+- âœ… Mixed precision training
+- âœ… Early stopping and checkpointing
 
 For complete documentation, examples, and troubleshooting, see the [Model Training Guide](#-model-training-guide) section.
 
@@ -2322,155 +2324,35 @@ python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumul
 
 ---
 
-## 📚 Technical Details
+## ğŸ“š Technical Details
 
 ### Project Structure
 
+```text
+arkeolojik_alan_tespit/
+├── archaeo_detect.py                  # Main detection script
+├── archeo_shared/                     # Shared channel schema and model helpers
+├── egitim_verisi_olusturma.py         # Paired tile data generation
+├── prepare_tile_classification_dataset.py
+├── training.py                        # Model training script
+├── evaluation.py                      # Evaluation metrics
+├── veri_birlestir_rgb_dsm_dtm.py      # RGB + DSM + DTM merge tool
+├── dtm_uret.py                        # DSM/LAS -> DTM conversion
+├── ground_truth_kare_etiketleme_qt.py # Qt-based annotation tool
+├── config.yaml                        # Shared repo config
+├── configs/                           # Example YAML profiles
+├── docs/                              # Extra documentation (YOLO, notes)
+├── tests/                             # Test suite
+├── tools/                             # Maintenance and inspection helpers
+└── workspace/                         # Repo-local data and artifact area
+    ├── on_veri/
+    ├── training_data/
+    ├── training_data_classification/
+    ├── checkpoints/
+    ├── cache/
+    ├── ciktilar/
+    └── assets/
 ```
-arkeolojik_alan_tespit/            # project root (example name)
-├── archaeo_detect.py              # Main detection script
-├── archeo_shared/                 # Shared channel schema & model helpers
-│   ├── channels.py                # MODEL_CHANNEL_NAMES, metadata schema version
-│   └── modeling.py                # CBAM, ChannelAttention, SpatialAttention, AttentionWrapper
-├── egitim_verisi_olusturma.py     # Training data generation (paired images/masks)
-├── prepare_tile_classification_dataset.py  # Positive/Negative tile dataset builder
-├── training.py                    # Model training script
-├── evaluation.py                  # Evaluation metrics
-├── veri_birlestir_rgb_dsm_dtm.py  # Merge RGB + DSM + DTM into a single 5-band GeoTIFF
-├── dtm_uret.py                    # DSM/LAS → DTM conversion (SMRF / morphological fallback)
-├── ground_truth_kare_etiketleme_qt.py  # Qt-based GeoTIFF annotation tool
-├── config.yaml                    # Configuration file
-├── configs/                       # Example YAML profiles (e.g. tile classification)
-├── requirements.txt               # Python dependencies
-├── README.md                      # This documentation
-├── training_data/                  # Generated training tiles (paired layout)
-│   ├── train/
-│   │   ├── images/                 # 5-channel image tiles (.npz)
-│   │   └── masks/                  # Binary mask tiles (.npz)
-│   ├── val/
-│   │   ├── images/
-│   │   └── masks/
-│   └── metadata.json               # Dataset metadata
-├── training_data_cls/              # Tile classification dataset (Positive/Negative layout)
-│   ├── train/
-│   │   ├── Positive/
-│   │   └── Negative/
-│   ├── val/
-│   │   ├── Positive/
-│   │   └── Negative/
-│   ├── metadata.json
-│   ├── tiles_manifest.csv
-│   └── tile_labels.csv
-├── checkpoints/                    # Trained model weights
-│   ├── active/model.pth
-│   ├── active/training_metadata.json
-│   ├── active/published_from.json
-│   ├── epochs/                     # Per-epoch checkpoints (when save_every_epoch=true)
-│   ├── training_history.json
-│   └── channel_importance_history.json  # Per-epoch band importance (when enabled)
-├── cache/                          # RVT derivatives cache
-│   └── *.<cache_hash>.derivatives.npz
-└── ciktilar/                       # Output detection results
-    └── <session_folder>/
-        ├── run_params.txt           # Effective run parameters
-        ├── *_prob.tif               # Probability maps
-        ├── *_mask.tif               # Binary masks
-        ├── *_mask.gpkg              # Vector polygons
-        ├── *_gps.xlsx               # GPS candidate table (when export_candidate_excel=true)
-        ├── *_band_importance.txt    # Band importance report (when save_band_importance=true)
-        └── *_band_importance.json
-```
-
-### System Architecture
-
-```
-archaeo_detect.py
-├── Data Loading (rasterio)
-│   ├── Multi-band GeoTIFF reading
-│   ├── Band selection and validation
-│   └── CRS and transform preservation
-├── Preprocessing
-│   ├── Band reading (RGB, DSM, DTM)
-│   ├── DL stack (default): RVT on DTM → **SVF** + **SLRM** → `stack_channels` (**5 channels**)
-│   ├── Optional / classical paths: extra RVT views, TPI, curvature, nDSM (see `config.yaml`; off in default preset)
-│   └── Normalization (global/local percentile)
-├── Detection Pipeline
-│   ├── Deep Learning (PyTorch + SMP)
-│   │   ├── U-Net / UnetPlusPlus / DeepLabV3+
-│   │   ├── CBAM Attention (optional)
-│   │   ├── Multi-encoder ensemble
-│   │   └── Tile-based inference
-│   ├── Classical Methods
-│   │   ├── RVT visualization (SVF, Openness, LRM)
-│   │   ├── Hessian Matrix (ridge/valley detection)
-│   │   └── Morphology (opening, closing, top-hat)
-│   ├── YOLO11 (optional)
-│   │   ├── Object detection
-│   │   ├── Segmentation
-│   │   └── Labeled inventory
-│   └── Fusion (Hybrid combination)
-│       └── Weighted averaging (alpha blending)
-├── Post-Processing
-│   ├── Thresholding (probability → binary)
-│   ├── Morphological operations
-│   ├── Area filtering (min_area)
-│   └── Tall object masking (nDSM-based)
-└── Output Generation
-    ├── Raster outputs (GeoTIFF)
-    │   ├── Probability maps
-    │   └── Binary masks
-    └── Vector outputs (GeoPackage)
-        ├── Polygon geometries
-        ├── Area attributes
-        └── CRS preservation
-```
-
-### Training Pipeline Architecture
-
-```
-egitim_verisi_olusturma.py
-├── Input Validation
-│   ├── GeoTIFF + mask file check
-│   ├── Dimension matching
-│   └── CRS validation
-├── Feature Extraction
-│   ├── RVT on DTM: SVF + SLRM
-│   └── `stack_channels` → 5-channel tiles (R, G, B, SVF, SLRM)
-├── Tile Generation
-│   ├── Sliding window with overlap
-│   ├── Quality filtering (nodata, positive ratio)
-│   └── Balanced sampling (optional)
-├── Normalization
-│   └── Robust percentile scaling (2%-98%)
-└── Data Export
-    ├── Train/Val split
-    ├── File saving (.npz or .npy)
-    └── Metadata generation
-
-training.py
-├── Data Loading
-│   ├── ArchaeologyDataset class
-│   ├── Data augmentation (flip, rotate)
-│   └── DataLoader with workers
-├── Model Creation
-│   ├── Architecture selection (U-Net, etc.)
-│   ├── Encoder initialization
-│   ├── CBAM Attention wrapper
-│   └── Channel adaptation (5 channels)
-├── Training Loop
-│   ├── Forward pass
-│   ├── Loss calculation (BCE, Dice, Combined, Focal)
-│   ├── Backward pass (with AMP)
-│   └── Optimizer step
-├── Validation
-│   ├── IoU calculation
-│   ├── Loss monitoring
-│   └── Best model tracking
-└── Checkpointing
-    ├── Best model saving
-    └── Training history logging
-```
-
 ### Libraries Used
 
 | Library | Version | Purpose |
@@ -2487,11 +2369,11 @@ training.py
 
 ### Channel Architecture
 
-**5-channel DL tensor** (canonical names in `archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`):
+**5-channel DL tensor** (canonical names in `archeo_shared/channels.py` â†’ `MODEL_CHANNEL_NAMES`):
 
 | Index | Name | Source |
 |------:|------|--------|
-| 0–2 | R, G, B | GeoTIFF bands selected as RGB |
+| 0â€“2 | R, G, B | GeoTIFF bands selected as RGB |
 | 3 | SVF | RVT Sky-View Factor on filled DTM |
 | 4 | SLRM | RVT Simple Local Relief Model on DTM (with Gaussian fallback if needed) |
 
@@ -2508,22 +2390,22 @@ Training tiles and inference use the same ordering via `stack_channels(rgb, svf,
 
 **Sky-View Factor (SVF):**
 ```
-SVF = (1/n) * Σ(max(0, cos(α_i)))
+SVF = (1/n) * Î£(max(0, cos(Î±_i)))
 ```
-Where `α_i` is the horizon angle in each direction.
+Where `Î±_i` is the horizon angle in each direction.
 
 **Openness:**
 ```
-Openness_positive = (1/n) * Σ(90° - α_i)
-Openness_negative = (1/n) * Σ(α_i - 90°)
+Openness_positive = (1/n) * Î£(90Â° - Î±_i)
+Openness_negative = (1/n) * Î£(Î±_i - 90Â°)
 ```
 
 #### Hessian Matrix
 
 Second derivative matrix:
 ```
-H = [∂²f/∂x²    ∂²f/∂x∂y]
-    [∂²f/∂y∂x   ∂²f/∂y²]
+H = [âˆ‚Â²f/âˆ‚xÂ²    âˆ‚Â²f/âˆ‚xâˆ‚y]
+    [âˆ‚Â²f/âˆ‚yâˆ‚x   âˆ‚Â²f/âˆ‚yÂ²]
 ```
 
 Ridge/valley detection via eigenvalue analysis.
@@ -2534,7 +2416,7 @@ Ridge/valley detection via eigenvalue analysis.
 - **DTM** provides ground-only relief context.
 - **nDSM = DSM - DTM** emphasizes above-ground height anomalies and supports tall-object masking.
 
-#### TPI (Topographic Position Index) — optional, not in the 5-channel DL tensor
+#### TPI (Topographic Position Index) â€” optional, not in the 5-channel DL tensor
 
 `archaeo_detect.py` still contains `compute_tpi_multiscale()` and `config.yaml` keys such as `enable_tpi` / `tpi_radii` for experiments, but the **current** `MODEL_CHANNEL_NAMES` stack does **not** include TPI. Relief cues for the neural network are **SVF + SLRM** only.
 
@@ -2553,7 +2435,7 @@ def fusion(p_dl, p_classic, alpha):
 
 ---
 
-## 🤝 Contributing
+## ğŸ¤ Contributing
 
 To contribute to the project:
 
@@ -2565,23 +2447,23 @@ To contribute to the project:
 
 ### Contribution Areas
 
-- 🐛 Bug fixes
-- ✨ New features
-- 📝 Documentation improvements
-- 🌍 Translations (i18n)
-- 🧪 Test scenarios
-- 🎨 Visualization tools
+- ğŸ› Bug fixes
+- âœ¨ New features
+- ğŸ“ Documentation improvements
+- ğŸŒ Translations (i18n)
+- ğŸ§ª Test scenarios
+- ğŸ¨ Visualization tools
 
 ---
 
-## 📄 License
+## ğŸ“„ License
 
 This project is licensed under the [MIT License](LICENSE).
 
 ```
 MIT License
 
-Copyright (c) 2025 [Ahmet Ertuğrul Arık]
+Copyright (c) 2025 [Ahmet ErtuÄŸrul ArÄ±k]
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -2590,7 +2472,7 @@ in the Software without restriction...
 
 ---
 
-## 📧 Contact and Support
+## ğŸ“§ Contact and Support
 
 - **Issues**: [GitHub Issues](https://github.com/elestirmen/archaeological-site-detection/issues)
 - **Email**: ertugrularik@hotmail.com
@@ -2598,7 +2480,7 @@ in the Software without restriction...
 
 ---
 
-## 🙏 Acknowledgments
+## ğŸ™ Acknowledgments
 
 This project benefits from the following open-source projects:
 
@@ -2610,14 +2492,14 @@ This project benefits from the following open-source projects:
 
 ---
 
-## 📖 Citation
+## ğŸ“– Citation
 
 If you use this project in your academic work, please cite:
 
 ```bibtex
 @software{archaeological_site_detection,
   title = {Archaeological Site Detection: Deep Learning and Classical Image Processing},
-  author = {Ahmet Ertuğrul Arık},
+  author = {Ahmet ErtuÄŸrul ArÄ±k},
   year = {2025},
   url = {https://github.com/elestirmen/archaeological-site-detection}
 }
@@ -2625,7 +2507,7 @@ If you use this project in your academic work, please cite:
 
 ---
 
-## 📊 Project Statistics
+## ğŸ“Š Project Statistics
 
 ![GitHub stars](https://img.shields.io/github/stars/elestirmen/archaeological-site-detection?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/elestirmen/archaeological-site-detection?style=social)
@@ -2634,7 +2516,10 @@ If you use this project in your academic work, please cite:
 
 <div align="center">
 
-Developer: Ahmet Ertuğrul Arık  
+Developer: Ahmet ErtuÄŸrul ArÄ±k  
 Last update: April 2026
 
 </div>
+
+
+

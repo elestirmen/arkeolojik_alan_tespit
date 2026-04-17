@@ -21,7 +21,7 @@
 # 5 kanaldır: R, G, B, SVF, SLRM — SVF ve SLRM DSM/DTM’den (ve gerekiyorsa
 # ilgili ön işlemlerden) içeride türetilir; ayrıca “ek topografik kanal”
 # (curvature/TPI vb.) bu şemada kullanılmaz.
-# Proje dizini: C:\d_surucusu\arkeolojik_alan_tespit\archaeo_detect_base
+# Repo ici calisma verileri icin varsayilan kok: workspace/
 # ============================================================================
 
 
@@ -36,16 +36,16 @@
 # - Dosya çok bantlı bir GeoTIFF olmalıdır
 # - Önerilen bantlar: R, G, B, DSM (Yüzey Modeli), DTM (Arazi Modeli)
 # Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
-#input: "gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
-#input: "karlik_vadi.tif"
-input: "on_veri/karlik_dag_rgb_dtm_dsm_5band.tif"
+#input: "workspace/gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
+#input: "workspace/karlik_vadi.tif"
+input: "workspace/on_veri/karlik_dag_rgb_dtm_dsm_5band.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
 # - null ise: Girdi dosya adından otomatik üretilir
 #   Örneğin "kesif_alani.tif" için "kesif_alani" kullanılır
 # - Özel bir isim belirtebilirsiniz: "sonuc_2025" gibi
 # - Tüm çıktı dosyaları bu ön ek ile başlayacaktır
-# Örnek: null, "sonuc", "ciktilar/analiz1"
+# Örnek: null, "sonuc", "workspace/ciktilar/analiz1"
 out_prefix: null
 
 # bands: Kullanılacak bantların virgülle ayrılmış listesi (1-tabanlı indeksler)
@@ -83,7 +83,7 @@ bands: "1,2,3,4,5"
 #   Eğitilmiş bir TileClassifier checkpoint'i kullanmanız beklenir.
 # IDE-FIRST TRAINED PROFILE:
 # - Ana kullanim yolu IDE uzerinden bu config ile calistirmadir.
-# - training.py basarili egitim sonunda aktif modeli checkpoints/active/ altina yayimlar.
+# - training.py basarili egitim sonunda aktif modeli workspace/checkpoints/active/ altina yayimlar.
 enable_deep_learning: true
 
 # enable_classic: Klasik görüntü işleme yöntemleri (RVT, Hessian, Morfoloji)
@@ -195,17 +195,17 @@ encoders: "none"
 # - null ise: ImageNet ağırlıkları kullanılır (zero-shot)
 # - Örnek: "models/unet_resnet34_5ep.pth"
 # NOT: Bu parametre yalnızca tek encoder modunda (encoders: "none") kullanılır
-# weights: "checkpoints/epochs/epoch_032_Unet_resnet50_5ch_attention.pth"
+# weights: "workspace/checkpoints/epochs/epoch_032_Unet_resnet50_5ch_attention.pth"
 # CLASSIFICATION PRESET:
 #   Aşağıdaki yol tile-level classification eğitimi sonrası beklenen örnek addır.
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "checkpoints/epochs/epoch_022_TileClassifier_resnet50_5ch.pth"
+weights: "workspace/checkpoints/epoch_039_TileClassifier_resnet50_5ch.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
-training_metadata: "checkpoints/active/training_metadata.json"
+training_metadata: "workspace/checkpoints/active/training_metadata.json"
 
 # weights_template: ÇOKLU ENCODER için model ağırlık şablonu
 # - {encoder} yer tutucusu her encoder adı ile değiştirilir
@@ -245,7 +245,7 @@ zero_shot_imagenet: false
 trained_model_only: true
 
 # save_band_importance: Derin öğrenme çıkarımı sırasında band önem raporu yaz
-# - true: ciktilar/<oturum>/ altında *_band_importance.txt/json üretir
+# - true: workspace/ciktilar/<oturum>/ altında *_band_importance.txt/json üretir
 # - false: rapor üretimini kapatır
 save_band_importance: true
 
@@ -983,12 +983,12 @@ deriv_cache_halo: null
 # - Yol belirtin: Özel bir önbellek dizini kullanın
 # ÖRNEK:
 #   - null: kesif_alani.derivatives.npz, kesif_alani.tif'in yanında
-#   - "cache/": cache/kesif_alani.derivatives.npz + cache/kesif_alani.derivatives_raster.tif
+#   - "workspace/cache/": workspace/cache/kesif_alani.derivatives.npz + workspace/cache/kesif_alani.derivatives_raster.tif
 #   - "C:/temp/": C:/temp/kesif_alani.derivatives.npz + C:/temp/kesif_alani.derivatives_raster.tif
 # KULLANIM:
 #   Birden fazla proje için merkezi bir önbellek dizini istiyorsanız kullanın
 # ÖNERİ: Varsayılan null kullanın, daha basit
-cache_dir: "cache/"
+cache_dir: "workspace/cache/"
 
 # recalculate_cache: Mevcut önbelleği yok say ve yeniden hesapla
 # - true: Önbellek dosyası varsa bile RVT'yi sıfırdan hesapla

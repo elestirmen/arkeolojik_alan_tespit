@@ -69,6 +69,7 @@ from archeo_shared.channels import (
     MODEL_CHANNEL_NAMES,
     expected_channel_names,
 )
+from archeo_shared.modeling import AttentionWrapper, CBAM, ChannelAttention, SpatialAttention
 
 try:
     import segmentation_models_pytorch as smp
@@ -171,6 +172,18 @@ _CONFIG_PATH_FIELDS = {
     "yolo_weights",
     "cache_dir",
 }
+
+WORKSPACE_ROOT = Path("workspace")
+WORKSPACE_OUTPUTS_DIR = WORKSPACE_ROOT / "ciktilar"
+WORKSPACE_CHECKPOINTS_DIR = WORKSPACE_ROOT / "checkpoints"
+
+
+def default_config_path() -> str:
+    """Prefer config.local.yaml when it exists."""
+    local_config = Path("config.local.yaml")
+    if local_config.exists():
+        return str(local_config)
+    return "config.yaml"
 
 
 def _normalize_config_path_value(raw: Any, base_dir: Path) -> Any:
@@ -440,8 +453,8 @@ def full_raster_cache_precompute_ok(
 
 
 def make_scratch_dir(tag: str) -> Path:
-    """Create a per-run scratch directory under `checkpoints/scratch/`."""
-    base = Path("checkpoints") / "scratch"
+    """Create a per-run scratch directory under `workspace/checkpoints/scratch/`."""
+    base = WORKSPACE_CHECKPOINTS_DIR / "scratch"
     base.mkdir(parents=True, exist_ok=True)
     run_dir = base / f"{tag}_{uuid.uuid4().hex}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1356,6 +1369,35 @@ def robust_norm_fixed(arr: np.ndarray, lows: np.ndarray, highs: np.ndarray) -> n
     return out
 
 
+def stack_channels(rgb: np.ndarray, svf: np.ndarray, slrm: np.ndarray) -> np.ndarray:
+    """Build the canonical 5-channel model tensor [R, G, B, SVF, SLRM]."""
+    rgb_arr = np.asarray(rgb, dtype=np.float32)
+    svf_arr = np.asarray(svf, dtype=np.float32)
+    slrm_arr = np.asarray(slrm, dtype=np.float32)
+
+    if rgb_arr.ndim != 3 or rgb_arr.shape[0] != 3:
+        raise ValueError("stack_channels expects rgb with shape (3, H, W).")
+    if svf_arr.ndim != 2 or slrm_arr.ndim != 2:
+        raise ValueError("stack_channels expects svf and slrm with shape (H, W).")
+
+    spatial_shape = rgb_arr.shape[1:]
+    if svf_arr.shape != spatial_shape or slrm_arr.shape != spatial_shape:
+        raise ValueError(
+            "stack_channels expects RGB, SVF, and SLRM to share the same spatial shape."
+        )
+
+    stacked = np.concatenate(
+        (rgb_arr, svf_arr[np.newaxis, ...], slrm_arr[np.newaxis, ...]),
+        axis=0,
+    )
+    expected_channels = len(MODEL_CHANNEL_NAMES)
+    if stacked.shape[0] != expected_channels:
+        raise ValueError(
+            f"stack_channels produced {stacked.shape[0]} channels; expected {expected_channels}."
+        )
+    return stacked.astype(np.float32, copy=False)
+
+
 def fill_nodata(
     arr: np.ndarray, fill_value: Optional[float] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -1372,164 +1414,95 @@ def fill_nodata(
 
 
 # ==============================================================================
-# GELİŞMİŞ TOPOGRAFİK ANALİZ FONKSİYONLARI (Curvature + TPI)
+# Topographic feature helpers
 # ==============================================================================
 
 def compute_curvatures(
-    dtm: np.ndarray, 
-    pixel_size: float = 1.0
+    dtm: np.ndarray,
+    pixel_size: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    DTM'den Plan ve Profile Curvature hesaplar.
-    
-    Plan Curvature (Yatay Eğrilik):
-        - Kontür çizgileri boyunca eğrilik
-        - Pozitif değerler: Sırt/tepe (dışbükey)
-        - Negatif değerler: Vadi/hendek (içbükey)
-        - Arkeolojik yapılar: Tümülüsler pozitif, hendekler negatif
-    
-    Profile Curvature (Dikey Eğrilik):
-        - Eğim yönündeki eğrilik
-        - Pozitif değerler: Dışbükey yüzeyler (ivmelenen akış)
-        - Negatif değerler: İçbükey yüzeyler (yavaşlayan akış)
-        - Arkeolojik yapılar: Teraslar, basamaklar tespit edilir
-    
-    Args:
-        dtm: Sayısal Arazi Modeli (Digital Terrain Model)
-        pixel_size: Piksel boyutu (metre cinsinden)
-        
-    Returns:
-        (plan_curvature, profile_curvature) - Her ikisi de (H, W) boyutunda
-    """
-    # NaN değerleri doldur
+    """Compute plan and profile curvature from a DTM."""
     dtm_filled, valid_mask = fill_nodata(dtm)
-    
-    # Birinci türevler (gradient) - x ve y yönlerinde
+
     fy, fx = np.gradient(dtm_filled, pixel_size)
-    
-    # İkinci türevler
-    fyy, fyx = np.gradient(fy, pixel_size)
+    fyy, _fyx = np.gradient(fy, pixel_size)
     fxy, fxx = np.gradient(fx, pixel_size)
-    
-    # Gradyan büyüklüğünün kareleri
-    p = fx ** 2  # (df/dx)^2
-    q = fy ** 2  # (df/dy)^2
-    
-    # Sıfıra bölme koruması
-    denominator = p + q
-    denominator = np.where(denominator < 1e-10, 1e-10, denominator)
-    
-    # Plan Curvature (horizontal/contour curvature)
-    # Formül: Kh = -[(fxx * q) - (2 * fxy * fx * fy) + (fyy * p)] / [(p + q)^1.5]
+
+    p = fx ** 2
+    q = fy ** 2
+    denominator = np.where((p + q) < 1e-10, 1e-10, p + q)
+
     plan_curv = -((fxx * q) - (2 * fxy * fx * fy) + (fyy * p)) / (denominator ** 1.5)
-    
-    # Profile Curvature (vertical/slope curvature)
-    # Formül: Kv = -[(fxx * p) + (2 * fxy * fx * fy) + (fyy * q)] / [(p + q)^1.5]
     profile_curv = -((fxx * p) + (2 * fxy * fx * fy) + (fyy * q)) / (denominator ** 1.5)
-    
-    # NaN ve sonsuz değerleri temizle
+
     plan_curv = np.nan_to_num(plan_curv, nan=0.0, posinf=0.0, neginf=0.0)
     profile_curv = np.nan_to_num(profile_curv, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    # Aşırı değerleri kırp (robust normalizasyon için)
-    # Tipik curvature değerleri -0.1 ile 0.1 arasında
     plan_curv = np.clip(plan_curv, -0.1, 0.1)
     profile_curv = np.clip(profile_curv, -0.1, 0.1)
-    
-    # Orijinal geçersiz bölgeleri işaretle
+
     plan_curv[~valid_mask] = np.nan
     profile_curv[~valid_mask] = np.nan
-    
     return plan_curv.astype(np.float32), profile_curv.astype(np.float32)
 
 
 def compute_tpi_multiscale(
-    dtm: np.ndarray, 
-    radii: Tuple[int, ...] = (5, 15, 30)
+    dtm: np.ndarray,
+    radii: Tuple[int, ...] = (5, 15, 30),
 ) -> np.ndarray:
-    """
-    Çok ölçekli Topographic Position Index (TPI) hesaplar.
-    
-    TPI, bir pikselin çevresine göre göreli yüksekliğini ölçer:
-        TPI = merkez_yükseklik - ortalama(komşu_yükseklikleri)
-    
-    Arkeolojik Yapı Tespitinde Kullanımı:
-        - Pozitif TPI: Çevreden yüksek yapılar (tümülüs, höyük, tepe)
-        - Negatif TPI: Çevreden alçak yapılar (hendek, vadi, çukur)
-        - Sıfıra yakın TPI: Düz alanlar veya yamaçlar
-    
-    Çok Ölçekli Yaklaşım:
-        - Küçük yarıçap (5px): Küçük yapılar, duvar kalıntıları
-        - Orta yarıçap (15px): Tipik tümülüsler, küçük höyükler
-        - Büyük yarıçap (30px): Geniş höyükler, yerleşim tepeleri
-    
-    Args:
-        dtm: Sayısal Arazi Modeli
-        radii: Farklı ölçekler için yarıçaplar (piksel cinsinden)
-        
-    Returns:
-        tpi_combined: Çok ölçekli TPI ortalaması, normalize edilmiş [-1, 1] arasında
-    """
-    # NaN değerleri doldur
+    """Compute a simple multi-scale topographic position index."""
     dtm_filled, valid_mask = fill_nodata(dtm)
-    
-    tpi_stack = []
-    
+    tpi_stack: List[np.ndarray] = []
+
     for radius in radii:
-        # Kare pencere boyutu (2*r + 1)
-        window_size = 2 * radius + 1
-        
-        # Uniform filter ile komşuluk ortalaması hesapla
-        # reflect mode: kenar piksellerini yansıtarak sınır etkilerini azalt
-        mean_elevation = uniform_filter(dtm_filled, size=window_size, mode='reflect')
-        
-        # TPI = merkez piksel değeri - ortalama değer
+        window_size = 2 * int(radius) + 1
+        mean_elevation = uniform_filter(dtm_filled, size=window_size, mode="reflect")
         tpi = dtm_filled - mean_elevation
-        
-        # Z-score benzeri normalizasyon (-1 ile 1 arası)
         tpi_std = np.nanstd(tpi[valid_mask]) if np.any(valid_mask) else 1.0
         if tpi_std > 0:
-            tpi = tpi / (3 * tpi_std)  # 3-sigma normalizasyon (±3σ → ±1)
-        
-        tpi = np.clip(tpi, -1, 1)
-        tpi_stack.append(tpi)
-    
-    # Ölçeklerin ortalamasını al (ensemble yaklaşım)
+            tpi = tpi / (3 * tpi_std)
+        tpi_stack.append(np.clip(tpi, -1.0, 1.0))
+
     tpi_combined = np.nanmean(np.stack(tpi_stack, axis=0), axis=0)
-    
-    # Orijinal geçersiz bölgeleri işaretle
     tpi_combined[~valid_mask] = np.nan
-    
     return tpi_combined.astype(np.float32)
 
 
-def _rvt_as_float32(result_obj, name: str) -> np.ndarray:
-    """Best-effort conversion of various RVT return types to float32 ndarray."""
+def _rvt_as_float32(result_obj: Any, name: str) -> np.ndarray:
+    """Best-effort conversion of RVT outputs to float32 ndarrays."""
     if isinstance(result_obj, np.ndarray):
         return result_obj.astype(np.float32)
     if isinstance(result_obj, np.ma.MaskedArray):
         return np.ma.filled(result_obj, np.nan).astype(np.float32)
     if isinstance(result_obj, dict):
-        preferred_keys = ("svf", "SVF", "slrm", "SLRM", "lrm", "LRM",
-                          "positive_openness", "pos_open", "negative_openness",
-                          "neg_open", "slope", "Slope")
-        for k in preferred_keys:
-            if k in result_obj and isinstance(result_obj[k], (np.ndarray, np.ma.MaskedArray)):
-                return _rvt_as_float32(result_obj[k], name)
-        for v in result_obj.values():
+        preferred_keys = (
+            "svf",
+            "SVF",
+            "slrm",
+            "SLRM",
+            "lrm",
+            "LRM",
+            "positive_openness",
+            "pos_open",
+            "negative_openness",
+            "neg_open",
+            "slope",
+            "Slope",
+            "opns",
+            "OPNS",
+        )
+        for key in preferred_keys:
+            if key in result_obj and isinstance(result_obj[key], (np.ndarray, np.ma.MaskedArray)):
+                return _rvt_as_float32(result_obj[key], name)
+        for value in result_obj.values():
             try:
-                arr = _rvt_as_float32(v, name)
-                if isinstance(arr, np.ndarray):
-                    return arr
+                return _rvt_as_float32(value, name)
             except Exception:
                 continue
         raise TypeError(f"RVT '{name}' returned dict without ndarray values.")
     if isinstance(result_obj, (list, tuple)):
-        for v in result_obj:
+        for value in result_obj:
             try:
-                arr = _rvt_as_float32(v, name)
-                if isinstance(arr, np.ndarray):
-                    return arr
+                return _rvt_as_float32(value, name)
             except Exception:
                 continue
         raise TypeError(f"RVT '{name}' returned a sequence without ndarray values.")
@@ -1551,17 +1524,13 @@ def compute_derivatives_with_rvt(
     show_progress: bool = True,
     log_steps: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute SVF and SLRM from a DTM tile (5-band schema).
+    """Compute SVF and SLRM from a DTM tile for the 5-band model."""
+    del show_progress  # kept for backward-compatible call sites
 
-    Returns
-    -------
-    svf : np.ndarray (H, W)  – multi-radius averaged Sky-View Factor
-    slrm : np.ndarray (H, W) – Simple Local Relief Model (ADAF strategy)
-    """
     if rvt_vis is None:
         raise ImportError("Install rvt-py: pip install rvt")
-    if radii is None:
-        radii = DEFAULTS.rvt_radii
+
+    radii = DEFAULTS.rvt_radii if radii is None else radii
     dtm_filled, valid_mask = fill_nodata(dtm)
     log_fn = LOGGER.info if log_steps else LOGGER.debug
 
@@ -1569,18 +1538,36 @@ def compute_derivatives_with_rvt(
         pixel = max(float(pixel_size), 1e-6)
         return max(1, int(round(float(radius_val) / pixel)))
 
-    # --- SVF (multi-radius averaged) ---
-    def _call_sky_view_factor(dem_arr, radius_val):
+    def _call_sky_view_factor(dem_arr: np.ndarray, radius_val: float) -> Any:
         radius_px = _radius_to_cells(radius_val)
         candidates = (
-            {"dem": dem_arr, "resolution": pixel_size, "compute_svf": True,
-             "compute_asvf": False, "compute_opns": False,
-             "svf_r_max": radius_px, "svf_noise": 0, "no_data": None},
-            {"dem": dem_arr, "resolution": pixel_size, "compute_svf": True,
-             "compute_asvf": False, "compute_opns": False,
-             "svf_r_max": radius_px, "svf_noise": 0},
-            {"dem": dem_arr, "resolution": pixel_size, "compute_svf": True,
-             "compute_opns": False, "svf_r_max": radius_px, "svf_noise": 0},
+            {
+                "dem": dem_arr,
+                "resolution": pixel_size,
+                "compute_svf": True,
+                "compute_asvf": False,
+                "compute_opns": False,
+                "svf_r_max": radius_px,
+                "svf_noise": 0,
+                "no_data": None,
+            },
+            {
+                "dem": dem_arr,
+                "resolution": pixel_size,
+                "compute_svf": True,
+                "compute_asvf": False,
+                "compute_opns": False,
+                "svf_r_max": radius_px,
+                "svf_noise": 0,
+            },
+            {
+                "dem": dem_arr,
+                "resolution": pixel_size,
+                "compute_svf": True,
+                "compute_opns": False,
+                "svf_r_max": radius_px,
+                "svf_noise": 0,
+            },
         )
         last_err: Optional[Exception] = None
         for kwargs in candidates:
@@ -1595,24 +1582,24 @@ def compute_derivatives_with_rvt(
                 raise last_err
             raise exc
 
-    def _extract_named(result_obj, keys, name):
+    def _extract_named(result_obj: Any, keys: Sequence[str], name: str) -> np.ndarray:
         if isinstance(result_obj, dict):
             for key in keys:
                 if key in result_obj:
                     return _rvt_as_float32(result_obj[key], name)
         return _rvt_as_float32(result_obj, name)
 
-    log_fn("  → SVF (Sky View Factor) hesaplanıyor...")
+    log_fn("  -> SVF (Sky View Factor) hesaplanıyor...")
     svf_radius = float(radii[0]) if radii else 10.0
-    log_fn("    SVF radius=%.1f m  (%d px)", svf_radius, _radius_to_cells(svf_radius))
+    log_fn("    SVF radius=%.1f m (%d px)", svf_radius, _radius_to_cells(svf_radius))
     svf_res = _call_sky_view_factor(dtm_filled, svf_radius)
     svf_avg = _extract_named(svf_res, ("svf", "SVF"), "sky_view_factor")
 
-    # --- SLRM (ADAF strategy: radius_cell clamped to [10, 50] px) ---
-    log_fn("  → SLRM (Simple Local Relief Model) hesaplanıyor...")
+    log_fn("  -> SLRM (Simple Local Relief Model) hesaplanıyor...")
     from math import ceil as _ceil
+
     slrm_rad_cell = int(min(50, max(10, _ceil(10.0 / max(float(pixel_size), 1e-6)))))
-    log_fn("    SLRM rad_cell=%d px  (pixel_size=%.3f m)", slrm_rad_cell, pixel_size)
+    log_fn("    SLRM rad_cell=%d px (pixel_size=%.3f m)", slrm_rad_cell, pixel_size)
 
     slrm: np.ndarray
     slrm_ready = False
@@ -1629,11 +1616,14 @@ def compute_derivatives_with_rvt(
                 continue
     if not slrm_ready and hasattr(rvt_vis, "local_relief_model"):
         radius_keys = ("search_radius", "radius", "r_max", "max_radius")
-        for rk in radius_keys:
+        for radius_key in radius_keys:
             try:
                 slrm = _rvt_as_float32(
-                    rvt_vis.local_relief_model(dem=dtm_filled, resolution=pixel_size,
-                                               **{rk: float(max(radii)), "no_data": None}),
+                    rvt_vis.local_relief_model(
+                        dem=dtm_filled,
+                        resolution=pixel_size,
+                        **{radius_key: float(max(radii)), "no_data": None},
+                    ),
                     "local_relief_model",
                 )
                 slrm_ready = True
@@ -1642,13 +1632,17 @@ def compute_derivatives_with_rvt(
                 continue
     if not slrm_ready:
         _warn_once("rvt_slrm_missing", "RVT SLRM fonksiyonu eksik; Gaussian fallback kullaniliyor.")
-        _sigma = DEFAULTS.gaussian_lrm_sigma if gaussian_lrm_sigma is None else float(gaussian_lrm_sigma)
-        low_pass = gaussian_filter(dtm_filled, sigma=_sigma)
+        sigma = (
+            DEFAULTS.gaussian_lrm_sigma
+            if gaussian_lrm_sigma is None
+            else float(gaussian_lrm_sigma)
+        )
+        low_pass = gaussian_filter(dtm_filled, sigma=sigma)
         slrm = (dtm_filled - low_pass).astype(np.float32)
 
     svf_avg[~valid_mask] = np.nan
     slrm[~valid_mask] = np.nan
-    return svf_avg, slrm
+    return svf_avg.astype(np.float32, copy=False), slrm.astype(np.float32, copy=False)
 
 
 def _score_rvtlog(
@@ -1664,39 +1658,49 @@ def _score_rvtlog(
     rvt_radii: Optional[Sequence[float]] = None,
     gaussian_lrm_sigma: Optional[float] = None,
 ) -> np.ndarray:
-    """Birleşik RVT + LoG + gradyan klasik skor hesaplama."""
+    """Compute the combined RVT + LoG + gradient classical score."""
     dtm_filled, valid = fill_nodata(dtm)
     if pre_svf is None or pre_lrm is None:
         svf, slrm = compute_derivatives_with_rvt(
-            dtm, pixel_size=pixel_size, radii=rvt_radii,
+            dtm,
+            pixel_size=pixel_size,
+            radii=rvt_radii,
             gaussian_lrm_sigma=gaussian_lrm_sigma,
-            show_progress=False, log_steps=False,
+            show_progress=False,
+            log_steps=False,
         )
         if pre_svf is None:
             pre_svf = svf
         if pre_lrm is None:
             pre_lrm = slrm
-    svf, lrm = pre_svf, pre_lrm
+    svf = pre_svf
+    lrm = pre_lrm
     neg = pre_neg_open if pre_neg_open is not None else np.zeros_like(dtm_filled, dtype=np.float32)
-    _sigmas = DEFAULTS.sigma_scales if sigmas is None else sigmas
+    resolved_sigmas = DEFAULTS.sigma_scales if sigmas is None else sigmas
     log_responses = [
-        np.abs(gaussian_laplace(dtm_filled, sigma=s, mode="nearest"))
-        for s in _sigmas
+        np.abs(gaussian_laplace(dtm_filled, sigma=sigma, mode="nearest"))
+        for sigma in resolved_sigmas
     ]
     blob = np.maximum.reduce(log_responses)
     if pre_slope is None:
-        _grad_sigma = (
-            DEFAULTS.gaussian_gradient_sigma if gaussian_gradient_sigma is None else float(gaussian_gradient_sigma)
+        grad_sigma = (
+            DEFAULTS.gaussian_gradient_sigma
+            if gaussian_gradient_sigma is None
+            else float(gaussian_gradient_sigma)
         )
-        grad = gaussian_gradient_magnitude(dtm_filled, sigma=_grad_sigma, mode="nearest")
+        grad = gaussian_gradient_magnitude(dtm_filled, sigma=grad_sigma, mode="nearest")
         slope_term = _norm01(grad)
     else:
         slope_term = _norm01(pre_slope)
+    lrm_n = _norm01(lrm)
     svf_c = 1.0 - _norm01(svf)
     neg_n = _norm01(neg)
-    lrm_n = _norm01(lrm)
-    _var_win = DEFAULTS.local_variance_window if local_variance_window is None else int(local_variance_window)
-    var_n = _norm01(_local_variance(dtm_filled, size=_var_win))
+    variance_window = (
+        DEFAULTS.local_variance_window
+        if local_variance_window is None
+        else int(local_variance_window)
+    )
+    var_n = _norm01(_local_variance(dtm_filled, size=variance_window))
     score = (
         0.30 * _norm01(blob)
         + 0.20 * lrm_n
@@ -1710,174 +1714,35 @@ def _score_rvtlog(
 
 
 def _score_hessian(dtm: np.ndarray, sigmas: Optional[Sequence[float]] = None) -> np.ndarray:
-    """Çok ölçekli Hessian sırt/vadi yanıt hesaplama."""
+    """Compute a multi-scale Hessian-based ridge/valley response."""
     dtm_filled, valid = fill_nodata(dtm)
-    _sigmas = DEFAULTS.sigma_scales if sigmas is None else sigmas
-    responses = [_hessian_response(dtm_filled, sigma=s) for s in _sigmas]
+    resolved_sigmas = DEFAULTS.sigma_scales if sigmas is None else sigmas
+    responses = [_hessian_response(dtm_filled, sigma=sigma) for sigma in resolved_sigmas]
     score = np.maximum.reduce(responses)
     score[~valid] = np.nan
     return score.astype(np.float32)
 
 
 def _score_morph(dtm: np.ndarray, radii: Optional[Sequence[int]] = None) -> np.ndarray:
-    """Morfolojik beyaz/siyah top-hat belirginlik skoru hesaplama."""
+    """Compute a morphological top-hat prominence score."""
     dtm_filled, valid = fill_nodata(dtm)
-    radii = DEFAULTS.morphology_radii if radii is None else radii
-    wth_list = []
-    bth_list = []
-    for r in radii:
-        size = (int(r), int(r))
+    resolved_radii = DEFAULTS.morphology_radii if radii is None else radii
+    wth_list: List[np.ndarray] = []
+    bth_list: List[np.ndarray] = []
+    for radius in resolved_radii:
+        size = (int(radius), int(radius))
         opening = grey_opening(dtm_filled, size=size, mode="nearest")
         closing = grey_closing(dtm_filled, size=size, mode="nearest")
-        wth = dtm_filled - opening
-        bth = closing - dtm_filled
-        wth_list.append(_norm01(wth))
-        bth_list.append(_norm01(bth))
-    hill = np.maximum.reduce(wth_list)
-    moat = np.maximum.reduce(bth_list)
-    score = np.maximum(hill, moat)
+        wth_list.append(_norm01(dtm_filled - opening))
+        bth_list.append(_norm01(closing - dtm_filled))
+    score = np.maximum(np.maximum.reduce(wth_list), np.maximum.reduce(bth_list))
     score[~valid] = np.nan
     return score.astype(np.float32)
 
 
-def stack_channels(
-    rgb: np.ndarray,
-    svf: np.ndarray,
-    slrm: np.ndarray,
-) -> np.ndarray:
-    """Stack channels in the 5-band order: R, G, B, SVF, SLRM."""
-    if rgb.shape[0] != 3:
-        raise ValueError("RGB input must have three channels.")
-
-    stacked = np.stack(
-        [rgb[0], rgb[1], rgb[2], svf, slrm],
-        axis=0,
-    )
-    return stacked.astype(np.float32)
-
-
 # ==============================================================================
-# CBAM (Convolutional Block Attention Module) - DİKKAT MEKANİZMASI
+# Shared attention layers live in archeo_shared.modeling.
 # ==============================================================================
-
-class ChannelAttention(torch.nn.Module):
-    """
-    Squeeze-and-Excitation tarzı Kanal Dikkat Modülü.
-    
-    Her kanalın (RGB, SVF, Curvature vb.) önemini dinamik olarak ağırlıklandırır.
-    Model, hangi kanalların tespit için daha önemli olduğunu öğrenir.
-    
-    Örnek: Tümülüs tespitinde SVF ve TPI kanalları daha yüksek ağırlık alabilir,
-    hendek tespitinde ise Profile Curvature ve Negative Openness ön plana çıkabilir.
-    
-    Args:
-        in_channels: Giriş kanal sayısı (9 veya 12)
-        reduction: Kanal azaltma oranı (default: 4 → 12 kanal için 3 kanala sıkıştırır)
-    """
-    def __init__(self, in_channels: int, reduction: int = 4):
-        super().__init__()
-        # Global pooling
-        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
-        self.max_pool = torch.nn.AdaptiveMaxPool2d(1)
-        
-        # Paylaşımlı MLP (iki yol için ortak)
-        reduced_channels = max(in_channels // reduction, 1)
-        self.fc = torch.nn.Sequential(
-            torch.nn.Conv2d(in_channels, reduced_channels, 1, bias=False),
-            torch.nn.ReLU(inplace=True),
-            torch.nn.Conv2d(reduced_channels, in_channels, 1, bias=False)
-        )
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Average pooling yolu
-        avg_out = self.fc(self.avg_pool(x))
-        # Max pooling yolu
-        max_out = self.fc(self.max_pool(x))
-        # Birleştir ve sigmoid ile [0, 1] aralığına normalize et
-        attention = torch.sigmoid(avg_out + max_out)
-        return x * attention
-
-
-class SpatialAttention(torch.nn.Module):
-    """
-    Mekansal Dikkat Modülü.
-    
-    Görüntünün hangi bölgelerinin (hangi piksellerin) önemli olduğunu öğrenir.
-    Arkeolojik yapı sınırlarına ve merkez bölgelere dikkat çeker.
-    
-    Args:
-        kernel_size: Konvolüsyon çekirdek boyutu (tek sayı, default: 7)
-    """
-    def __init__(self, kernel_size: int = 7):
-        super().__init__()
-        padding = kernel_size // 2
-        self.conv = torch.nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Kanal boyunca average ve max pooling
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        # Birleştir
-        combined = torch.cat([avg_out, max_out], dim=1)
-        # Sigmoid ile [0, 1] aralığına normalize et
-        attention = torch.sigmoid(self.conv(combined))
-        return x * attention
-
-
-class CBAM(torch.nn.Module):
-    """
-    Convolutional Block Attention Module (CBAM).
-    
-    Hem kanal hem de mekansal dikkat uygular:
-    1. Önce kanal dikkat: Hangi özellik kanalları önemli?
-    2. Sonra mekansal dikkat: Hangi bölgeler önemli?
-    
-    Referans: Woo et al. "CBAM: Convolutional Block Attention Module" (ECCV 2018)
-    
-    Arkeolojik tespit için avantajları:
-    - Farklı yapı tipleri için farklı kanalları ön plana çıkarır
-    - Yapı sınırlarına ve merkezlerine odaklanır
-    - Gürültülü bölgeleri otomatik olarak azaltır
-    
-    Args:
-        in_channels: Giriş kanal sayısı
-        reduction: Kanal dikkat için azaltma oranı
-        kernel_size: Mekansal dikkat için çekirdek boyutu
-    """
-    def __init__(self, in_channels: int, reduction: int = 4, kernel_size: int = 7):
-        super().__init__()
-        self.channel_attention = ChannelAttention(in_channels, reduction)
-        self.spatial_attention = SpatialAttention(kernel_size)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.channel_attention(x)
-        x = self.spatial_attention(x)
-        return x
-
-
-class AttentionWrapper(torch.nn.Module):
-    """
-    Mevcut modele CBAM attention ekleyen sarmalayıcı.
-    
-    Giriş katmanından önce CBAM uygulayarak modelin hangi kanallara
-    ve bölgelere dikkat etmesi gerektiğini öğrenmesini sağlar.
-    
-    Args:
-        base_model: Sarmalanacak temel model (U-Net vb.)
-        in_channels: Giriş kanal sayısı
-        reduction: CBAM için kanal azaltma oranı
-    """
-    def __init__(self, base_model: torch.nn.Module, in_channels: int, reduction: int = 4):
-        super().__init__()
-        self.input_attention = CBAM(in_channels, reduction=reduction)
-        self.base_model = base_model
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Önce attention uygula
-        x = self.input_attention(x)
-        # Sonra base model'i çalıştır
-        return self.base_model(x)
-
 
 def get_num_channels(*_args, **_kwargs) -> int:
     """Return the fixed 5-band channel count, accepting legacy unused args."""
@@ -6279,9 +6144,9 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str], config: Pipeline
     else:
         out_name = fallback_name
 
-    # Route all outputs under project-root 'ciktilar/<session>/' regardless of input location.
+    # Route all outputs under repo-local 'workspace/ciktilar/<session>/' regardless of input location.
     session_folder = build_session_folder_name(input_path, config)
-    return Path("ciktilar") / session_folder / out_name
+    return WORKSPACE_OUTPUTS_DIR / session_folder / out_name
 
 
 def _normalize_param_value(value: Any) -> Any:
@@ -7568,7 +7433,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument(
         "--config",
         type=str,
-        default="config.yaml",
+        default=default_config_path(),
         help="YAML konfigürasyon dosyası yolu. Tüm ayarları buradan kontrol edebilirsiniz.",
     )
     parser.add_argument(
@@ -8088,7 +7953,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if config.trained_model_only and not training_metadata:
             parser.error(
                 f"Training metadata could not be loaded: {training_metadata_path}. "
-                "Once training.py finishes, make sure checkpoints/active/training_metadata.json exists."
+                "Once training.py finishes, make sure workspace/checkpoints/active/training_metadata.json exists."
             )
 
     if config.trained_model_only:

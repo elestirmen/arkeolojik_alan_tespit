@@ -2799,8 +2799,8 @@ class MainWindow(QMainWindow):
     def _default_dataset_output_dir(self) -> Path:
         base_dir = Path(__file__).resolve().parent
         if self.s is None:
-            return base_dir / "training_data_classification"
-        return base_dir / f"training_data_classification_{sanitize_name(self.s.cfg.input_path.stem)}"
+            return base_dir / "workspace" / "training_data_classification"
+        return base_dir / "workspace" / f"training_data_classification_{sanitize_name(self.s.cfg.input_path.stem)}"
 
     def _ensure_mask_saved_for_export(self) -> bool:
         if self.s is None:

@@ -1,6 +1,6 @@
 # Baseline example without a trained checkpoint.
 # 5-channel tile stack: R, G, B, SVF, SLRM (GeoTIFF bands 1–5). Weights/checkpoints use 5ch, not 12ch.
-input: "on_veri/karlik_vadi_rgb_svf_slrm_5band.tif"
+input: "workspace/on_veri/karlik_vadi_rgb_svf_slrm_5band.tif"
 
 enable_deep_learning: true
 enable_classic: false

@@ -16,7 +16,7 @@ kullanarak U-Net modelini eğitir.
     - TensorBoard desteği (opsiyonel)
 
 Kullanım:
-    python training.py --data training_data --epochs 50 --encoder resnet34
+    python training.py --data workspace/training_data --epochs 50 --encoder resnet34
     
     Veya varsayılan ayarlarla:
     python training.py
@@ -84,7 +84,7 @@ CONFIG: dict[str, object] = {
     # data:
     # Egitim veri kok dizini.
     # Beklenen yapi: train/images, train/masks, val/images, val/masks
-    "data": "training_data",
+    "data": "workspace/training_data",
 
     # task:
     # segmentation       : Piksel maskesi ogrenilir
@@ -120,7 +120,7 @@ CONFIG: dict[str, object] = {
     # lr:
     # Ogrenme orani (AdamW).
     # Cok yuksek olursa kararsizlik, cok dusuk olursa yavas ogrenme gorulebilir.
-    "lr": 1e-4,
+    "lr": 1e-5,
 
     # loss:
     # Optimize edilen kayip fonksiyonu.
@@ -185,7 +185,7 @@ CONFIG: dict[str, object] = {
 
     # output:
     # Checkpoint cikti dizini.
-    "output": "checkpoints",
+    "output": "workspace/checkpoints",
 
     # publish_active:
     # True ise egitim sonunda aktif IDE modeli sabit bir klasore kopyalanir.
@@ -193,7 +193,7 @@ CONFIG: dict[str, object] = {
 
     # active_dir:
     # IDE/inference tarafinin okuyacagi aktif model klasoru.
-    "active_dir": "checkpoints/active",
+    "active_dir": "workspace/checkpoints/active",
 
     # save_every_epoch:
     # True ise her epoch sonunda ek checkpoint kaydeder.
@@ -1091,7 +1091,7 @@ class TrainingConfig:
     """Eğitim konfigürasyonu."""
     
     # Veri
-    data_dir: Path = field(default_factory=lambda: Path("training_data"))
+    data_dir: Path = field(default_factory=lambda: Path("workspace/training_data"))
     task_type: str = "segmentation"
     tile_label_min_positive_ratio: float = 0.0
     # Model
@@ -1153,11 +1153,11 @@ class TrainingConfig:
     use_fpn_classifier: bool = True
 
     # Çıktı
-    output_dir: Path = field(default_factory=lambda: Path("checkpoints"))
+    output_dir: Path = field(default_factory=lambda: Path("workspace/checkpoints"))
     save_every_epoch: bool = True
     epoch_dir: str = "epochs"
     publish_active: bool = True
-    active_dir: Path = field(default_factory=lambda: Path("checkpoints") / "active")
+    active_dir: Path = field(default_factory=lambda: Path("workspace/checkpoints") / "active")
     source_metadata_path: Optional[Path] = None
     source_metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -3192,7 +3192,7 @@ def main():
         print("\n" + "=" * 60)
         print("EGITIM TAMAMLANDI!")
         print("=" * 60)
-        print("\nEğitilmiş modeli kullanmak için config.yaml'da:")
+        print("\nEğitilmiş modeli kullanmak için config.yaml veya config.local.yaml içinde:")
         print(f"  weights: \"{best_model}\"")
         print("  zero_shot_imagenet: false")
         if config.task_type == "tile_classification":

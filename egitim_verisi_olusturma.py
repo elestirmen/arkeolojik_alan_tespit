@@ -12,7 +12,7 @@ Kanal Yapısı (5 kanal):
     [4]: SLRM (Simplified Local Relief Model)
 
 Kullanım:
-    python egitim_verisi_olusturma.py --input kesif_alani.tif --mask ground_truth.tif --output training_data
+    python egitim_verisi_olusturma.py --input kesif_alani.tif --mask ground_truth.tif --output workspace/training_data
     python egitim_verisi_olusturma.py  # CONFIG bolumundeki varsayilanlarla calisir
 
 Gereksinimler:
@@ -68,20 +68,20 @@ CONFIG: dict[str, object] = {
     # input:
     # Cok bantli raster dosyasinin yolu.
     # Beklenen icerik: RGB + DSM + DTM (hangi bant hangi role gidecek, bands ile belirlenir).
-    "input": "on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif",
-    #"input": "on_veri/karlik_dag_rgb_dtm_dsm_5band.tif",
+    "input": "workspace/on_veri/karlik_vadi_rgb_dtm_dsm_5band.tif",
+    #"input": "workspace/on_veri/karlik_dag_rgb_dtm_dsm_5band.tif",
 
     # mask:
     # Ground-truth maske dosyasinin yolu.
     # 0 disindaki tum degerler pozitif sinif olarak ele alinir (otomatik 0/1'e cevrilir).
-    "mask": "on_veri/karlik_vadi_rgb_ground_truth.tif",
-    #"mask": "on_veri/karlik_dag_rgb_ground_truth.tif",
+    "mask": "workspace/on_veri/karlik_vadi_rgb_ground_truth.tif",
+    #"mask": "workspace/on_veri/karlik_dag_rgb_ground_truth.tif",
 
 
     # output:
     # Cikti kok dizini.
     # train/val, images/masks, metadata ve tile_presence dosyalari bu dizine yazilir.
-    "output": "training_data",
+    "output": "workspace/training_data",
 
     # tile_size:
     # Her ornegin (tile) uzamsal boyutu.
@@ -1429,7 +1429,7 @@ def create_tiles_from_multiple_sources(
 def main():
     config_input = str(CONFIG.get("input", "")).strip()
     config_mask = str(CONFIG.get("mask", "")).strip()
-    config_output = str(CONFIG.get("output", "training_data")).strip() or "training_data"
+    config_output = str(CONFIG.get("output", "workspace/training_data")).strip() or "workspace/training_data"
 
     config_train_negative_keep_ratio = float(CONFIG.get("train_negative_keep_ratio", 1.0))
     config_train_negative_max = CONFIG.get("train_negative_max", None)
