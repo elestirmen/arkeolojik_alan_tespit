@@ -30,6 +30,7 @@ from archaeo_detect import (
     export_candidate_locations_table,
     percentile_clip,
     compute_ndsm,
+    resolve_training_metadata,
     _build_candidate_location_rows,
     _otsu_threshold_0to1,
     robust_norm,
@@ -152,14 +153,15 @@ class TestPipelineDefaultsValidation:
         with pytest.raises(ValueError, match=r"trained_model_only.*weights"):
             PipelineDefaults(trained_model_only=True, weights=None)
 
-    def test_trained_model_only_requires_training_metadata(self):
-        """trained_model_only etkinse training_metadata zorunlu olmali."""
-        with pytest.raises(ValueError, match=r"trained_model_only.*training_metadata"):
-            PipelineDefaults(
-                trained_model_only=True,
-                weights="checkpoints/dummy.pth",
-                training_metadata=None,
-            )
+    def test_trained_model_only_allows_checkpoint_metadata_fallback(self):
+        """trained_model_only, checkpoint metadata fallback'i icin training_metadata olmadan kurulabilmeli."""
+        config = PipelineDefaults(
+            trained_model_only=True,
+            weights="checkpoints/dummy.pth",
+            training_metadata=None,
+        )
+        assert config.trained_model_only is True
+        assert config.training_metadata is None
 
     def test_trained_model_only_requires_deep_learning(self):
         """trained_model_only etkinse deep learning acik olmali."""
@@ -710,6 +712,31 @@ class TestWeightLoadingCompatibility:
 # ============================================================================
 
 class TestConfigOverride:
+    def test_resolve_training_metadata_falls_back_to_checkpoint_hints(self):
+        """JSON yoksa checkpoint ipuclari metadata olarak kullanilabilmeli."""
+        metadata_path, metadata, source = resolve_training_metadata(
+            configured_path=Path("missing_training_metadata.json"),
+            weights_path=Path("workspace/checkpoints/epoch_008_TileClassifier_resnet50_5ch.pth"),
+            checkpoint_hints={
+                "schema_version": 3,
+                "task_type": "tile_classification",
+                "arch": "TileClassifier",
+                "encoder": "resnet50",
+                "in_channels": 5,
+                "channel_names": ["R", "G", "B", "SVF", "SLRM"],
+                "bands": "1,2,3,4,5",
+                "tile_size": 512,
+                "overlap": 128,
+                "use_fpn_classifier": True,
+            },
+        )
+
+        assert metadata_path == Path("missing_training_metadata.json")
+        assert source == "checkpoint"
+        assert metadata["tile_size"] == 512
+        assert metadata["overlap"] == 128
+        assert metadata["bands"] == "1,2,3,4,5"
+
     def test_default_config_prefers_local_override(self, tmp_path: Path, monkeypatch):
         """Varsa config.local.yaml, varsayilan config olarak tercih edilmeli."""
         monkeypatch.chdir(tmp_path)

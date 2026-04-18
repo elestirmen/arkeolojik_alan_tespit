@@ -120,7 +120,7 @@ CONFIG: dict[str, object] = {
     # lr:
     # Ogrenme orani (AdamW).
     # Cok yuksek olursa kararsizlik, cok dusuk olursa yavas ogrenme gorulebilir.
-    "lr": 1e-5,
+    "lr": 1e-4,
 
     # loss:
     # Optimize edilen kayip fonksiyonu.

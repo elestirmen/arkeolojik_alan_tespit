@@ -1025,8 +1025,6 @@ class PipelineDefaults:
                 errors.append("trained_model_only icin enable_deep_learning=true olmalidir.")
             if not self.weights:
                 errors.append("trained_model_only icin weights zorunludur.")
-            if not self.training_metadata:
-                errors.append("trained_model_only icin training_metadata zorunludur.")
 
         if errors:
             error_msg = "Konfigürasyon doğrulama hataları:\n" + "\n".join(f"  - {e}" for e in errors)
@@ -2206,6 +2204,79 @@ def load_training_metadata_hints(metadata_path: Path) -> Dict[str, Any]:
         LOGGER.debug("Could not read training metadata from %s: %s", metadata_path, exc)
         return {}
     return raw if isinstance(raw, dict) else {}
+
+
+def _metadata_from_checkpoint_hints(checkpoint_hints: Dict[str, Any]) -> Dict[str, Any]:
+    """Synthesize training metadata from checkpoint hints when JSON is unavailable."""
+    if not checkpoint_hints:
+        return {}
+    metadata: Dict[str, Any] = {}
+    for key in (
+        "schema_version",
+        "task_type",
+        "arch",
+        "encoder",
+        "in_channels",
+        "channel_names",
+        "bands",
+        "tile_size",
+        "overlap",
+        "input_file",
+        "mask_file",
+        "use_fpn_classifier",
+    ):
+        value = checkpoint_hints.get(key)
+        if value in (None, ""):
+            continue
+        metadata[key] = list(value) if isinstance(value, tuple) else value
+    return metadata
+
+
+def _candidate_training_metadata_paths(
+    configured_path: Optional[Path],
+    weights_path: Optional[Path],
+) -> List[Path]:
+    """Return likely training metadata locations in priority order."""
+    candidates: List[Path] = []
+    seen: set[str] = set()
+
+    def add_candidate(path: Optional[Path]) -> None:
+        if path is None:
+            return
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    add_candidate(configured_path)
+    if weights_path is not None:
+        weights_dir = weights_path.parent
+        add_candidate(weights_dir / "training_metadata.json")
+        add_candidate(weights_dir / "active" / "training_metadata.json")
+        add_candidate(weights_dir.parent / "training_metadata.json")
+        add_candidate(weights_dir.parent / "active" / "training_metadata.json")
+    add_candidate(WORKSPACE_CHECKPOINTS_DIR / "active" / "training_metadata.json")
+    return candidates
+
+
+def resolve_training_metadata(
+    *,
+    configured_path: Optional[Path],
+    weights_path: Optional[Path],
+    checkpoint_hints: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[Path], Dict[str, Any], str]:
+    """Resolve metadata from file fallbacks first, then checkpoint-embedded config."""
+    for candidate in _candidate_training_metadata_paths(configured_path, weights_path):
+        metadata = load_training_metadata_hints(candidate)
+        if metadata:
+            return candidate, metadata, "file"
+
+    synthesized = _metadata_from_checkpoint_hints(checkpoint_hints or {})
+    if synthesized:
+        return configured_path, synthesized, "checkpoint"
+
+    return configured_path, {}, "missing"
 
 
 def _canonical_bands_string(value: Any) -> str:
@@ -7830,8 +7901,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             parser.error("--trained-model-only requires --enable-deep-learning.")
         if not config.weights:
             parser.error("--trained-model-only requires --weights.")
-        if not config.training_metadata:
-            parser.error("--trained-model-only requires --training-metadata.")
         if config.enable_yolo:
             LOGGER.info("trained_model_only active: disabling YOLO branch.")
             config.enable_yolo = False
@@ -7947,13 +8016,46 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     training_metadata_path: Optional[Path] = None
     training_metadata: Dict[str, Any] = {}
-    if config.training_metadata:
-        training_metadata_path = Path(config.training_metadata)
-        training_metadata = load_training_metadata_hints(training_metadata_path)
-        if config.trained_model_only and not training_metadata:
+    configured_training_metadata_path = (
+        Path(config.training_metadata) if config.training_metadata else None
+    )
+    if configured_training_metadata_path is not None or weights_path is not None or checkpoint_hints:
+        (
+            training_metadata_path,
+            training_metadata,
+            training_metadata_source,
+        ) = resolve_training_metadata(
+            configured_path=configured_training_metadata_path,
+            weights_path=weights_path,
+            checkpoint_hints=checkpoint_hints,
+        )
+        if training_metadata_source == "file" and training_metadata_path is not None:
+            if (
+                configured_training_metadata_path is not None
+                and training_metadata_path != configured_training_metadata_path
+            ):
+                LOGGER.info(
+                    "Training metadata fallback bulundu: %s (config path: %s)",
+                    training_metadata_path,
+                    configured_training_metadata_path,
+                )
+        elif training_metadata_source == "checkpoint":
+            LOGGER.warning(
+                "Training metadata JSON yuklenemedi; checkpoint icindeki config ipuclari kullanilacak."
+            )
+        elif config.trained_model_only:
+            attempted_paths = ", ".join(
+                str(path)
+                for path in _candidate_training_metadata_paths(
+                    configured_training_metadata_path,
+                    weights_path,
+                )
+            )
             parser.error(
-                f"Training metadata could not be loaded: {training_metadata_path}. "
-                "Once training.py finishes, make sure workspace/checkpoints/active/training_metadata.json exists."
+                "Training metadata could not be resolved. "
+                f"Configured path: {configured_training_metadata_path}. "
+                f"Searched: {attempted_paths}. "
+                "Checkpoint also lacks the required tile/overlap/bands metadata."
             )
 
     if config.trained_model_only:
