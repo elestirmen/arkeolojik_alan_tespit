@@ -44,6 +44,10 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence, TextIO, Tuple, TypeVar
 from xml.sax.saxutils import escape as xml_escape
 
+from archeo_shared.console import configure_utf8_console
+
+configure_utf8_console()
+
 import numpy as np
 import rasterio
 from rasterio.features import shapes

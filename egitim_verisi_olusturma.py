@@ -40,6 +40,9 @@ from rasterio.windows import Window
 from tqdm import tqdm
 
 from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
+from archeo_shared.console import configure_utf8_console
+
+configure_utf8_console()
 
 # Mevcut projedeki fonksiyonları import et
 try:

@@ -1,6 +1,5 @@
 import sys
 import os
-import glob
 import shutil
 import numpy as np
 import tkinter as tk
@@ -9,6 +8,18 @@ import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import matplotlib.pyplot as plt
+
+RGB_STRETCH_LOW = 2.0
+RGB_STRETCH_HIGH = 98.0
+MAX_PERCENTILE_PIXELS = 200_000
+LISTBOX_INSERT_CHUNK = 1_000
+BAND_NAMES = {
+    0: "R",
+    1: "G",
+    2: "B",
+    3: "SVF",
+    4: "SLRM",
+}
 
 class NPZViewerApp:
     def __init__(self, root, initial_dir):
@@ -131,12 +142,13 @@ class NPZViewerApp:
 
     def load_directory(self, d, select_file=None):
         self.current_dir = d
-        self.files = sorted(glob.glob(os.path.join(d, "*.npz")))
+        self.files = self.find_npz_files(d)
         self.update_action_buttons()
         
         self.listbox.delete(0, tk.END)
-        for f in self.files:
-            self.listbox.insert(tk.END, os.path.basename(f))
+        file_names = [os.path.basename(f) for f in self.files]
+        for start in range(0, len(file_names), LISTBOX_INSERT_CHUNK):
+            self.listbox.insert(tk.END, *file_names[start:start + LISTBOX_INSERT_CHUNK])
         
         if self.files:
             target_idx = 0
@@ -182,8 +194,8 @@ class NPZViewerApp:
     def clear_canvases(self):
         self.fig_bands.clear()
         self.fig_rgb.clear()
-        self.canvas_bands.draw()
-        self.canvas_rgb.draw()
+        self.canvas_bands.draw_idle()
+        self.canvas_rgb.draw_idle()
 
     def show_empty_directory_message(self):
         self.info_label.config(text=f"Klasör: {self.current_dir}\n\nHiç .npz dosyası bulunamadı!")
@@ -231,10 +243,14 @@ class NPZViewerApp:
 
         self.update_action_buttons()
 
+    @staticmethod
+    def stop_key_event(event):
+        return "break" if event is not None else None
+
     def delete_current_file(self, event=None):
         selection = self.listbox.curselection()
         if not selection:
-            return
+            return self.stop_key_event(event)
 
         idx = selection[0]
         file_path = self.files[idx]
@@ -246,7 +262,7 @@ class NPZViewerApp:
             icon=messagebox.WARNING,
         )
         if not confirm:
-            return
+            return self.stop_key_event(event)
 
         try:
             os.remove(file_path)
@@ -254,9 +270,10 @@ class NPZViewerApp:
             messagebox.showwarning("Dosya Bulunamadı", f"{file_name} zaten silinmiş görünüyor.")
         except OSError as exc:
             messagebox.showerror("Silme Hatası", f"{file_name} silinemedi.\n\n{exc}")
-            return
+            return self.stop_key_event(event)
 
         self.remove_selected_file_from_list(idx)
+        return self.stop_key_event(event)
 
     def move_current_file_to_other_class(self, event=None):
         selection = self.listbox.curselection()
@@ -298,16 +315,63 @@ class NPZViewerApp:
             return
 
         self.remove_selected_file_from_list(idx)
+
+    @staticmethod
+    def find_npz_files(directory):
+        try:
+            return sorted(
+                entry.path
+                for entry in os.scandir(directory)
+                if entry.is_file() and entry.name.lower().endswith(".npz")
+            )
+        except OSError:
+            return []
+
+    @staticmethod
+    def load_npz_array(file_path):
+        with np.load(file_path) as data:
+            keys = data.files
+            if not keys:
+                raise ValueError("NPZ icinde okunabilir dizi bulunamadi.")
+            key = "image" if "image" in keys else keys[0]
+            return np.asarray(data[key])
+
+    @staticmethod
+    def is_band_first_stack(img):
+        return len(img.shape) == 3 and img.shape[0] < img.shape[1]
+
+    @staticmethod
+    def percentile_sample(channels):
+        pixel_count = channels.shape[1] * channels.shape[2]
+        if pixel_count <= MAX_PERCENTILE_PIXELS:
+            return channels
+
+        stride = int(np.ceil(np.sqrt(pixel_count / MAX_PERCENTILE_PIXELS)))
+        return channels[:, ::stride, ::stride]
+
+    def stretch_rgb(self, img):
+        rgb_channels = np.asarray(img[:3], dtype=np.float32)
+        sample = self.percentile_sample(rgb_channels)
+        percentiles = np.percentile(
+            sample,
+            (RGB_STRETCH_LOW, RGB_STRETCH_HIGH),
+            axis=(1, 2),
+        )
+
+        rgb_min = percentiles[0][:, None, None]
+        rgb_max = percentiles[1][:, None, None]
+        diff = np.maximum(rgb_max - rgb_min, 1e-8)
+
+        rgb_norm = (rgb_channels - rgb_min) / diff
+        np.clip(rgb_norm, 0.0, 1.0, out=rgb_norm)
+        return np.moveaxis(rgb_norm, 0, -1)
         
     def visualize(self, file_path):
         self.fig_bands.clear()
         self.fig_rgb.clear()
         
         try:
-            data = np.load(file_path)
-            keys = list(data.keys())
-            key = 'image' if 'image' in keys else keys[0]
-            img = data[key].astype(np.float32) # Güvenlik için float32 formatı
+            img = self.load_npz_array(file_path)
             file_name = os.path.basename(file_path)
             self.current_file_label.config(text=f"Seçili dosya: {file_name}")
 
@@ -320,21 +384,14 @@ class NPZViewerApp:
             self.info_label.config(text=info_text)
             
             # --- 1) ORTA PANEL (RGB ÇİZİMİ) ---
-            num_bands = img.shape[0] if (len(img.shape) == 3 and img.shape[0] < img.shape[1]) else 1
+            is_band_stack = self.is_band_first_stack(img)
+            num_bands = img.shape[0] if is_band_stack else 1
             
             ax_rgb = self.fig_rgb.add_subplot(111)
             
             if num_bands >= 3:
-                rgb = np.stack([img[0], img[1], img[2]], axis=-1)
+                rgb_norm = self.stretch_rgb(img)
                 # Görüntüyü canlandırmak için Histogram Germe (Percentile 2-98 Stretch)
-                rgb_min = np.percentile(rgb, 2, axis=(0,1), keepdims=True)
-                rgb_max = np.percentile(rgb, 98, axis=(0,1), keepdims=True)
-                diff = rgb_max - rgb_min
-                diff[diff == 0] = 1e-8 # Sıfıra bölmeyi engelle
-                
-                rgb_norm = (rgb - rgb_min) / diff
-                rgb_norm = np.clip(rgb_norm, 0, 1)
-                
                 ax_rgb.imshow(rgb_norm)
                 ax_rgb.set_title("Orijinal Renkli Özeti (RGB Bant 1,2,3)", fontsize=12, fontweight='bold', pad=10)
             else:
@@ -344,30 +401,18 @@ class NPZViewerApp:
             ax_rgb.axis('off')
             
             # --- 2) SAĞ PANEL BANTLAR (Grid Çizimi) ---
-            if len(img.shape) == 3 and img.shape[0] < img.shape[1]:
+            if is_band_stack:
                 cols = 4 if num_bands >= 4 else num_bands
                 rows = int(np.ceil(num_bands / cols))
                 
                 axes = self.fig_bands.subplots(rows, cols)
-                if num_bands == 1:
-                    axes_flat = [axes]
-                else:
-                    axes_flat = axes.flatten()
-                
-                # NPZ tile stack: R, G, B, SVF, SLRM (5 channels)
-                band_isimleri = {
-                    0: "R",
-                    1: "G",
-                    2: "B",
-                    3: "SVF",
-                    4: "SLRM",
-                }
+                axes_flat = np.atleast_1d(axes).ravel()
 
                 for i in range(rows * cols):
                     ax = axes_flat[i]
                     if i < num_bands:
-                        im = ax.imshow(img[i], cmap='viridis')
-                        b_isim = band_isimleri.get(i, f"Bant {i+1}")
+                        ax.imshow(img[i], cmap='viridis')
+                        b_isim = BAND_NAMES.get(i, f"Bant {i+1}")
                         # Kalın fontu kaldırıp boyutu çok daha küçülttük (8)
                         ax.set_title(b_isim, fontsize=8)
                     ax.axis('off')
@@ -382,12 +427,13 @@ class NPZViewerApp:
             self.fig_bands.tight_layout(pad=1.5, h_pad=2.5, w_pad=1.0)
             self.fig_rgb.tight_layout(pad=1.5)
             
-            self.canvas_bands.draw()
-            self.canvas_rgb.draw()
+            self.canvas_bands.draw_idle()
+            self.canvas_rgb.draw_idle()
             
         except Exception as e:
             self.current_file_label.config(text="Seçili dosya: -")
             self.info_label.config(text=f"Hata oluştu:\n{e}")
+            self.clear_canvases()
 
 if __name__ == '__main__':
     root = tk.Tk()

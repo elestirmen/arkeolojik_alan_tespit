@@ -554,22 +554,33 @@ def parse_int_csv(raw: str, expected_len: Optional[int] = None) -> tuple[int, ..
 
 
 def qimage_from_rgb(rgb: np.ndarray) -> QImage:
+    if not rgb.flags.c_contiguous:
+        rgb = np.ascontiguousarray(rgb)
     h, w, _ = rgb.shape
-    img = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
+    img = QImage(rgb.data, w, h, int(rgb.strides[0]), QImage.Format.Format_RGB888)
     return img.copy()
 
 
 def qimage_from_rgba(rgba: np.ndarray) -> QImage:
+    if not rgba.flags.c_contiguous:
+        rgba = np.ascontiguousarray(rgba)
     h, w, _ = rgba.shape
-    img = QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+    img = QImage(rgba.data, w, h, int(rgba.strides[0]), QImage.Format.Format_RGBA8888)
     return img.copy()
+
+
+def write_mask_rgba(mask: np.ndarray, negative_value: int, out: np.ndarray) -> None:
+    if out.ndim != 3 or out.shape[:2] != mask.shape or out.shape[2] != 4:
+        raise ValueError("RGBA cikti boyutu maske ile uyumlu degil")
+    out.fill(0)
+    idx = mask != np.uint8(negative_value)
+    out[idx, 0] = 255
+    out[idx, 3] = OVERLAY_ALPHA
 
 
 def mask_to_rgba(mask: np.ndarray, negative_value: int) -> np.ndarray:
     rgba = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
-    idx = mask != np.uint8(negative_value)
-    rgba[idx, 0] = 255
-    rgba[idx, 3] = OVERLAY_ALPHA
+    write_mask_rgba(mask, negative_value, rgba)
     return rgba
 
 
@@ -690,7 +701,7 @@ def write_annotations_gpkg(
     source_raster_path: Path,
     mask_path: Path,
 ) -> Optional[Path]:
-    selected = (mask.astype(np.uint8, copy=False) != np.uint8(negative_value)).astype(np.uint8)
+    selected = mask.astype(np.uint8, copy=False) != np.uint8(negative_value)
     if int(np.count_nonzero(selected)) <= 0:
         if gpkg_path.exists():
             gpkg_path.unlink(missing_ok=True)
@@ -701,7 +712,7 @@ def write_annotations_gpkg(
 
     features: list[dict[str, object]] = []
     annotation_id = 1
-    for geom, value in shapes(selected, mask=selected.astype(bool), transform=transform):
+    for geom, value in shapes(selected.astype(np.uint8), mask=selected, transform=transform):
         if int(value) != 1:
             continue
         polygon = shapely_shape(geom)
@@ -753,7 +764,6 @@ def load_mask_from_annotations_gpkg(
     if not geometries:
         return np.full((height, width), np.uint8(negative_value), dtype=np.uint8)
 
-    out = np.full((height, width), np.uint8(negative_value), dtype=np.uint8)
     burned = rasterize(
         ((geom, int(positive_value)) for geom in geometries),
         out_shape=(height, width),
@@ -761,8 +771,7 @@ def load_mask_from_annotations_gpkg(
         fill=int(negative_value),
         dtype="uint8",
     )
-    out[:, :] = burned.astype(np.uint8, copy=False)
-    return out
+    return burned.astype(np.uint8, copy=False)
 
 
 @dataclass
@@ -803,13 +812,19 @@ class UndoEntry:
 class Session:
     """GeoTIFF etiketleme oturumu – performans optimizasyonlu."""
 
-    def __init__(self, cfg: AppConfig):
+    def __init__(
+        self,
+        cfg: AppConfig,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ):
         self.cfg = cfg
         self.src = rasterio.open(cfg.input_path)
         self.profile = self.src.profile.copy()
         self.full_h = int(self.src.height)
         self.full_w = int(self.src.width)
+        self._progress_callback = progress_callback
 
+        self._emit_progress("Onizleme hazirlaniyor...", 1, 4)
         (
             self.preview_rgb,
             self.preview_stretch_bounds,
@@ -827,7 +842,9 @@ class Session:
 
         pos_val = np.uint8(cfg.positive_value)
         neg_val = np.uint8(cfg.negative_value)
+        self._emit_progress("Mevcut etiketler okunuyor...", 2, 4)
         self.mask_full = self._load_initial_mask(cfg.existing_mask, cfg.existing_labels)
+        self._emit_progress("Maske gorunumu olusturuluyor...", 3, 4)
         selected_preview = cv2.resize(
             (self.mask_full != neg_val).astype(np.uint8),
             (self.preview_w, self.preview_h),
@@ -851,6 +868,11 @@ class Session:
         # --- Persistent overlay RGBA buffer ---
         self.overlay_rgba = np.zeros((self.preview_h, self.preview_w, 4), dtype=np.uint8)
         self._rebuild_overlay_full()
+        self._emit_progress("Oturum hazir.", 4, 4)
+
+    def _emit_progress(self, text: str, value: int, total: int) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(str(text), int(value), max(1, int(total)))
 
     def close(self) -> None:
         try:
@@ -913,13 +935,13 @@ class Session:
     # --- Overlay helpers ---
     def _rebuild_overlay_full(self) -> None:
         """Tüm overlay RGBA buffer'ını mask_preview'dan yeniden oluştur."""
-        self.overlay_rgba[:, :] = mask_to_rgba(self.mask_preview, int(self.cfg.negative_value))
+        write_mask_rgba(self.mask_preview, int(self.cfg.negative_value), self.overlay_rgba)
 
     def _update_overlay_region(self, py0: int, py1: int, px0: int, px1: int) -> None:
         """Overlay RGBA buffer'ın sadece belirli bölgesini güncelle."""
         region_mask = self.mask_preview[py0:py1, px0:px1]
         region = self.overlay_rgba[py0:py1, px0:px1]
-        region[:, :] = mask_to_rgba(region_mask, int(self.cfg.negative_value))
+        write_mask_rgba(region_mask, int(self.cfg.negative_value), region)
 
     def visible_preview_rect_to_full(
         self,
@@ -941,7 +963,10 @@ class Session:
         preview_rect: tuple[int, int, int, int],
         target_w: int,
         target_h: int,
-    ) -> tuple[np.ndarray, np.ndarray]:
+        *,
+        include_base: bool = True,
+        include_mask: bool = True,
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         window, out_w, out_h, _detail_transform = self.resolve_detail_request(
             preview_rect,
             target_w,
@@ -951,19 +976,23 @@ class Session:
         full_y0 = int(window.row_off)
         full_x1 = full_x0 + int(window.width)
         full_y1 = full_y0 + int(window.height)
-        rgb, _ = _read_rgb(
-            self.src,
-            self.cfg.bands,
-            out_w,
-            out_h,
-            window=window,
-            stretch_bounds=self.preview_stretch_bounds,
-        )
+        rgb: Optional[np.ndarray] = None
+        if include_base:
+            rgb, _ = _read_rgb(
+                self.src,
+                self.cfg.bands,
+                out_w,
+                out_h,
+                window=window,
+                stretch_bounds=self.preview_stretch_bounds,
+            )
 
-        mask_patch = self.mask_full[full_y0:full_y1, full_x0:full_x1]
-        if mask_patch.shape[1] != out_w or mask_patch.shape[0] != out_h:
-            mask_patch = cv2.resize(mask_patch, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
-        rgba = mask_to_rgba(mask_patch.astype(np.uint8, copy=False), int(self.cfg.negative_value))
+        rgba: Optional[np.ndarray] = None
+        if include_mask:
+            mask_patch = self.mask_full[full_y0:full_y1, full_x0:full_x1]
+            if mask_patch.shape[1] != out_w or mask_patch.shape[0] != out_h:
+                mask_patch = cv2.resize(mask_patch, (out_w, out_h), interpolation=cv2.INTER_NEAREST)
+            rgba = mask_to_rgba(mask_patch.astype(np.uint8, copy=False), int(self.cfg.negative_value))
         return rgb, rgba
 
     def resolve_detail_request(
@@ -986,7 +1015,7 @@ class Session:
         detail_transform = resampled_window_transform(self.src.transform, window, out_w, out_h)
         return window, out_w, out_h, detail_transform
 
-    def apply_box(self, box: tuple[int, int, int, int], mode: str) -> None:
+    def apply_box(self, box: tuple[int, int, int, int], mode: str) -> Optional[tuple[int, int, int, int]]:
         px0, py0, px1, py1 = box
         x0, y0, x1, y1 = preview_to_full_box(box, self.scale_x, self.scale_y, self.full_w, self.full_h)
         pxi1 = min(self.preview_w, px1 + 1)
@@ -1005,7 +1034,7 @@ class Session:
         else:
             full_changed = prev_pos > 0
         if not (full_changed or preview_changed):
-            return
+            return None
 
         # Önceki değerler: hızlı undo için kaydedilir.
         full_prev = full_view.copy()
@@ -1033,10 +1062,11 @@ class Session:
         )
         self.dirty = True
         self.render_revision += 1
+        return (px0, py0, pxi1, pyi1)
 
-    def undo(self) -> None:
+    def undo(self) -> Optional[tuple[int, int, int, int]]:
         if not self.history:
-            return
+            return None
         entry = self.history.pop()
         x0, y0, x1, y1 = entry.full_box
         px0, py0, pxi1, pyi1 = entry.preview_box
@@ -1052,8 +1082,10 @@ class Session:
         self._update_overlay_region(py0, pyi1, px0, pxi1)
         self.dirty = bool(self.history)
         self.render_revision += 1
+        return (px0, py0, pxi1, pyi1)
 
-    def clear(self) -> None:
+    def clear(self) -> Optional[tuple[int, int, int, int]]:
+        had_overlay = self._pos_count > 0
         neg_val = np.uint8(self.cfg.negative_value)
         self.mask_full.fill(neg_val)
         self.mask_preview.fill(neg_val)
@@ -1062,8 +1094,11 @@ class Session:
         self._pos_count = 0
         self.dirty = True
         self.render_revision += 1
+        if not had_overlay:
+            return None
+        return (0, 0, self.preview_w, self.preview_h)
 
-    def reset(self) -> None:
+    def reset(self) -> tuple[int, int, int, int]:
         neg_val = np.uint8(self.cfg.negative_value)
         self.mask_full[:, :] = self.initial_mask_full
         self.mask_preview[:, :] = self.initial_mask_preview
@@ -1072,6 +1107,7 @@ class Session:
         self._rebuild_overlay_full()
         self.dirty = True
         self.render_revision += 1
+        return (0, 0, self.preview_w, self.preview_h)
 
     def set_positive_value(self, new_value: int) -> bool:
         """Pozitif sınıf değerini güncelle ve mevcut seçili alanları yeni değere eşitle."""
@@ -1130,7 +1166,14 @@ class Session:
         self.history.clear()
         return pixels_changed
 
-    def save(self, path: Path) -> None:
+    def save(
+        self,
+        path: Path,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    ) -> None:
+        callback = progress_callback
+        if callback is not None:
+            callback("GeoTIFF maske yaziliyor...", 1, 3)
         profile = self.profile.copy()
         profile.update(
             driver="GTiff",
@@ -1143,6 +1186,8 @@ class Session:
         with rasterio.open(path, "w", **profile) as dst:
             dst.write(self.mask_full[np.newaxis, :, :].astype(np.uint8, copy=False))
         gpkg_path = companion_gpkg_path(path)
+        if callback is not None:
+            callback("GPKG etiketleri yaziliyor...", 2, 3)
         write_annotations_gpkg(
             gpkg_path=gpkg_path,
             mask=self.mask_full,
@@ -1157,6 +1202,8 @@ class Session:
         self.cfg.existing_mask = path
         self.cfg.existing_labels = gpkg_path if gpkg_path.exists() else None
         self.dirty = False
+        if callback is not None:
+            callback("Kaydetme tamamlandi.", 3, 3)
 
     def stats(self) -> tuple[int, int, float]:
         """O(1) istatistik – counter tabanlı."""
@@ -1578,7 +1625,9 @@ class TileDatasetExportDialog(QDialog):
         self.combo_format = QComboBox(self)
         self.combo_format.addItem("NPZ - sikistirilmis, daha kucuk", "npz")
         self.combo_format.addItem("NPY - sikistirmasiz, genelde daha hizli", "npy")
-        self.combo_format.setCurrentIndex(0 if DATASET_DEFAULT_FORMAT == "npz" else 1)
+        self.combo_format.addItem("PNG - RGB3 gorsel tile", "png")
+        default_format_index = self.combo_format.findData(DATASET_DEFAULT_FORMAT)
+        self.combo_format.setCurrentIndex(max(0, default_format_index))
         form.addRow("Dosya formati:", self.combo_format)
 
         self.spin_num_workers = QSpinBox(self)
@@ -1625,6 +1674,7 @@ class TileDatasetExportDialog(QDialog):
             "Not: 0.02 esigi, tile'in sadece %2'si secili olsa bile Positive yazabilir; "
             "buyuk tile boyutlarinda secim tile'in kenarinda kalmis gibi gorunebilir.\n"
             "topo5 mevcut modelle uyumludur; rgb3 sadece RGB tile dataset uretir.\n"
+            "PNG sadece rgb3 modunda kullanilabilir.\n"
             "Derivative cache varsayilan olarak <girdi_raster_klasoru>/cache altina yazilir.\n"
             "Hiz onemliyse NPY + auto cache + orta seviye worker sayisi iyi baslangictir."
         )
@@ -1649,6 +1699,7 @@ class TileDatasetExportDialog(QDialog):
         self.spin_overlap.valueChanged.connect(self._sync_validation)
         self.spin_tile_size.valueChanged.connect(self._sync_validation)
         self.combo_sampling_mode.currentIndexChanged.connect(self._sync_mode_ui)
+        self.combo_format.currentIndexChanged.connect(self._sync_validation)
         self._sync_overlap_range()
         self._sync_mode_ui()
         self._sync_feature_mode_ui()
@@ -1703,6 +1754,12 @@ class TileDatasetExportDialog(QDialog):
             idx = self.combo_derivative_cache_mode.findData("none")
             if idx >= 0:
                 self.combo_derivative_cache_mode.setCurrentIndex(idx)
+        elif str(self.combo_format.currentData()) == "png":
+            idx = self.combo_format.findData(DATASET_DEFAULT_FORMAT)
+            if idx < 0 or str(self.combo_format.itemData(idx)) == "png":
+                idx = self.combo_format.findData("npz")
+            if idx >= 0:
+                self.combo_format.setCurrentIndex(idx)
         if not self._output_dir_manually_changed:
             auto_output = self._auto_output_dir
             if auto_output.name:
@@ -1719,15 +1776,17 @@ class TileDatasetExportDialog(QDialog):
         output_ok = bool(self.edit_output_dir.text().strip())
         overlap_ok = int(self.spin_overlap.value()) < int(self.spin_tile_size.value())
         feature_mode = normalize_feature_mode(self.combo_feature_mode.currentData())
+        save_format = str(self.combo_format.currentData())
         expected_len = 3 if feature_mode == "rgb3" else 5
         try:
             bands = parse_int_csv(self.edit_model_bands.text().strip(), expected_len=expected_len)
             bands_ok = all(int(v) > 0 for v in bands)
         except Exception:
             bands_ok = False
+        format_ok = not (save_format == "png" and feature_mode != "rgb3")
         ok_btn = self._btn_box.button(QDialogButtonBox.StandardButton.Ok)
         if ok_btn is not None:
-            ok_btn.setEnabled(output_ok and overlap_ok and bands_ok)
+            ok_btn.setEnabled(output_ok and overlap_ok and bands_ok and format_ok)
         if not output_ok:
             self._validation.setText("Bir cikti klasoru belirtin.")
         elif not bands_ok:
@@ -1735,6 +1794,8 @@ class TileDatasetExportDialog(QDialog):
                 self._validation.setText("RGB3 icin model bantlari 3 tamsayi olmali: R,G,B")
             else:
                 self._validation.setText("TOPO5 icin model bantlari 5 tamsayi olmali: R,G,B,DSM,DTM")
+        elif not format_ok:
+            self._validation.setText("PNG formati yalnizca RGB3 feature modu ile kullanilabilir.")
         elif not overlap_ok:
             self._validation.setText("Overlap, tile boyutundan kucuk olmali.")
         else:
@@ -1814,6 +1875,7 @@ class MainWindow(QMainWindow):
         self.base_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
         self.mask_item = QGraphicsPixmapItem()
         self.mask_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
+        self._mask_pixmap: Optional[QPixmap] = None
         self.base_detail_item = QGraphicsPixmapItem()
         self.base_detail_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self.base_detail_item.setVisible(False)
@@ -2099,10 +2161,7 @@ class MainWindow(QMainWindow):
         self._detail_cache_key = None
         self._set_detail_loading(None)
         for item in self._detail_items():
-            item.setPixmap(QPixmap())
-            item.setTransform(QTransform())
-            item.setPos(0.0, 0.0)
-            item.setVisible(False)
+            self._clear_pixmap_item(item)
 
     def _schedule_detail_refresh(self, *_args) -> None:
         if self.s is None:
@@ -2142,6 +2201,12 @@ class MainWindow(QMainWindow):
                     scene_h / float(pixmap.height()),
                 )
             )
+
+    def _clear_pixmap_item(self, item: QGraphicsPixmapItem) -> None:
+        item.setPixmap(QPixmap())
+        item.setTransform(QTransform())
+        item.setPos(0.0, 0.0)
+        item.setVisible(False)
 
     def _render_layer_detail_rgb(
         self,
@@ -2217,6 +2282,8 @@ class MainWindow(QMainWindow):
         )
         base_layer = self._find_layer(LAYER_KEY_BASE)
         mask_layer = self._find_layer(LAYER_KEY_MASK)
+        base_visible = bool(base_layer.visible if base_layer is not None else False)
+        mask_visible = bool(mask_layer.visible if mask_layer is not None else False)
         extra_layers_state = tuple(
             (
                 layer.key,
@@ -2233,8 +2300,8 @@ class MainWindow(QMainWindow):
             target_w,
             target_h,
             int(self.s.render_revision),
-            bool(base_layer.visible if base_layer is not None else False),
-            bool(mask_layer.visible if mask_layer is not None else False),
+            base_visible,
+            mask_visible,
             extra_layers_state,
         )
         if cache_key == self._detail_cache_key:
@@ -2253,21 +2320,34 @@ class MainWindow(QMainWindow):
             self._set_detail_loading(loading_text, flush=True)
         try:
             try:
-                rgb, rgba = self.s.render_detail_patch(preview_rect, target_w, target_h)
+                rgb, rgba = self.s.render_detail_patch(
+                    preview_rect,
+                    target_w,
+                    target_h,
+                    include_base=base_visible,
+                    include_mask=mask_visible,
+                )
             except Exception:
                 self._clear_detail_view()
                 return
 
-            self._apply_detail_pixmap(self.base_detail_item, qimage_from_rgb(rgb), preview_rect)
-            self._apply_detail_pixmap(self.mask_detail_item, qimage_from_rgba(rgba), preview_rect)
+            if rgb is not None:
+                self._apply_detail_pixmap(self.base_detail_item, qimage_from_rgb(rgb), preview_rect)
+            else:
+                self._clear_pixmap_item(self.base_detail_item)
+            if rgba is not None:
+                self._apply_detail_pixmap(self.mask_detail_item, qimage_from_rgba(rgba), preview_rect)
+            else:
+                self._clear_pixmap_item(self.mask_detail_item)
             for layer in self.layers:
                 if layer.kind != "raster" or layer.detail_item is None:
                     continue
+                if not layer.visible:
+                    self._clear_pixmap_item(layer.detail_item)
+                    continue
                 layer_rgb = self._render_layer_detail_rgb(layer, preview_rect, target_w, target_h)
                 if layer_rgb is None:
-                    layer.detail_item.setPixmap(QPixmap())
-                    layer.detail_item.setTransform(QTransform())
-                    layer.detail_item.setPos(0.0, 0.0)
+                    self._clear_pixmap_item(layer.detail_item)
                     continue
                 self._apply_detail_pixmap(layer.detail_item, qimage_from_rgb(layer_rgb), preview_rect)
             self._detail_cache_key = cache_key
@@ -2594,6 +2674,7 @@ class MainWindow(QMainWindow):
     def show_empty_state(self) -> None:
         self._reset_layer_stack()
         self.base_item.setPixmap(QPixmap())
+        self._mask_pixmap = None
         self.mask_item.setPixmap(QPixmap())
         self.scene.setSceneRect(QRectF(0, 0, 800, 600))
         self.view.set_image_size(800, 600)
@@ -2793,7 +2874,7 @@ class MainWindow(QMainWindow):
         maximum: int = 0,
         value: int = 0,
     ) -> QProgressDialog:
-        dlg = QProgressDialog(text, "", 0, int(maximum), self)
+        dlg = QProgressDialog(text, "", 0, 0, self)
         dlg.setWindowTitle(APP_TITLE)
         dlg.setCancelButton(None)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -2801,12 +2882,20 @@ class MainWindow(QMainWindow):
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
         dlg.setMinimumWidth(520)
-        dlg.setValue(int(value))
+        if int(maximum) > 0:
+            dlg.setRange(0, int(maximum))
+            dlg.setValue(max(0, min(int(value), int(maximum))))
+        else:
+            dlg.setRange(0, 0)
+            dlg.setValue(0)
+        dlg.setLabelText(text)
         progress_bar = dlg.findChild(QProgressBar)
         if progress_bar is not None:
             progress_bar.setTextVisible(True)
             progress_bar.setFormat("%v / %m  (%p%)")
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
         dlg.show()
+        self.statusBar().showMessage(text)
         QApplication.processEvents()
         return dlg
 
@@ -2814,23 +2903,88 @@ class MainWindow(QMainWindow):
         self,
         dlg: Optional[QProgressDialog],
         *,
-        text: str,
-        value: int,
-        maximum: int,
+        text: Optional[str] = None,
+        value: Optional[int] = None,
+        maximum: Optional[int] = None,
+        indeterminate: Optional[bool] = None,
     ) -> None:
         if dlg is None:
             return
-        dlg.setMaximum(int(maximum))
-        dlg.setLabelText(str(text))
-        dlg.setValue(int(value))
+        if indeterminate is True:
+            dlg.setRange(0, 0)
+        elif indeterminate is False and maximum is not None:
+            dlg.setRange(0, max(1, int(maximum)))
+        elif maximum is not None:
+            dlg.setRange(0, max(1, int(maximum)))
+        if text is not None:
+            dlg.setLabelText(str(text))
+            self.statusBar().showMessage(str(text))
+        if value is not None and dlg.maximum() > 0:
+            dlg.setValue(max(0, min(int(value), dlg.maximum())))
         QApplication.processEvents()
 
     def _hide_busy_indicator(self, dlg: Optional[QProgressDialog]) -> None:
         if dlg is None:
             return
+        try:
+            QApplication.restoreOverrideCursor()
+        except Exception:
+            pass
         dlg.close()
         dlg.deleteLater()
         QApplication.processEvents()
+
+    def _progress_dialog_updater(
+        self,
+        dlg: QProgressDialog,
+        *,
+        scaled_max: Optional[int] = None,
+        scaled_start: int = 0,
+        scaled_end: Optional[int] = None,
+    ) -> Callable[[str, int, int], None]:
+        def _callback(text: str, value: int, total: int) -> None:
+            if scaled_max is not None and scaled_end is not None:
+                fraction = max(0.0, min(1.0, float(value) / max(1.0, float(total))))
+                mapped_value = int(round(float(scaled_start) + (float(scaled_end) - float(scaled_start)) * fraction))
+                self._update_busy_indicator(
+                    dlg,
+                    text=text,
+                    value=mapped_value,
+                    maximum=scaled_max,
+                    indeterminate=False,
+                )
+                return
+            self._update_busy_indicator(
+                dlg,
+                text=text,
+                value=value,
+                maximum=total,
+                indeterminate=False,
+            )
+        return _callback
+
+    def _session_progress_updater(self, dlg: QProgressDialog) -> Callable[[str, int, int], None]:
+        return self._progress_dialog_updater(
+            dlg,
+            scaled_max=5,
+            scaled_start=1,
+            scaled_end=4,
+        )
+
+    def _save_progress_updater(
+        self,
+        dlg: QProgressDialog,
+        *,
+        scaled_max: Optional[int] = None,
+        scaled_start: int = 0,
+        scaled_end: Optional[int] = None,
+    ) -> Callable[[str, int, int], None]:
+        return self._progress_dialog_updater(
+            dlg,
+            scaled_max=scaled_max,
+            scaled_start=scaled_start,
+            scaled_end=scaled_end,
+        )
 
     def _parse_export_progress_payload(self, line: str) -> Optional[dict[str, object]]:
         prefix = "PROGRESS_JSON\t"
@@ -2890,13 +3044,34 @@ class MainWindow(QMainWindow):
             / f"training_data_classification_{sanitize_name(self.s.cfg.input_path.stem)}_{feature_suffix}"
         )
 
-    def _ensure_mask_saved_for_export(self) -> bool:
+    def _ensure_mask_saved_for_export(
+        self,
+        progress_dialog: Optional[QProgressDialog] = None,
+    ) -> bool:
         if self.s is None:
             return False
         try:
             # Export script'i GeoTIFF maskeyi okurken aday pencereler icin GPKG'yi de kullanabiliyor.
             # Bu ikisini export oncesi her zaman ayni oturum verisinden yeniden yazarak senkron tutuyoruz.
-            self.s.save(self.s.cfg.output_path)
+            if progress_dialog is not None:
+                self._update_busy_indicator(
+                    progress_dialog,
+                    text="Export oncesi etiketler kaydediliyor...",
+                    value=0,
+                    maximum=100,
+                    indeterminate=False,
+                )
+                self.s.save(
+                    self.s.cfg.output_path,
+                    progress_callback=self._save_progress_updater(
+                        progress_dialog,
+                        scaled_max=100,
+                        scaled_start=0,
+                        scaled_end=4,
+                    ),
+                )
+            else:
+                self.s.save(self.s.cfg.output_path)
         except Exception as exc:
             QMessageBox.critical(self, APP_TITLE, f"Export oncesi etiketler kaydedilemedi:\n{exc}")
             return False
@@ -2969,9 +3144,13 @@ class MainWindow(QMainWindow):
     def _preflight_dataset_export(self, options: dict[str, object]) -> bool:
         if self.s is None:
             return False
+        feature_mode = normalize_feature_mode(str(options["feature_mode"]))
+        if str(options["format"]) == "png" and feature_mode != "rgb3":
+            QMessageBox.critical(self, APP_TITLE, "PNG formati yalnizca RGB3 feature modu ile kullanilabilir.")
+            return False
         issue = self._dataset_export_input_issue(
             self.s.cfg.input_path,
-            str(options["feature_mode"]),
+            feature_mode,
             str(options["bands_raw"]),
         )
         if issue:
@@ -3052,9 +3231,11 @@ class MainWindow(QMainWindow):
         if self.s is None:
             QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
             return
-        if not self._ensure_mask_saved_for_export():
-            return
         if not self._preflight_dataset_export(options):
+            return
+        busy = self._show_busy_indicator("Tile dataset hazirlaniyor...", maximum=100, value=0)
+        if not self._ensure_mask_saved_for_export(busy):
+            self._hide_busy_indicator(busy)
             return
         import queue
         import threading
@@ -3063,10 +3244,17 @@ class MainWindow(QMainWindow):
         try:
             cmd = self._build_dataset_export_command(options)
         except Exception as exc:
+            self._hide_busy_indicator(busy)
             QMessageBox.critical(self, APP_TITLE, f"Export komutu hazirlanamadi:\n{exc}")
             return
 
-        busy = self._show_busy_indicator("Tile dataset hazirlaniyor...", maximum=1, value=0)
+        self._update_busy_indicator(
+            busy,
+            text="Tile dataset hazirlaniyor...",
+            value=0,
+            maximum=1,
+            indeterminate=False,
+        )
         output_lines: list[str] = []
         export_env = os.environ.copy()
         export_env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -3326,10 +3514,19 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_TITLE, f"Mevcut etiket GPKG dosyasi bulunamadi:\n{labels_path}")
             return False
 
+        busy = self._show_busy_indicator("Girdi ve etiketler yukleniyor...", maximum=5, value=0)
+        self._update_busy_indicator(
+            busy,
+            text="Bant bilgileri kontrol ediliyor...",
+            value=1,
+            maximum=5,
+            indeterminate=False,
+        )
         try:
             with rasterio.open(input_path) as tmp:
                 bands = parse_bands(self.bands_raw, tmp.count)
         except Exception as exc:
+            self._hide_busy_indicator(busy)
             QMessageBox.critical(self, APP_TITLE, f"Band/raster hatası:\n{exc}")
             return False
 
@@ -3346,12 +3543,23 @@ class MainWindow(QMainWindow):
         )
 
         try:
-            new_session = Session(cfg)
+            new_session = Session(cfg, progress_callback=self._session_progress_updater(busy))
         except Exception as exc:
+            self._hide_busy_indicator(busy)
             QMessageBox.critical(self, APP_TITLE, f"Oturum başlatılamadı:\n{exc}")
             return False
 
-        self.set_session(new_session)
+        try:
+            self._update_busy_indicator(
+                busy,
+                text="Arayuz guncelleniyor...",
+                value=5,
+                maximum=5,
+                indeterminate=False,
+            )
+            self.set_session(new_session)
+        finally:
+            self._hide_busy_indicator(busy)
         self._warn_dataset_export_input_if_needed(input_path)
         return True
 
@@ -3393,10 +3601,29 @@ class MainWindow(QMainWindow):
         self.scene.setSceneRect(QRectF(0, 0, self.s.preview_w, self.s.preview_h))
         self._schedule_detail_refresh()
 
-    def refresh_overlay(self) -> None:
+    def refresh_overlay(self, changed_rect: Optional[tuple[int, int, int, int]] = None) -> None:
         if self.s is None:
             return
-        self.mask_item.setPixmap(QPixmap.fromImage(qimage_from_rgba(self.s.overlay_rgba)))
+        full_rect = (0, 0, self.s.preview_w, self.s.preview_h)
+        if changed_rect is None or self._mask_pixmap is None or changed_rect == full_rect:
+            self._mask_pixmap = QPixmap.fromImage(qimage_from_rgba(self.s.overlay_rgba))
+            self.mask_item.setPixmap(self._mask_pixmap)
+        else:
+            px0, py0, px1, py1 = changed_rect
+            px0 = max(0, min(int(px0), self.s.preview_w))
+            py0 = max(0, min(int(py0), self.s.preview_h))
+            px1 = max(px0, min(int(px1), self.s.preview_w))
+            py1 = max(py0, min(int(py1), self.s.preview_h))
+            if px1 > px0 and py1 > py0:
+                region = self.s.overlay_rgba[py0:py1, px0:px1]
+                painter = QPainter(self._mask_pixmap)
+                try:
+                    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                    painter.drawImage(px0, py0, qimage_from_rgba(region))
+                finally:
+                    painter.end()
+                self.mask_item.setPixmap(self._mask_pixmap)
+                self.mask_item.update(QRectF(float(px0), float(py0), float(px1 - px0), float(py1 - py0)))
         self._schedule_detail_refresh()
         self.update_status()
 
@@ -3422,14 +3649,20 @@ class MainWindow(QMainWindow):
     def on_box(self, x0: int, y0: int, x1: int, y1: int) -> None:
         if self.s is None:
             return
-        self.s.apply_box((x0, y0, x1, y1), self.mode)
-        self.refresh_overlay()
+        changed_rect = self.s.apply_box((x0, y0, x1, y1), self.mode)
+        if changed_rect is None:
+            self.update_status()
+            return
+        self.refresh_overlay(changed_rect)
 
     def undo(self) -> None:
         if self.s is None:
             return
-        self.s.undo()
-        self.refresh_overlay()
+        changed_rect = self.s.undo()
+        if changed_rect is None:
+            self.update_status()
+            return
+        self.refresh_overlay(changed_rect)
 
     def clear(self) -> None:
         if self.s is None:
@@ -3442,8 +3675,11 @@ class MainWindow(QMainWindow):
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
-        self.s.clear()
-        self.refresh_overlay()
+        changed_rect = self.s.clear()
+        if changed_rect is None:
+            self.update_status()
+            return
+        self.refresh_overlay(changed_rect)
 
     def reset(self) -> None:
         if self.s is None:
@@ -3456,17 +3692,24 @@ class MainWindow(QMainWindow):
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
-        self.s.reset()
-        self.refresh_overlay()
+        changed_rect = self.s.reset()
+        self.refresh_overlay(changed_rect)
 
     def save(self) -> None:
         if self.s is None:
             QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
             return
+        busy = self._show_busy_indicator("Etiketler kaydediliyor...", maximum=3, value=0)
         try:
-            self.s.save(self.s.cfg.output_path)
-            QMessageBox.information(self, APP_TITLE, f"Kaydedildi:\n{self.s.cfg.output_path}")
+            self.s.save(self.s.cfg.output_path, progress_callback=self._save_progress_updater(busy))
+            gpkg_path = companion_gpkg_path(self.s.cfg.output_path)
+            message = f"Kaydedildi:\n{self.s.cfg.output_path}"
+            if gpkg_path.exists():
+                message += f"\n\nEtiket GPKG:\n{gpkg_path}"
+            self._hide_busy_indicator(busy)
+            QMessageBox.information(self, APP_TITLE, message)
         except Exception as exc:
+            self._hide_busy_indicator(busy)
             QMessageBox.critical(self, APP_TITLE, f"Kaydetme hatasi:\n{exc}")
         self.update_status()
 
@@ -3480,10 +3723,17 @@ class MainWindow(QMainWindow):
         p = Path(path)
         if p.suffix == "":
             p = p.with_suffix(".tif")
+        busy = self._show_busy_indicator("Etiketler yeni konuma kaydediliyor...", maximum=3, value=0)
         try:
-            self.s.save(p)
-            QMessageBox.information(self, APP_TITLE, f"Kaydedildi:\n{p}")
+            self.s.save(p, progress_callback=self._save_progress_updater(busy))
+            gpkg_path = companion_gpkg_path(p)
+            message = f"Kaydedildi:\n{p}"
+            if gpkg_path.exists():
+                message += f"\n\nEtiket GPKG:\n{gpkg_path}"
+            self._hide_busy_indicator(busy)
+            QMessageBox.information(self, APP_TITLE, message)
         except Exception as exc:
+            self._hide_busy_indicator(busy)
             QMessageBox.critical(self, APP_TITLE, f"Kaydetme hatasi:\n{exc}")
         self.update_status()
 

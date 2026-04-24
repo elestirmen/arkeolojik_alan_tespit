@@ -41,6 +41,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from archeo_shared.console import configure_utf8_console
+
+configure_utf8_console()
+
 import numpy as np
 from scipy import ndimage
 import torch

@@ -16,8 +16,8 @@ output_dir/
     Positive/
     Negative/
 
-Each saved tile is a 5-channel numpy array (.npz or .npy) compatible with
-training.py tile_classification mode.
+Each saved tile is a numpy array (.npz or .npy) compatible with training.py
+tile_classification mode. RGB3 exports can also be saved as PNG previews.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+import cv2
 import numpy as np
 import rasterio
 from rasterio.windows import Window, from_bounds
@@ -45,6 +46,9 @@ from archeo_shared.channels import (
     MODEL_CHANNEL_NAMES,
     expected_channel_names,
 )
+from archeo_shared.console import configure_utf8_console
+
+configure_utf8_console()
 
 try:
     from archaeo_detect import (
@@ -747,7 +751,7 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=bool(CONFIG["normalize"]),
     )
-    parser.add_argument("--format", choices=("npz", "npy"), default=str(CONFIG["format"]))
+    parser.add_argument("--format", choices=("npz", "npy", "png"), default=str(CONFIG["format"]))
     parser.add_argument("--num-workers", type=int, default=int(CONFIG["num_workers"]))
     parser.add_argument(
         "--derivative-cache-mode",
@@ -793,6 +797,8 @@ def validate_args(args: argparse.Namespace) -> None:
             errors.append(f"bands 1-bazli pozitif olmali, verilen: {args.bands}")
     except ValueError as exc:
         errors.append(str(exc))
+    if str(getattr(args, "format", "")).strip().lower() == "png" and feature_mode != FEATURE_MODE_RGB3:
+        errors.append("PNG formati yalnizca rgb3 feature modu ile kullanilabilir.")
     for name in (
         "positive_ratio_threshold",
         "valid_ratio_threshold",
@@ -1618,9 +1624,27 @@ def compute_tile_stack_from_raster_cache(
     return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
+def _rgb_stack_to_png_uint8(stacked: np.ndarray) -> np.ndarray:
+    if stacked.ndim != 3 or int(stacked.shape[0]) != 3:
+        raise ValueError(f"PNG kaydi icin RGB3 tile beklenir, alinan shape: {stacked.shape}")
+    rgb = np.moveaxis(stacked[:3], 0, -1)
+    rgb = np.nan_to_num(rgb, nan=0.0, posinf=0.0, neginf=0.0)
+    if np.issubdtype(rgb.dtype, np.floating):
+        finite = rgb[np.isfinite(rgb)]
+        if finite.size and float(np.nanmin(finite)) >= 0.0 and float(np.nanmax(finite)) <= 1.0:
+            rgb = rgb * 255.0
+    rgb_u8 = np.clip(rgb, 0.0, 255.0).astype(np.uint8, copy=False)
+    return np.ascontiguousarray(rgb_u8)
+
+
 def _save_tile_array(output_path: Path, stacked: np.ndarray, file_ext: str) -> None:
     if file_ext == "npy":
         np.save(output_path, stacked)
+    elif file_ext == "png":
+        rgb = _rgb_stack_to_png_uint8(stacked)
+        bgr = np.ascontiguousarray(rgb[:, :, ::-1])
+        if not cv2.imwrite(str(output_path), bgr):
+            raise OSError(f"PNG tile yazilamadi: {output_path}")
     else:
         np.savez_compressed(output_path, image=stacked)
 
