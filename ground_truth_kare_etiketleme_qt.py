@@ -373,6 +373,43 @@ QToolButton:checked {
 QToolButton:disabled {
     color: #94a3b8;
 }
+QMenuBar {
+    background: #ffffff;
+    color: #1e293b;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 2px 4px;
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 4px 10px;
+    border-radius: 4px;
+}
+QMenuBar::item:selected {
+    background: #e0f2fe;
+    color: #0c4a6e;
+}
+QMenu {
+    background: #ffffff;
+    color: #1e293b;
+    border: 1px solid #cbd5e1;
+    padding: 4px;
+}
+QMenu::item {
+    padding: 6px 28px 6px 24px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background: #e0f2fe;
+    color: #0c4a6e;
+}
+QMenu::item:disabled {
+    color: #94a3b8;
+}
+QMenu::separator {
+    height: 1px;
+    background: #e2e8f0;
+    margin: 4px 8px;
+}
 QStatusBar {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 #f1f5f9, stop:1 #e2e8f0);
@@ -2694,58 +2731,43 @@ class MainWindow(QMainWindow):
         self._empty_text.setVisible(True)
 
     # ------------------------------------------------------------------
-    # Toolbar
+    # Menu and toolbar
     # ------------------------------------------------------------------
     def _build_toolbar(self) -> None:
-        tb = QToolBar("Araçlar", self)
-        tb.setMovable(False)
-        tb.setIconSize(tb.iconSize())  # keep default icon size
-        self.addToolBar(tb)
-
-        # --- File actions ---
         self.act_open = QAction("📂 Aç", self)
         self.act_open.setToolTip("Girdi GeoTIFF dosyası aç  (Ctrl+O)")
         self.act_open.setShortcut(QKeySequence.StandardKey.Open)
         self.act_open.triggered.connect(self.open_input)
-        tb.addAction(self.act_open)
 
         self.act_open_labels = QAction("🗂️ Etiket Aç", self)
         self.act_open_labels.setToolTip("Mevcut maske veya GPKG etiketten devam et")
         self.act_open_labels.triggered.connect(self.open_existing_labels)
-        tb.addAction(self.act_open_labels)
 
         self.act_save = QAction("💾 Kaydet", self)
         self.act_save.setToolTip("Maskeyi kaydet  (Ctrl+S)")
         self.act_save.setShortcut(QKeySequence.StandardKey.Save)
         self.act_save.triggered.connect(self.save)
-        tb.addAction(self.act_save)
 
         self.act_save_as = QAction("📄 Farklı Kaydet", self)
         self.act_save_as.setToolTip("Maskeyi farklı konuma kaydet  (Ctrl+Shift+S)")
         self.act_save_as.setShortcut(QKeySequence("Ctrl+Shift+S"))
         self.act_save_as.triggered.connect(self.save_as)
-        tb.addAction(self.act_save_as)
 
         self.act_export_dataset = QAction("🧩 Tile Dataset", self)
         self.act_export_dataset.setToolTip("Positive/Negative tile dataset uret")
         self.act_export_dataset.triggered.connect(self.open_tile_dataset_export_dialog)
-        tb.addAction(self.act_export_dataset)
 
         self.act_add_layer = QAction("🧱 Katman Ekle", self)
         self.act_add_layer.setToolTip("Ek bir raster katman ekle")
         self.act_add_layer.triggered.connect(self.add_visual_layer)
-        tb.addAction(self.act_add_layer)
 
         self.act_remove_layer = QAction("➖ Katman Sil", self)
         self.act_remove_layer.setToolTip("Secili ekstra katmani sil")
         self.act_remove_layer.triggered.connect(self.remove_selected_layer)
-        tb.addAction(self.act_remove_layer)
 
         self.act_mask_settings = QAction("⚙️ Maske Ayarlari", self)
         self.act_mask_settings.setToolTip("Secilen/secilmeyen piksel degerlerini acilan panelde ayarla")
         self.act_mask_settings.triggered.connect(self.open_mask_settings_dialog)
-        tb.addAction(self.act_mask_settings)
-        tb.addSeparator()
 
         # --- Mode actions (exclusive group) ---
         mode_group = QActionGroup(self)
@@ -2758,7 +2780,6 @@ class MainWindow(QMainWindow):
         self.act_draw.setChecked(True)
         self.act_draw.triggered.connect(lambda: self.set_mode("draw"))
         mode_group.addAction(self.act_draw)
-        tb.addAction(self.act_draw)
 
         self.act_erase = QAction("🧹 Sil", self)
         self.act_erase.setToolTip("Silme modu – işaretli alanı kaldır  (E)")
@@ -2766,7 +2787,6 @@ class MainWindow(QMainWindow):
         self.act_erase.setCheckable(True)
         self.act_erase.triggered.connect(lambda: self.set_mode("erase"))
         mode_group.addAction(self.act_erase)
-        tb.addAction(self.act_erase)
 
         self.act_square = QAction("⬜ Kare", self)
         self.act_square.setToolTip("Kare kilidi – kare şeklinde çizim  (S)")
@@ -2774,40 +2794,83 @@ class MainWindow(QMainWindow):
         self.act_square.setCheckable(True)
         self.act_square.setChecked(self.square_mode)
         self.act_square.triggered.connect(self.toggle_square)
-        tb.addAction(self.act_square)
-        tb.addSeparator()
 
         # --- History actions ---
         self.act_undo = QAction("↩️ Geri Al", self)
         self.act_undo.setToolTip("Son işlemi geri al  (Ctrl+Z)")
         self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
         self.act_undo.triggered.connect(self.undo)
-        tb.addAction(self.act_undo)
 
         self.act_clear = QAction("🗑️ Temizle", self)
         self.act_clear.setToolTip("Tüm maskeyi sıfırla")
         self.act_clear.triggered.connect(self.clear)
-        tb.addAction(self.act_clear)
 
         self.act_reset = QAction("🔄 Başa Dön", self)
         self.act_reset.setToolTip("İlk yüklenen maskeye geri dön")
         self.act_reset.triggered.connect(self.reset)
-        tb.addAction(self.act_reset)
-        tb.addSeparator()
 
         # --- View actions ---
         self.act_fit = QAction("🔍 Sığdır", self)
         self.act_fit.setToolTip("Görüntüyü pencereye sığdır  (F)")
         self.act_fit.setShortcut("F")
         self.act_fit.triggered.connect(self.view.fit_all)
-        tb.addAction(self.act_fit)
 
         self.act_invert = QAction("🖱️ Wheel", self)
         self.act_invert.setToolTip("Fare tekerleği yönünü tersle  (I)")
         self.act_invert.setShortcut("I")
         self.act_invert.setCheckable(True)
         self.act_invert.triggered.connect(self.invert_wheel)
-        tb.addAction(self.act_invert)
+        self._build_menu_bar()
+
+        tb = QToolBar("Hızlı Araçlar", self)
+        tb.setMovable(False)
+        tb.setIconSize(tb.iconSize())  # keep default icon size
+        self.addToolBar(tb)
+
+        # Toolbar intentionally keeps only the high-frequency labeling actions.
+        tb.addAction(self.act_open)
+        tb.addAction(self.act_save)
+        tb.addSeparator()
+        tb.addAction(self.act_draw)
+        tb.addAction(self.act_erase)
+        tb.addAction(self.act_square)
+        tb.addSeparator()
+        tb.addAction(self.act_undo)
+        tb.addAction(self.act_fit)
+
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+        menu_bar.clear()
+
+        file_menu = menu_bar.addMenu("Dosya")
+        file_menu.addAction(self.act_open)
+        file_menu.addAction(self.act_open_labels)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_save)
+        file_menu.addAction(self.act_save_as)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_export_dataset)
+
+        edit_menu = menu_bar.addMenu("Düzenle")
+        edit_menu.addAction(self.act_undo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_clear)
+        edit_menu.addAction(self.act_reset)
+
+        tools_menu = menu_bar.addMenu("Etiketleme")
+        tools_menu.addAction(self.act_draw)
+        tools_menu.addAction(self.act_erase)
+        tools_menu.addAction(self.act_square)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.act_mask_settings)
+
+        layer_menu = menu_bar.addMenu("Katman")
+        layer_menu.addAction(self.act_add_layer)
+        layer_menu.addAction(self.act_remove_layer)
+
+        view_menu = menu_bar.addMenu("Görünüm")
+        view_menu.addAction(self.act_fit)
+        view_menu.addAction(self.act_invert)
 
     # ------------------------------------------------------------------
     # Rich Status Bar
