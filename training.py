@@ -124,7 +124,7 @@ CONFIG: dict[str, object] = {
     # lr:
     # Ogrenme orani (AdamW).
     # Cok yuksek olursa kararsizlik, cok dusuk olursa yavas ogrenme gorulebilir.
-    "lr": 2e-4,
+    "lr": 1e-4,
 
     # loss:
     # Optimize edilen kayip fonksiyonu.
@@ -218,7 +218,7 @@ CONFIG: dict[str, object] = {
     # seed:
     # Rastgelelik sabiti.
     # Deneyleri tekrar edilebilir kilmak icin sabit tutulur.
-    "seed": 42,
+    "seed": 21,
 
     # allow_all_negative:
     # True ise tum maskeler negatif olsa bile egitim zorla devam eder.
@@ -256,8 +256,8 @@ CONFIG: dict[str, object] = {
 
     # deterministic_rotate_step_deg:
     # Train augment icin deterministik donme aci adimi.
-    # 0.0: kapali, 30.0: [0,30,...,330] olacak sekilde 12x gorunum.
-    "deterministic_rotate_step_deg": 30.0,
+    # 0.0: kapali, 15.0: [0,15,...,345] olacak sekilde 24x gorunum.
+    "deterministic_rotate_step_deg": 15.0,
 
     # scale_augment:
     # Egitim sirasinda rastgele olcek degisikligi (zoom in/out) uygula.
@@ -266,9 +266,28 @@ CONFIG: dict[str, object] = {
 
     # scale_augment_range:
     # Olcek araliginin alt ve ust siniri.
-    # 0.7 = %30 zoom out, 1.3 = %30 zoom in.
-    "scale_augment_min": 0.7,
-    "scale_augment_max": 1.3,
+    # 0.75 = %25 zoom out, 1.35 = %35 zoom in.
+    "scale_augment_min": 0.75,
+    "scale_augment_max": 1.35,
+
+    # translate_augment:
+    # Tile icinde rastgele kaydirma uygular. 0.08, her eksende tile boyutunun +/- %8'i demektir.
+    "translate_augment": True,
+    "translate_augment_frac": 0.08,
+
+    # rgb_jitter:
+    # Ilk 3 kanala hafif gain/bias jitter uygular. Normalize tile'lar icin guvenli araliklar.
+    "rgb_jitter": True,
+    "rgb_jitter_gain": 0.10,
+    "rgb_jitter_bias": 0.10,
+
+    # gaussian_noise_std:
+    # Tum image kanallarina dusuk siddette Gaussian noise ekler.
+    "gaussian_noise_std": 0.015,
+
+    # topo_jitter_gain:
+    # RGB disindaki topografik kanallara cok hafif carpimsal jitter uygular.
+    "topo_jitter_gain": 0.02,
 
     # use_fpn_classifier:
     # True ise TileClassifier encoder'in tum katmanlarindan feature toplar (FPN-style).
@@ -439,6 +458,13 @@ class ArchaeologyDataset(Dataset):
         scale_augment: bool = False,
         scale_augment_min: float = 0.7,
         scale_augment_max: float = 1.3,
+        translate_augment: bool = False,
+        translate_augment_frac: float = 0.0,
+        rgb_jitter: bool = False,
+        rgb_jitter_gain: float = 0.0,
+        rgb_jitter_bias: float = 0.0,
+        gaussian_noise_std: float = 0.0,
+        topo_jitter_gain: float = 0.0,
     ):
         """
         Args:
@@ -456,7 +482,19 @@ class ArchaeologyDataset(Dataset):
         self.scale_augment = bool(scale_augment) and self.augment
         self.scale_augment_min = float(scale_augment_min)
         self.scale_augment_max = float(scale_augment_max)
+        self.translate_augment = bool(translate_augment) and self.augment
+        self.translate_augment_frac = max(0.0, float(translate_augment_frac))
+        self.rgb_jitter = bool(rgb_jitter) and self.augment
+        self.rgb_jitter_gain = max(0.0, float(rgb_jitter_gain))
+        self.rgb_jitter_bias = max(0.0, float(rgb_jitter_bias))
+        self.gaussian_noise_std = max(0.0, float(gaussian_noise_std))
+        self.topo_jitter_gain = max(0.0, float(topo_jitter_gain))
         self.deterministic_rotate_step_deg = float(deterministic_rotate_step_deg)
+        if self.scale_augment:
+            if self.scale_augment_min <= 0.0 or self.scale_augment_max <= 0.0:
+                raise ValueError("scale_augment_min/max pozitif olmali")
+            if self.scale_augment_min > self.scale_augment_max:
+                raise ValueError("scale_augment_min, scale_augment_max degerinden buyuk olamaz")
         if not 0.0 <= self.deterministic_rotate_step_deg < 360.0:
             raise ValueError(
                 "deterministic_rotate_step_deg 0-360 araliginda olmali "
@@ -611,7 +649,7 @@ class ArchaeologyDataset(Dataset):
             if self.augment:
                 if self._use_deterministic_rotation:
                     image = self._apply_rotation_image(image, rotation_angle)
-                    image = self._apply_random_flips_image(image)
+                    image = self._augment_image(image, allow_rot90=False)
                 else:
                     image = self._augment_image(image)
             image = torch.from_numpy(image.copy()).float()
@@ -636,7 +674,7 @@ class ArchaeologyDataset(Dataset):
         if self.augment:
             if self._use_deterministic_rotation:
                 image, mask = self._apply_rotation_pair(image, mask, rotation_angle)
-                image, mask = self._apply_random_flips_pair(image, mask)
+                image, mask = self._augment(image, mask, allow_rot90=False)
             else:
                 image, mask = self._augment(image, mask)
         
@@ -734,12 +772,132 @@ class ArchaeologyDataset(Dataset):
             out[:, r0:r0 + sH, c0:c0 + sW] = scaled
         return out.astype(np.float32)
 
-    def _augment_image(self, image: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _scale_augment_pair(
+        image: np.ndarray,
+        mask: np.ndarray,
+        scale: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if abs(scale - 1.0) < 1e-4:
+            return image, mask
+        C, H, W = image.shape
+        new_h, new_w = max(1, int(round(H * scale))), max(1, int(round(W * scale)))
+        zoom_y = new_h / H
+        zoom_x = new_w / W
+        scaled_image = ndimage.zoom(image, (1.0, zoom_y, zoom_x), order=1, mode="nearest")
+        scaled_mask = ndimage.zoom(mask, (zoom_y, zoom_x), order=0, mode="nearest")
+        _sC, sH, sW = scaled_image.shape
+        out_image = np.zeros_like(image)
+        out_mask = np.zeros_like(mask)
+        if sH >= H and sW >= W:
+            r0 = (sH - H) // 2
+            c0 = (sW - W) // 2
+            out_image = scaled_image[:, r0:r0 + H, c0:c0 + W].copy()
+            out_mask = scaled_mask[r0:r0 + H, c0:c0 + W].copy()
+        else:
+            r0 = (H - sH) // 2
+            c0 = (W - sW) // 2
+            out_image[:, r0:r0 + sH, c0:c0 + sW] = scaled_image
+            out_mask[r0:r0 + sH, c0:c0 + sW] = scaled_mask
+        return out_image.astype(np.float32), _mask_to_binary(out_mask)
+
+    @staticmethod
+    def _translate_image(image: np.ndarray, dy: int, dx: int) -> np.ndarray:
+        if dy == 0 and dx == 0:
+            return image
+        _C, H, W = image.shape
+        src_y0 = max(0, -dy)
+        src_y1 = min(H, H - dy)
+        src_x0 = max(0, -dx)
+        src_x1 = min(W, W - dx)
+        if src_y1 <= src_y0 or src_x1 <= src_x0:
+            return np.zeros_like(image)
+        dst_y0 = max(0, dy)
+        dst_x0 = max(0, dx)
+        out = np.zeros_like(image)
+        out[:, dst_y0:dst_y0 + (src_y1 - src_y0), dst_x0:dst_x0 + (src_x1 - src_x0)] = (
+            image[:, src_y0:src_y1, src_x0:src_x1]
+        )
+        return out
+
+    @staticmethod
+    def _translate_mask(mask: np.ndarray, dy: int, dx: int) -> np.ndarray:
+        if dy == 0 and dx == 0:
+            return mask
+        H, W = mask.shape
+        src_y0 = max(0, -dy)
+        src_y1 = min(H, H - dy)
+        src_x0 = max(0, -dx)
+        src_x1 = min(W, W - dx)
+        if src_y1 <= src_y0 or src_x1 <= src_x0:
+            return np.zeros_like(mask)
+        dst_y0 = max(0, dy)
+        dst_x0 = max(0, dx)
+        out = np.zeros_like(mask)
+        out[dst_y0:dst_y0 + (src_y1 - src_y0), dst_x0:dst_x0 + (src_x1 - src_x0)] = (
+            mask[src_y0:src_y1, src_x0:src_x1]
+        )
+        return out
+
+    def _random_translate_offsets(self, height: int, width: int) -> Tuple[int, int]:
+        max_dy = int(round(float(height) * self.translate_augment_frac))
+        max_dx = int(round(float(width) * self.translate_augment_frac))
+        if max_dy <= 0 and max_dx <= 0:
+            return 0, 0
+        dy = int(np.random.randint(-max_dy, max_dy + 1)) if max_dy > 0 else 0
+        dx = int(np.random.randint(-max_dx, max_dx + 1)) if max_dx > 0 else 0
+        return dy, dx
+
+    def _augment_intensity_image(self, image: np.ndarray) -> np.ndarray:
+        needs_copy = (
+            self.rgb_jitter
+            or self.gaussian_noise_std > 0.0
+            or (self.topo_jitter_gain > 0.0 and image.shape[0] > 3)
+        )
+        if not needs_copy:
+            return image
+
+        out = image.astype(np.float32, copy=True)
+        rgb_count = min(3, out.shape[0])
+        if self.rgb_jitter and rgb_count > 0:
+            gain = np.random.uniform(
+                1.0 - self.rgb_jitter_gain,
+                1.0 + self.rgb_jitter_gain,
+                size=(rgb_count, 1, 1),
+            ).astype(np.float32)
+            bias = np.random.uniform(
+                -self.rgb_jitter_bias,
+                self.rgb_jitter_bias,
+                size=(rgb_count, 1, 1),
+            ).astype(np.float32)
+            out[:rgb_count] = out[:rgb_count] * gain + bias
+
+        if self.topo_jitter_gain > 0.0 and out.shape[0] > 3:
+            topo_count = out.shape[0] - 3
+            gain = np.random.uniform(
+                1.0 - self.topo_jitter_gain,
+                1.0 + self.topo_jitter_gain,
+                size=(topo_count, 1, 1),
+            ).astype(np.float32)
+            out[3:] = out[3:] * gain
+
+        if self.gaussian_noise_std > 0.0:
+            noise = np.random.normal(0.0, self.gaussian_noise_std, size=out.shape).astype(np.float32)
+            out += noise
+
+        return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+
+    def _augment_image(self, image: np.ndarray, *, allow_rot90: bool = True) -> np.ndarray:
         """Tile-level classification icin goruntu augmentasyonu."""
 
         if self.scale_augment:
             s = np.random.uniform(self.scale_augment_min, self.scale_augment_max)
             image = self._scale_augment_image(image, s)
+
+        if self.translate_augment:
+            _C, H, W = image.shape
+            dy, dx = self._random_translate_offsets(H, W)
+            image = self._translate_image(image, dy, dx)
 
         if np.random.random() > 0.5:
             image = np.flip(image, axis=2).copy()
@@ -747,18 +905,30 @@ class ArchaeologyDataset(Dataset):
         if np.random.random() > 0.5:
             image = np.flip(image, axis=1).copy()
 
-        if np.random.random() > 0.25:
+        if allow_rot90 and np.random.random() > 0.25:
             k = np.random.randint(1, 4)
             image = np.rot90(image, k, axes=(1, 2)).copy()
 
-        return image
+        return self._augment_intensity_image(image)
 
     def _augment(
         self, 
         image: np.ndarray, 
-        mask: np.ndarray
+        mask: np.ndarray,
+        *,
+        allow_rot90: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Basit veri artırma işlemleri."""
+        """Image+mask veri artırma işlemleri."""
+
+        if self.scale_augment:
+            s = np.random.uniform(self.scale_augment_min, self.scale_augment_max)
+            image, mask = self._scale_augment_pair(image, mask, s)
+
+        if self.translate_augment:
+            _C, H, W = image.shape
+            dy, dx = self._random_translate_offsets(H, W)
+            image = self._translate_image(image, dy, dx)
+            mask = self._translate_mask(mask, dy, dx)
         
         # Yatay flip (%50)
         if np.random.random() > 0.5:
@@ -771,12 +941,12 @@ class ArchaeologyDataset(Dataset):
             mask = np.flip(mask, axis=0).copy()
         
         # 90° rotasyonlar (%75)
-        if np.random.random() > 0.25:
+        if allow_rot90 and np.random.random() > 0.25:
             k = np.random.randint(1, 4)  # 90, 180, 270 derece
             image = np.rot90(image, k, axes=(1, 2)).copy()
             mask = np.rot90(mask, k).copy()
         
-        return image, mask
+        return self._augment_intensity_image(image), _mask_to_binary(mask)
 
 
 # ==============================================================================
@@ -1163,10 +1333,17 @@ class TrainingConfig:
     auto_val_reason: str = ""
     deterministic_rotate_step_deg: float = 0.0
 
-    # Scale augmentation
+    # Augmentation
     scale_augment: bool = True
-    scale_augment_min: float = 0.7
-    scale_augment_max: float = 1.3
+    scale_augment_min: float = 0.75
+    scale_augment_max: float = 1.35
+    translate_augment: bool = True
+    translate_augment_frac: float = 0.08
+    rgb_jitter: bool = True
+    rgb_jitter_gain: float = 0.10
+    rgb_jitter_bias: float = 0.10
+    gaussian_noise_std: float = 0.015
+    topo_jitter_gain: float = 0.02
 
     # FPN-style multi-level classifier
     use_fpn_classifier: bool = True
@@ -1196,6 +1373,19 @@ def _build_training_metadata_payload(config: TrainingConfig) -> Dict[str, Any]:
             "auto_val_from_train": bool(config.auto_val_from_train),
             "auto_val_ratio": float(config.auto_val_ratio),
             "auto_val_reason": str(config.auto_val_reason),
+            "augmentation": {
+                "deterministic_rotate_step_deg": float(config.deterministic_rotate_step_deg),
+                "scale_augment": bool(config.scale_augment),
+                "scale_augment_min": float(config.scale_augment_min),
+                "scale_augment_max": float(config.scale_augment_max),
+                "translate_augment": bool(config.translate_augment),
+                "translate_augment_frac": float(config.translate_augment_frac),
+                "rgb_jitter": bool(config.rgb_jitter),
+                "rgb_jitter_gain": float(config.rgb_jitter_gain),
+                "rgb_jitter_bias": float(config.rgb_jitter_bias),
+                "gaussian_noise_std": float(config.gaussian_noise_std),
+                "topo_jitter_gain": float(config.topo_jitter_gain),
+            },
         }
     )
     return payload
@@ -2064,6 +2254,24 @@ def train(config: TrainingConfig) -> Path:
             "deterministic_rotate_step_deg 0-360 araliginda olmali "
             f"(360 haric), verilen: {config.deterministic_rotate_step_deg}"
         )
+    if config.scale_augment:
+        if float(config.scale_augment_min) <= 0.0 or float(config.scale_augment_max) <= 0.0:
+            raise ValueError("scale_augment_min/max pozitif olmali")
+        if float(config.scale_augment_min) > float(config.scale_augment_max):
+            raise ValueError("scale_augment_min, scale_augment_max degerinden buyuk olamaz")
+    if not 0.0 <= float(config.translate_augment_frac) <= 0.5:
+        raise ValueError(
+            "translate_augment_frac 0-0.5 araliginda olmali, "
+            f"verilen: {config.translate_augment_frac}"
+        )
+    for name, value in (
+        ("rgb_jitter_gain", config.rgb_jitter_gain),
+        ("rgb_jitter_bias", config.rgb_jitter_bias),
+        ("gaussian_noise_std", config.gaussian_noise_std),
+        ("topo_jitter_gain", config.topo_jitter_gain),
+    ):
+        if float(value) < 0.0:
+            raise ValueError(f"{name} negatif olamaz, verilen: {value}")
     
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -2095,6 +2303,13 @@ def train(config: TrainingConfig) -> Path:
         scale_augment=config.scale_augment,
         scale_augment_min=config.scale_augment_min,
         scale_augment_max=config.scale_augment_max,
+        translate_augment=config.translate_augment,
+        translate_augment_frac=config.translate_augment_frac,
+        rgb_jitter=config.rgb_jitter,
+        rgb_jitter_gain=config.rgb_jitter_gain,
+        rgb_jitter_bias=config.rgb_jitter_bias,
+        gaussian_noise_std=config.gaussian_noise_std,
+        topo_jitter_gain=config.topo_jitter_gain,
     )
     auto_val_holdout_stats: Optional[Dict[str, int]] = None
     train_base_indices_for_holdout: Optional[List[int]] = None
@@ -2126,10 +2341,24 @@ def train(config: TrainingConfig) -> Path:
         )
     if train_dataset._use_deterministic_rotation:
         LOGGER.info(
-            "Deterministik train rotasyonu aktif: adim=%.2f°, carpim=%dx, rastgele flip=acik",
+            "Deterministik train rotasyonu aktif: adim=%.2f°, carpim=%dx",
             float(config.deterministic_rotate_step_deg),
             int(train_dataset._augmentation_multiplier),
         )
+    LOGGER.info(
+        "Train augmentasyonu: scale=%s [%.2f, %.2f] | shift=%s ±%.1f%% | "
+        "flip=acik | rgb_jitter=%s gain±%.2f bias±%.2f | noise_std=%.3f | topo_gain±%.2f",
+        "acik" if config.scale_augment else "kapali",
+        float(config.scale_augment_min),
+        float(config.scale_augment_max),
+        "acik" if config.translate_augment else "kapali",
+        100.0 * float(config.translate_augment_frac),
+        "acik" if config.rgb_jitter else "kapali",
+        float(config.rgb_jitter_gain),
+        float(config.rgb_jitter_bias),
+        float(config.gaussian_noise_std),
+        float(config.topo_jitter_gain),
+    )
     
     train_loader_dataset: Dataset = train_dataset
     if train_base_indices_for_holdout is not None:
@@ -2842,7 +3071,7 @@ def main():
         default=float(CONFIG["deterministic_rotate_step_deg"]),
         help=(
             "Train augment icin sabit donme aci adimi (derece). "
-            "0: kapali, 30: 0..330 arasi 12 farkli aci."
+            "0: kapali, 15: 0..345 arasi 24 farkli aci."
         ),
     )
     parser.add_argument(
@@ -2852,9 +3081,51 @@ def main():
         help="Egitimde rastgele zoom in/out augmentasyonu.",
     )
     parser.add_argument("--scale-augment-min", type=float, default=float(CONFIG["scale_augment_min"]),
-                        help="Scale augment min (0.7 = %%30 zoom out).")
+                        help="Scale augment min (0.75 = %%25 zoom out).")
     parser.add_argument("--scale-augment-max", type=float, default=float(CONFIG["scale_augment_max"]),
-                        help="Scale augment max (1.3 = %%30 zoom in).")
+                        help="Scale augment max (1.35 = %%35 zoom in).")
+    parser.add_argument(
+        "--translate-augment",
+        action=argparse.BooleanOptionalAction,
+        default=bool(CONFIG["translate_augment"]),
+        help="Egitimde rastgele tile ici kaydirma augmentasyonu.",
+    )
+    parser.add_argument(
+        "--translate-augment-frac",
+        type=float,
+        default=float(CONFIG["translate_augment_frac"]),
+        help="Rastgele kaydirma ust siniri. 0.08 = her eksende tile boyutunun +/- %%8'i.",
+    )
+    parser.add_argument(
+        "--rgb-jitter",
+        action=argparse.BooleanOptionalAction,
+        default=bool(CONFIG["rgb_jitter"]),
+        help="Ilk 3 kanala hafif RGB gain/bias jitter uygula.",
+    )
+    parser.add_argument(
+        "--rgb-jitter-gain",
+        type=float,
+        default=float(CONFIG["rgb_jitter_gain"]),
+        help="RGB carpimsal jitter araligi. 0.10 = gain +/- %%10.",
+    )
+    parser.add_argument(
+        "--rgb-jitter-bias",
+        type=float,
+        default=float(CONFIG["rgb_jitter_bias"]),
+        help="RGB toplamsal jitter araligi. Normalize tile icin 0.10 onerilir.",
+    )
+    parser.add_argument(
+        "--gaussian-noise-std",
+        type=float,
+        default=float(CONFIG["gaussian_noise_std"]),
+        help="Image kanallarina eklenecek Gaussian noise std.",
+    )
+    parser.add_argument(
+        "--topo-jitter-gain",
+        type=float,
+        default=float(CONFIG["topo_jitter_gain"]),
+        help="RGB disi topografik kanallara carpimsal jitter araligi.",
+    )
     parser.add_argument(
         "--use-fpn-classifier",
         action=argparse.BooleanOptionalAction,
@@ -2937,6 +3208,28 @@ def main():
     if not 0.0 <= float(args.deterministic_rotate_step_deg) < 360.0:
         print("HATA: --deterministic-rotate-step-deg 0 ile 360 arasinda olmali (360 haric).")
         sys.exit(1)
+
+    if bool(args.scale_augment):
+        if float(args.scale_augment_min) <= 0.0 or float(args.scale_augment_max) <= 0.0:
+            print("HATA: --scale-augment-min/max pozitif olmali.")
+            sys.exit(1)
+        if float(args.scale_augment_min) > float(args.scale_augment_max):
+            print("HATA: --scale-augment-min, --scale-augment-max degerinden buyuk olamaz.")
+            sys.exit(1)
+
+    if not 0.0 <= float(args.translate_augment_frac) <= 0.5:
+        print("HATA: --translate-augment-frac 0 ile 0.5 arasinda olmali.")
+        sys.exit(1)
+
+    for arg_name in (
+        "rgb_jitter_gain",
+        "rgb_jitter_bias",
+        "gaussian_noise_std",
+        "topo_jitter_gain",
+    ):
+        if float(getattr(args, arg_name)) < 0.0:
+            print(f"HATA: --{arg_name.replace('_', '-')} negatif olamaz.")
+            sys.exit(1)
 
     if args.task == "tile_classification" and args.loss in {"dice", "combined"}:
         print("HATA: tile_classification için --loss yalnızca 'bce' veya 'focal' olabilir.")
@@ -3207,6 +3500,13 @@ def main():
         scale_augment=bool(args.scale_augment),
         scale_augment_min=float(args.scale_augment_min),
         scale_augment_max=float(args.scale_augment_max),
+        translate_augment=bool(args.translate_augment),
+        translate_augment_frac=float(args.translate_augment_frac),
+        rgb_jitter=bool(args.rgb_jitter),
+        rgb_jitter_gain=float(args.rgb_jitter_gain),
+        rgb_jitter_bias=float(args.rgb_jitter_bias),
+        gaussian_noise_std=float(args.gaussian_noise_std),
+        topo_jitter_gain=float(args.topo_jitter_gain),
         use_fpn_classifier=bool(args.use_fpn_classifier),
         output_dir=Path(args.output),
         save_every_epoch=bool(CONFIG["save_every_epoch"]),
