@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
 from archaeo_detect import (
     PipelineDefaults,
+    apply_yolo_output_defaults,
     apply_trained_only_metadata_locks,
     build_config_from_args,
     compute_derivatives_with_rvt,
@@ -31,6 +32,7 @@ from archaeo_detect import (
     percentile_clip,
     compute_ndsm,
     resolve_training_metadata,
+    _resolve_yolo_weights_path,
     _build_candidate_location_rows,
     _otsu_threshold_0to1,
     robust_norm,
@@ -171,6 +173,31 @@ class TestPipelineDefaultsValidation:
                 enable_deep_learning=False,
                 weights="checkpoints/dummy.pth",
             )
+
+    def test_enable_yolo_forces_vector_and_excel_outputs(self):
+        """YOLO acilinca ilgili yardimci ciktilar otomatik acilmali."""
+        config = PipelineDefaults(
+            enable_yolo=True,
+            vectorize=False,
+            export_candidate_excel=False,
+        )
+
+        messages = apply_yolo_output_defaults(config)
+
+        assert config.vectorize is True
+        assert config.export_candidate_excel is True
+        assert len(messages) == 2
+
+    def test_resolve_yolo_weights_prefers_workspace_assets(self, tmp_path: Path, monkeypatch):
+        """Kisa YOLO agirlik adi varsa workspace/assets altindaki yerel dosya tercih edilmeli."""
+        monkeypatch.chdir(tmp_path)
+        local_weight = tmp_path / "workspace" / "assets" / "yolo11s-seg.pt"
+        local_weight.parent.mkdir(parents=True)
+        local_weight.write_bytes(b"dummy-weight")
+
+        resolved = _resolve_yolo_weights_path("yolo11s-seg.pt")
+
+        assert resolved == str(local_weight.resolve())
 
 
 # ============================================================================

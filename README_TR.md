@@ -1811,11 +1811,12 @@ python training.py \
 
 **KayÄ±p Fonksiyonu:**
 
-| KayÄ±p | Ne Zaman KullanÄ±lÄ±r |
-|-------|---------------------|
-| `bce` | **`training.py` CONFIG varsayÄ±lanÄ±**; `tile_classification` iÃ§in `focal` ile birlikte uygun seÃ§enekler |
-| `focal` | Karo etiketlerinde gÃ¼Ã§lÃ¼ sÄ±nÄ±f dengesizliÄŸi |
-| `combined` / `dice` | Ã–ncelikle **segmentation** (piksel maskesi) gÃ¶revi iÃ§in |
+| KayÄ±p | Ne Yapar | Ne Zaman KullanÄ±lÄ±r |
+|-------|----------|----------------------|
+| `bce` | Her pikseli / tile etiketini temel bir binary karar gibi optimize eder; en stabil seÃ§enektir | **BaÅŸlangÄ±Ã§ iÃ§in Ã¶nerilen** seÃ§enek. `tile_classification` iÃ§in en gÃ¼venli varsayÄ±lan. `balance-mode` ve `pos_weight` ile birlikte Ã§alÄ±ÅŸÄ±r |
+| `focal` | Kolay negatiflerin etkisini azaltÄ±r, modeli zor Ã¶rneklere daha Ã§ok odaklar | Pozitiflerin Ã§ok az olduÄŸu, modelin hep negatif tahmin etmeye kaydÄ±ÄŸÄ± kuvvetli sÄ±nÄ±f dengesizliÄŸinde |
+| `dice` | Tahmin ile maskenin Ã§akÄ±ÅŸmasÄ±nÄ± (overlap) doÄŸrudan iyileÅŸtirmeye Ã§alÄ±ÅŸÄ±r | Daha Ã§ok **segmentation** iÃ§in. KÃ¼Ã§Ã¼k veya seyrek pozitif maskelerde yararlÄ± olabilir |
+| `combined` | `BCE + Dice`; hem stabil optimizasyon hem de iyi overlap dengesi verir | **Segmentation** iÃ§in pratik genel tercih. BCE tarafÄ± sayesinde daha stabil, Dice tarafÄ± sayesinde maske kalitesi daha iyi olabilir |
 
 #### EÄŸitim Ã‡Ä±ktÄ±sÄ±
 

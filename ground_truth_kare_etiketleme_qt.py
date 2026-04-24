@@ -181,6 +181,11 @@ CONFIG: dict[str, object] = {
     # "selected_regions": secili alanlari merkez alip pozitifleri uretir, negatifleri ayrica ornekler.
     # "full_grid": tum rasteri kayan pencere gibi tarar.
     "dataset_default_sampling_mode": "selected_regions",
+    # dataset_default_feature_mode:
+    # Export edilen tile tensorunun semasi.
+    # "topo5" -> R,G,B,SVF,SLRM
+    # "rgb3"  -> R,G,B
+    "dataset_default_feature_mode": "topo5",
     
     # dataset_default_positive_ratio:
     # Bir tile'in Positive etiket alabilmesi icin maskeyle ortusmesi gereken minimum oran.
@@ -240,8 +245,10 @@ CONFIG: dict[str, object] = {
     "default_preview_bands_raw": "1,2,3",
     # default_model_bands_raw:
     # Tile export ve model tarafinda beklenen bant sirasi.
-    # Format: R,G,B,DSM,DTM. Ozellikle cok bantli rasterlerde yanlis siralama model kalitesini direkt bozar.
+    # topo5 icin format: R,G,B,DSM,DTM
+    # rgb3 icin format: R,G,B
     "default_model_bands_raw": "1,2,3,4,5",
+    "default_model_bands_rgb_raw": "1,2,3",
     # default_positive_value:
     # Maske rasterine secili alan yazilirken kullanilan piksel degeri.
     # Genelde 1 yeterlidir; baska sistemlerle uyum gerekiyorsa degistirilebilir.
@@ -294,6 +301,7 @@ DATASET_EXPORT_SCRIPT = str(CONFIG["dataset_export_script"])
 DATASET_DEFAULT_TILE_SIZE = int(CONFIG["dataset_default_tile_size"])
 DATASET_DEFAULT_OVERLAP = int(CONFIG["dataset_default_overlap"])
 DATASET_DEFAULT_SAMPLING_MODE = str(CONFIG["dataset_default_sampling_mode"])
+DATASET_DEFAULT_FEATURE_MODE = str(CONFIG["dataset_default_feature_mode"])
 DATASET_DEFAULT_POSITIVE_RATIO = float(CONFIG["dataset_default_positive_ratio"])
 DATASET_DEFAULT_VALID_RATIO = float(CONFIG["dataset_default_valid_ratio"])
 DATASET_DEFAULT_TRAIN_NEG_KEEP = float(CONFIG["dataset_default_train_negative_keep"])
@@ -308,6 +316,7 @@ DEFAULT_WINDOW_HEIGHT = int(CONFIG["default_window_height"])
 DEFAULT_PREVIEW_MAX_SIZE = int(CONFIG["default_preview_max_size"])
 DEFAULT_PREVIEW_BANDS_RAW = str(CONFIG["default_preview_bands_raw"])
 DEFAULT_MODEL_BANDS_RAW = str(CONFIG["default_model_bands_raw"])
+DEFAULT_MODEL_BANDS_RGB_RAW = str(CONFIG["default_model_bands_rgb_raw"])
 DEFAULT_POSITIVE_VALUE = int(CONFIG["default_positive_value"])
 DEFAULT_NEGATIVE_VALUE = int(CONFIG["default_negative_value"])
 DEFAULT_SQUARE_MODE = bool(CONFIG["default_square_mode"])
@@ -520,6 +529,21 @@ def sanitize_name(value: str) -> str:
     safe = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in value)
     safe = safe.strip("_")
     return safe or "source"
+
+
+def normalize_feature_mode(raw: object) -> str:
+    value = str(raw).strip().lower()
+    if value not in {"rgb3", "topo5"}:
+        raise ValueError(f"Desteklenmeyen feature_mode: {raw!r}")
+    return value
+
+
+def default_model_bands_for_feature_mode(feature_mode: object) -> str:
+    return (
+        DEFAULT_MODEL_BANDS_RGB_RAW
+        if normalize_feature_mode(feature_mode) == "rgb3"
+        else DEFAULT_MODEL_BANDS_RAW
+    )
 
 
 def parse_int_csv(raw: str, expected_len: Optional[int] = None) -> tuple[int, ...]:
@@ -1456,6 +1480,7 @@ class TileDatasetExportDialog(QDialog):
         self,
         *,
         default_output_dir: Path,
+        default_feature_mode: str,
         default_bands_raw: str,
         parent=None,
     ):
@@ -1463,6 +1488,8 @@ class TileDatasetExportDialog(QDialog):
         self.setWindowTitle("Tile Dataset Export")
         self.setMinimumWidth(520)
         self.setStyleSheet(APP_STYLE)
+        self._auto_output_dir = Path(default_output_dir)
+        self._output_dir_manually_changed = False
 
         layout = QVBoxLayout(self)
 
@@ -1481,15 +1508,25 @@ class TileDatasetExportDialog(QDialog):
         output_row.setSpacing(6)
         self.edit_output_dir = QLineEdit(str(default_output_dir))
         self.edit_output_dir.setPlaceholderText("Dataset cikti klasoru")
+        self.edit_output_dir.textEdited.connect(self._mark_output_dir_manual)
         output_row.addWidget(self.edit_output_dir, 1)
         self.btn_browse_output = QPushButton("Sec...")
         self.btn_browse_output.clicked.connect(self._choose_output_dir)
         output_row.addWidget(self.btn_browse_output)
         form.addRow("Cikti klasoru:", output_wrap)
 
+        self.combo_feature_mode = QComboBox(self)
+        self.combo_feature_mode.addItem("topo5 - RGB + SVF + SLRM", "topo5")
+        self.combo_feature_mode.addItem("rgb3 - sadece RGB", "rgb3")
+        default_feature_index = self.combo_feature_mode.findData(
+            normalize_feature_mode(default_feature_mode)
+        )
+        self.combo_feature_mode.setCurrentIndex(max(0, default_feature_index))
+        form.addRow("Feature modu:", self.combo_feature_mode)
+
         self.edit_model_bands = QLineEdit(default_bands_raw)
         self.edit_model_bands.setPlaceholderText(DEFAULT_MODEL_BANDS_RAW)
-        self.edit_model_bands.setToolTip("Model bantlari: R,G,B,DSM,DTM")
+        self.edit_model_bands.setToolTip("topo5: R,G,B,DSM,DTM | rgb3: R,G,B")
         form.addRow("Model bantlari:", self.edit_model_bands)
 
         self.spin_tile_size = QSpinBox(self)
@@ -1587,6 +1624,7 @@ class TileDatasetExportDialog(QDialog):
             "Onerilen baslangic: tile=256, overlap=128, pozitif esigi=0.02.\n"
             "Not: 0.02 esigi, tile'in sadece %2'si secili olsa bile Positive yazabilir; "
             "buyuk tile boyutlarinda secim tile'in kenarinda kalmis gibi gorunebilir.\n"
+            "topo5 mevcut modelle uyumludur; rgb3 sadece RGB tile dataset uretir.\n"
             "Derivative cache varsayilan olarak <girdi_raster_klasoru>/cache altina yazilir.\n"
             "Hiz onemliyse NPY + auto cache + orta seviye worker sayisi iyi baslangictir."
         )
@@ -1606,19 +1644,25 @@ class TileDatasetExportDialog(QDialog):
         layout.addWidget(self._btn_box)
 
         self.edit_output_dir.textChanged.connect(self._sync_validation)
+        self.combo_feature_mode.currentIndexChanged.connect(self._sync_feature_mode_ui)
         self.edit_model_bands.textChanged.connect(self._sync_validation)
         self.spin_overlap.valueChanged.connect(self._sync_validation)
         self.spin_tile_size.valueChanged.connect(self._sync_validation)
         self.combo_sampling_mode.currentIndexChanged.connect(self._sync_mode_ui)
         self._sync_overlap_range()
         self._sync_mode_ui()
+        self._sync_feature_mode_ui()
         self._sync_validation()
 
     def _choose_output_dir(self) -> None:
         current = self.edit_output_dir.text().strip() or str(Path.cwd())
         chosen = QFileDialog.getExistingDirectory(self, "Cikti klasorunu sec", current)
         if chosen:
+            self._output_dir_manually_changed = True
             self.edit_output_dir.setText(chosen)
+
+    def _mark_output_dir_manual(self, _text: str) -> None:
+        self._output_dir_manually_changed = True
 
     def _choose_derivative_cache_dir(self) -> None:
         current = self.edit_derivative_cache_dir.text().strip() or str(Path.cwd())
@@ -1639,11 +1683,45 @@ class TileDatasetExportDialog(QDialog):
         self.spin_negative_to_positive.setEnabled(is_selected_regions)
         self.spin_train_negative_keep.setEnabled(not is_selected_regions)
 
+    def _sync_feature_mode_ui(self) -> None:
+        feature_mode = normalize_feature_mode(self.combo_feature_mode.currentData())
+        expected_bands = 3 if feature_mode == "rgb3" else 5
+        placeholder = default_model_bands_for_feature_mode(feature_mode)
+        self.edit_model_bands.setPlaceholderText(placeholder)
+        if not self.edit_model_bands.text().strip():
+            self.edit_model_bands.setText(placeholder)
+        current_bands = self.edit_model_bands.text().strip()
+        try:
+            parse_int_csv(current_bands, expected_len=expected_bands)
+        except Exception:
+            self.edit_model_bands.setText(placeholder)
+        uses_derivatives = feature_mode == "topo5"
+        self.combo_derivative_cache_mode.setEnabled(uses_derivatives)
+        self.edit_derivative_cache_dir.setEnabled(uses_derivatives)
+        self.btn_browse_derivative_cache_dir.setEnabled(uses_derivatives)
+        if not uses_derivatives:
+            idx = self.combo_derivative_cache_mode.findData("none")
+            if idx >= 0:
+                self.combo_derivative_cache_mode.setCurrentIndex(idx)
+        if not self._output_dir_manually_changed:
+            auto_output = self._auto_output_dir
+            if auto_output.name:
+                stem = auto_output.name
+                suffixes = ("_rgb3", "_topo5")
+                for suffix in suffixes:
+                    if stem.endswith(suffix):
+                        stem = stem[: -len(suffix)]
+                        break
+                auto_output = auto_output.with_name(f"{stem}_{feature_mode}")
+            self.edit_output_dir.setText(str(auto_output))
+
     def _sync_validation(self) -> None:
         output_ok = bool(self.edit_output_dir.text().strip())
         overlap_ok = int(self.spin_overlap.value()) < int(self.spin_tile_size.value())
+        feature_mode = normalize_feature_mode(self.combo_feature_mode.currentData())
+        expected_len = 3 if feature_mode == "rgb3" else 5
         try:
-            bands = parse_int_csv(self.edit_model_bands.text().strip(), expected_len=5)
+            bands = parse_int_csv(self.edit_model_bands.text().strip(), expected_len=expected_len)
             bands_ok = all(int(v) > 0 for v in bands)
         except Exception:
             bands_ok = False
@@ -1653,7 +1731,10 @@ class TileDatasetExportDialog(QDialog):
         if not output_ok:
             self._validation.setText("Bir cikti klasoru belirtin.")
         elif not bands_ok:
-            self._validation.setText("Model bantlari 5 tamsayi olmali: R,G,B,DSM,DTM")
+            if feature_mode == "rgb3":
+                self._validation.setText("RGB3 icin model bantlari 3 tamsayi olmali: R,G,B")
+            else:
+                self._validation.setText("TOPO5 icin model bantlari 5 tamsayi olmali: R,G,B,DSM,DTM")
         elif not overlap_ok:
             self._validation.setText("Overlap, tile boyutundan kucuk olmali.")
         else:
@@ -1663,6 +1744,7 @@ class TileDatasetExportDialog(QDialog):
         output_dir = Path(self.edit_output_dir.text().strip()).expanduser().resolve()
         return {
             "output_dir": output_dir,
+            "feature_mode": normalize_feature_mode(self.combo_feature_mode.currentData()),
             "bands_raw": self.edit_model_bands.text().strip(),
             "tile_size": int(self.spin_tile_size.value()),
             "overlap": int(self.spin_overlap.value()),
@@ -1695,8 +1777,9 @@ class MainWindow(QMainWindow):
         self.square_mode = bool(square_mode)
         self.preview_max_size = int(preview_max_size)
         self.bands_raw = bands_raw
-        self.model_bands_raw = DEFAULT_MODEL_BANDS_RAW
-        self._shown_dataset_input_warnings: set[tuple[str, str]] = set()
+        self.model_feature_mode = DATASET_DEFAULT_FEATURE_MODE
+        self.model_bands_raw = default_model_bands_for_feature_mode(self.model_feature_mode)
+        self._shown_dataset_input_warnings: set[tuple[str, str, str]] = set()
         self.positive_value = int(positive_value)
         self.negative_value = int(negative_value)
 
@@ -2796,11 +2879,16 @@ class MainWindow(QMainWindow):
             return summary
         return f"{summary} - {message}"
 
-    def _default_dataset_output_dir(self) -> Path:
+    def _default_dataset_output_dir(self, feature_mode: Optional[str] = None) -> Path:
+        feature_suffix = normalize_feature_mode(feature_mode or self.model_feature_mode)
         base_dir = Path(__file__).resolve().parent
         if self.s is None:
-            return base_dir / "workspace" / "training_data_classification"
-        return base_dir / "workspace" / f"training_data_classification_{sanitize_name(self.s.cfg.input_path.stem)}"
+            return base_dir / "workspace" / f"training_data_classification_{feature_suffix}"
+        return (
+            base_dir
+            / "workspace"
+            / f"training_data_classification_{sanitize_name(self.s.cfg.input_path.stem)}_{feature_suffix}"
+        )
 
     def _ensure_mask_saved_for_export(self) -> bool:
         if self.s is None:
@@ -2818,10 +2906,13 @@ class MainWindow(QMainWindow):
     def _dataset_export_input_issue(
         self,
         input_path: Path,
+        feature_mode: str,
         bands_raw: str,
     ) -> Optional[str]:
+        normalized_mode = normalize_feature_mode(feature_mode)
+        expected_len = 3 if normalized_mode == "rgb3" else 5
         try:
-            band_idx = parse_int_csv(str(bands_raw), expected_len=5)
+            band_idx = parse_int_csv(str(bands_raw), expected_len=expected_len)
         except Exception as exc:
             return f"Model bantlari okunamadi: {exc}"
 
@@ -2829,30 +2920,39 @@ class MainWindow(QMainWindow):
             with rasterio.open(input_path) as src:
                 if src.count < max(band_idx):
                     return f"Raster {src.count} bant iceriyor ama model bantlari {band_idx} istiyor."
-                dsm_dtype = np.dtype(src.dtypes[int(band_idx[3]) - 1])
-                dtm_dtype = np.dtype(src.dtypes[int(band_idx[4]) - 1])
-                if (
-                    np.issubdtype(dsm_dtype, np.integer)
-                    and np.issubdtype(dtm_dtype, np.integer)
-                    and dsm_dtype.itemsize <= 1
-                    and dtm_dtype.itemsize <= 1
-                ):
-                    return (
-                        "Secilen DSM/DTM bantlari 8-bit gorunuyor "
-                        f"({dsm_dtype}/{dtm_dtype}).\n\n"
-                        "Bu durumda yukseklik verisi 0-255'e ezilmis olabilir; "
-                        "SVF, SLRM ve benzeri topografik bantlar guvenilir uretilemez.\n\n"
-                        "Float32 DSM/DTM iceren dogru 5-band GeoTIFF ile tekrar deneyin."
-                    )
+                if normalized_mode == "topo5":
+                    dsm_dtype = np.dtype(src.dtypes[int(band_idx[3]) - 1])
+                    dtm_dtype = np.dtype(src.dtypes[int(band_idx[4]) - 1])
+                    if (
+                        np.issubdtype(dsm_dtype, np.integer)
+                        and np.issubdtype(dtm_dtype, np.integer)
+                        and dsm_dtype.itemsize <= 1
+                        and dtm_dtype.itemsize <= 1
+                    ):
+                        return (
+                            "Secilen DSM/DTM bantlari 8-bit gorunuyor "
+                            f"({dsm_dtype}/{dtm_dtype}).\n\n"
+                            "Bu durumda yukseklik verisi 0-255'e ezilmis olabilir; "
+                            "SVF, SLRM ve benzeri topografik bantlar guvenilir uretilemez.\n\n"
+                            "Float32 DSM/DTM iceren dogru 5-band GeoTIFF ile tekrar deneyin."
+                        )
         except Exception as exc:
             return str(exc)
         return None
 
     def _warn_dataset_export_input_if_needed(self, input_path: Path) -> None:
-        issue = self._dataset_export_input_issue(input_path, self.model_bands_raw)
+        issue = self._dataset_export_input_issue(
+            input_path,
+            self.model_feature_mode,
+            self.model_bands_raw,
+        )
         if not issue:
             return
-        warning_key = (str(input_path.resolve()), str(self.model_bands_raw))
+        warning_key = (
+            str(input_path.resolve()),
+            str(self.model_feature_mode),
+            str(self.model_bands_raw),
+        )
         if warning_key in self._shown_dataset_input_warnings:
             return
         self._shown_dataset_input_warnings.add(warning_key)
@@ -2861,6 +2961,7 @@ class MainWindow(QMainWindow):
             APP_TITLE,
             "Bu raster acildi ancak mevcut model bant ayariyla tile dataset export sorunlu olabilir.\n\n"
             f"Girdi:\n{input_path}\n\n"
+            f"Feature modu:\n{self.model_feature_mode}\n\n"
             f"Model bantlari:\n{self.model_bands_raw}\n\n"
             f"Detay:\n{issue}",
         )
@@ -2868,7 +2969,11 @@ class MainWindow(QMainWindow):
     def _preflight_dataset_export(self, options: dict[str, object]) -> bool:
         if self.s is None:
             return False
-        issue = self._dataset_export_input_issue(self.s.cfg.input_path, str(options["bands_raw"]))
+        issue = self._dataset_export_input_issue(
+            self.s.cfg.input_path,
+            str(options["feature_mode"]),
+            str(options["bands_raw"]),
+        )
         if issue:
             QMessageBox.critical(self, APP_TITLE, f"Dataset export on kontrolu basarisiz:\n{issue}")
             return False
@@ -2894,6 +2999,8 @@ class MainWindow(QMainWindow):
             str(int(options["tile_size"])),
             "--overlap",
             str(int(options["overlap"])),
+            "--feature-mode",
+            str(options["feature_mode"]),
             "--bands",
             str(options["bands_raw"]),
             "--sampling-mode",
@@ -2929,13 +3036,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_TITLE, "Once bir girdi dosyasi acin.")
             return
         dlg = TileDatasetExportDialog(
-            default_output_dir=self._default_dataset_output_dir(),
+            default_output_dir=self._default_dataset_output_dir(self.model_feature_mode),
+            default_feature_mode=self.model_feature_mode,
             default_bands_raw=self.model_bands_raw,
             parent=self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         values = dlg.values()
+        self.model_feature_mode = str(values["feature_mode"])
         self.model_bands_raw = str(values["bands_raw"])
         self.export_tile_dataset(values)
 

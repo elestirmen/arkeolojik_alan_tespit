@@ -176,6 +176,7 @@ _CONFIG_PATH_FIELDS = {
 WORKSPACE_ROOT = Path("workspace")
 WORKSPACE_OUTPUTS_DIR = WORKSPACE_ROOT / "ciktilar"
 WORKSPACE_CHECKPOINTS_DIR = WORKSPACE_ROOT / "checkpoints"
+WORKSPACE_ASSETS_DIR = WORKSPACE_ROOT / "assets"
 
 
 def default_config_path() -> str:
@@ -197,6 +198,110 @@ def _normalize_config_path_value(raw: Any, base_dir: Path) -> Any:
     if not path.is_absolute():
         path = base_dir / path
     return str(path.resolve(strict=False))
+
+
+def _resolve_yolo_weights_path(raw: Optional[str]) -> Optional[str]:
+    """Prefer existing local YOLO weights before letting Ultralytics download assets."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+
+    requested = Path(text)
+    candidates: List[Path] = [requested]
+    if not requested.is_absolute():
+        candidates.append(Path.cwd() / requested)
+
+    weight_name = requested.name
+    if weight_name:
+        candidates.extend(
+            [
+                WORKSPACE_ASSETS_DIR / weight_name,
+                WORKSPACE_CHECKPOINTS_DIR / weight_name,
+                WORKSPACE_ROOT / "models" / weight_name,
+                Path("models") / weight_name,
+            ]
+        )
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.exists():
+            return str(resolved)
+
+    return text
+
+
+def _normalize_yolo_name_map(raw_names: Any) -> Dict[int, str]:
+    """Normalize Ultralytics class-name containers into an int->name mapping."""
+    normalized: Dict[int, str] = {}
+    if isinstance(raw_names, dict):
+        items = raw_names.items()
+    elif isinstance(raw_names, (list, tuple)):
+        items = enumerate(raw_names)
+    else:
+        return normalized
+
+    for raw_id, raw_name in items:
+        try:
+            class_id = int(raw_id)
+        except Exception:
+            continue
+        class_name = str(raw_name).strip()
+        if not class_name:
+            continue
+        normalized[class_id] = class_name
+    return normalized
+
+
+def _resolve_yolo_class_filter(raw: Optional[str], raw_names: Any) -> Optional[List[int]]:
+    """Resolve CSV class names/ids into the Ultralytics `classes=` id list."""
+    text = str(raw or "").strip()
+    if not text or text.lower() == "all":
+        return None
+
+    name_map = _normalize_yolo_name_map(raw_names)
+    if not name_map:
+        raise ValueError("YOLO class filter could not be resolved because model class names are unavailable.")
+
+    name_to_id = {name.lower(): class_id for class_id, name in name_map.items()}
+    resolved_ids: List[int] = []
+    seen_ids: set[int] = set()
+    invalid_tokens: List[str] = []
+
+    for token in [part.strip() for part in text.split(",") if part.strip()]:
+        class_id: Optional[int] = None
+        if token.isdigit():
+            numeric_id = int(token)
+            if numeric_id in name_map:
+                class_id = numeric_id
+        else:
+            class_id = name_to_id.get(token.lower())
+
+        if class_id is None:
+            invalid_tokens.append(token)
+            continue
+        if class_id in seen_ids:
+            continue
+        seen_ids.add(class_id)
+        resolved_ids.append(class_id)
+
+    if invalid_tokens:
+        sample_names = ", ".join(
+            f"{class_id}:{name}" for class_id, name in sorted(name_map.items())[:12]
+        )
+        raise ValueError(
+            "Unknown YOLO class filter value(s): "
+            f"{', '.join(invalid_tokens)}. Available examples: {sample_names}"
+        )
+    if not resolved_ids:
+        raise ValueError("YOLO class filter did not match any class ids.")
+    return resolved_ids
 
 
 def _output_base_path(path: Path) -> Path:
@@ -554,7 +659,7 @@ class PipelineDefaults:
     )
     bands: str = field(
         default="1,2,3,4,5",
-        metadata={"help": "R,G,B,DSM,DTM bantlarının 1-tabanlı sırası; DSM eksikse 0 olabilir, DTM zorunludur (örn: 1,2,3,4,5)"},
+        metadata={"help": "Bant sırası. RGB-only için 3 giriş (örn: 1,2,3); topo5 için 5 giriş (R,G,B,DSM,DTM; örn: 1,2,3,4,5). DSM 0 olabilir."},
     )
     
     # ===== YÖNTEM SEÇİMİ (HANGİ YÖNTEMLERİN ÇALIŞACAĞINI BURADAN KONTROL EDİN) =====
@@ -1147,7 +1252,28 @@ def build_config_from_args(
             base_dir = cwd
         values[name] = _normalize_config_path_value(values[name], base_dir)
     
-    return PipelineDefaults(**values)
+    config = PipelineDefaults(**values)
+    apply_yolo_output_defaults(config)
+    return config
+
+
+def apply_yolo_output_defaults(config: PipelineDefaults) -> List[str]:
+    """When YOLO is enabled, keep its vector and Excel side outputs enabled."""
+    messages: List[str] = []
+    if not config.enable_yolo:
+        return messages
+
+    if not config.vectorize:
+        config.vectorize = True
+        messages.append(
+            "enable_yolo aktif: YOLO GeoPackage ciktilari icin vectorize=true zorlandi."
+        )
+    if not config.export_candidate_excel:
+        config.export_candidate_excel = True
+        messages.append(
+            "enable_yolo aktif: YOLO satirlari birlesik Excel'e eklensin diye export_candidate_excel=true zorlandi."
+        )
+    return messages
 
 
 
@@ -1367,33 +1493,151 @@ def robust_norm_fixed(arr: np.ndarray, lows: np.ndarray, highs: np.ndarray) -> n
     return out
 
 
-def stack_channels(rgb: np.ndarray, svf: np.ndarray, slrm: np.ndarray) -> np.ndarray:
-    """Build the canonical 5-channel model tensor [R, G, B, SVF, SLRM]."""
-    rgb_arr = np.asarray(rgb, dtype=np.float32)
-    svf_arr = np.asarray(svf, dtype=np.float32)
-    slrm_arr = np.asarray(slrm, dtype=np.float32)
+def _raw_channel_names(value: Any) -> Optional[Tuple[str, ...]]:
+    if isinstance(value, (list, tuple)) and value:
+        names = tuple(str(item).strip() for item in value if str(item).strip())
+        return names or None
+    return None
 
+
+def _extract_channel_names(source: Optional[Dict[str, Any]]) -> Optional[Tuple[str, ...]]:
+    if not source:
+        return None
+    return _raw_channel_names(source.get("channel_names"))
+
+
+def _extract_in_channels(source: Optional[Dict[str, Any]], *keys: str) -> Optional[int]:
+    if not source:
+        return None
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                continue
+            try:
+                return int(text)
+            except ValueError:
+                continue
+    return None
+
+
+def normalize_model_channel_names(channel_names: Sequence[str]) -> Tuple[str, ...]:
+    names = tuple(str(name).strip().upper() for name in channel_names if str(name).strip())
+    if not names:
+        raise ValueError("channel_names bos olamaz.")
+    if len(names) < 3:
+        raise ValueError("channel_names en az RGB kanallarini icermelidir.")
+    try:
+        expected = expected_channel_names(len(names))
+    except ValueError as exc:
+        raise ValueError(f"desteklenmeyen kanal sayisi: {len(names)}") from exc
+    if names != expected:
+        raise ValueError(f"beklenen kanal semasi {expected}, gelen {names}")
+    return names
+
+
+def band_indexes_support_dsm(band_idx: Sequence[int]) -> bool:
+    return bool(len(band_idx) >= 4 and int(band_idx[3]) > 0)
+
+
+def band_indexes_support_topography(band_idx: Sequence[int]) -> bool:
+    return bool(len(band_idx) >= 5 and int(band_idx[4]) > 0)
+
+
+def infer_channel_names_from_band_indexes(band_idx: Sequence[int]) -> Tuple[str, ...]:
+    return expected_channel_names(5 if band_indexes_support_topography(band_idx) else 3)
+
+
+def resolve_model_channel_names(
+    *,
+    band_idx: Optional[Sequence[int]] = None,
+    checkpoint_hints: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, ...]:
+    for source_name, source in (
+        ("checkpoint metadata", checkpoint_hints),
+        ("training metadata", metadata),
+    ):
+        raw_names = _extract_channel_names(source)
+        if raw_names is None:
+            continue
+        try:
+            return normalize_model_channel_names(raw_names)
+        except ValueError as exc:
+            raise ValueError(f"{source_name} channel_names gecersiz: {exc}") from exc
+
+    for source_name, source, keys in (
+        ("checkpoint metadata", checkpoint_hints, ("in_channels", "num_channels")),
+        ("training metadata", metadata, ("in_channels", "num_channels")),
+    ):
+        in_channels = _extract_in_channels(source, *keys)
+        if in_channels is None:
+            continue
+        try:
+            return normalize_model_channel_names(expected_channel_names(in_channels))
+        except ValueError as exc:
+            raise ValueError(
+                f"{source_name} in_channels={in_channels} desteklenmiyor: {exc}"
+            ) from exc
+
+    if band_idx is not None:
+        return infer_channel_names_from_band_indexes(band_idx)
+    return tuple(MODEL_CHANNEL_NAMES)
+
+
+def channel_names_require_topography(channel_names: Sequence[str]) -> bool:
+    return len(normalize_model_channel_names(channel_names)) > 3
+
+
+def assemble_model_input(
+    rgb: np.ndarray,
+    *,
+    channel_names: Sequence[str],
+    svf: Optional[np.ndarray] = None,
+    slrm: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    resolved_names = normalize_model_channel_names(channel_names)
+    rgb_arr = np.asarray(rgb, dtype=np.float32)
     if rgb_arr.ndim != 3 or rgb_arr.shape[0] != 3:
-        raise ValueError("stack_channels expects rgb with shape (3, H, W).")
-    if svf_arr.ndim != 2 or slrm_arr.ndim != 2:
-        raise ValueError("stack_channels expects svf and slrm with shape (H, W).")
+        raise ValueError("assemble_model_input expects rgb with shape (3, H, W).")
 
     spatial_shape = rgb_arr.shape[1:]
-    if svf_arr.shape != spatial_shape or slrm_arr.shape != spatial_shape:
-        raise ValueError(
-            "stack_channels expects RGB, SVF, and SLRM to share the same spatial shape."
-        )
+    channel_map: Dict[str, np.ndarray] = {
+        "R": rgb_arr[0],
+        "G": rgb_arr[1],
+        "B": rgb_arr[2],
+    }
+    for name, arr in (("SVF", svf), ("SLRM", slrm)):
+        if name not in resolved_names:
+            continue
+        if arr is None:
+            raise ValueError(f"{name} channel requested but no array was provided.")
+        arr_f = np.asarray(arr, dtype=np.float32)
+        if arr_f.ndim != 2:
+            raise ValueError(f"{name} channel must have shape (H, W).")
+        if arr_f.shape != spatial_shape:
+            raise ValueError(
+                f"{name} shape {arr_f.shape} does not match RGB spatial shape {spatial_shape}."
+            )
+        channel_map[name] = arr_f
 
-    stacked = np.concatenate(
-        (rgb_arr, svf_arr[np.newaxis, ...], slrm_arr[np.newaxis, ...]),
-        axis=0,
-    )
-    expected_channels = len(MODEL_CHANNEL_NAMES)
-    if stacked.shape[0] != expected_channels:
-        raise ValueError(
-            f"stack_channels produced {stacked.shape[0]} channels; expected {expected_channels}."
-        )
+    stacked = np.stack([channel_map[name] for name in resolved_names], axis=0)
     return stacked.astype(np.float32, copy=False)
+
+
+def stack_channels(rgb: np.ndarray, svf: np.ndarray, slrm: np.ndarray) -> np.ndarray:
+    """Build the canonical 5-channel model tensor [R, G, B, SVF, SLRM]."""
+    return assemble_model_input(
+        rgb,
+        channel_names=MODEL_CHANNEL_NAMES,
+        svf=svf,
+        slrm=slrm,
+    )
 
 
 def fill_nodata(
@@ -1743,8 +1987,22 @@ def _score_morph(dtm: np.ndarray, radii: Optional[Sequence[int]] = None) -> np.n
 # ==============================================================================
 
 def get_num_channels(*_args, **_kwargs) -> int:
-    """Return the fixed 5-band channel count, accepting legacy unused args."""
-    return 5
+    """Return the resolved model channel count, keeping legacy unused args compatible."""
+    channel_names = _kwargs.get("channel_names")
+    band_idx = _kwargs.get("band_idx")
+    checkpoint_hints = _kwargs.get("checkpoint_hints")
+    metadata = _kwargs.get("metadata")
+    if any(value is not None for value in (channel_names, band_idx, checkpoint_hints, metadata)):
+        if channel_names is not None:
+            return len(normalize_model_channel_names(channel_names))
+        return len(
+            resolve_model_channel_names(
+                band_idx=band_idx,
+                checkpoint_hints=checkpoint_hints,
+                metadata=metadata,
+            )
+        )
+    return len(MODEL_CHANNEL_NAMES)
 
 
 class TileClassifier(torch.nn.Module):
@@ -2314,15 +2572,15 @@ def apply_trained_only_metadata_locks(
         )
 
     locked_sources = {
-        "tile": metadata.get("tile_size"),
-        "overlap": metadata.get("overlap"),
-        "bands": metadata.get("bands"),
+        "tile": ("tile_size", metadata.get("tile_size")),
+        "overlap": ("overlap", metadata.get("overlap")),
+        "bands": ("bands", metadata.get("bands")),
     }
     for field_name in LOCKED_TRAINED_ONLY_FIELDS:
-        source_value = locked_sources[field_name]
+        metadata_key, source_value = locked_sources[field_name]
         if source_value in (None, ""):
             raise ValueError(
-                f"trained_model_only icin training metadata '{field_name}' bilgisini icermelidir."
+                f"trained_model_only icin training metadata '{metadata_key}' bilgisini icermelidir."
             )
         current_value = getattr(config, field_name)
         if field_name in cli_overrides:
@@ -2949,16 +3207,30 @@ def infer_tiled(
         raise ValueError(f"Unsupported task_type: {task_type}")
     model.eval()
     model.to(device)
+    resolved_channel_names = (
+        normalize_model_channel_names(channel_names)
+        if channel_names is not None
+        else infer_channel_names_from_band_indexes(band_idx)
+    )
+    requires_topography = channel_names_require_topography(resolved_channel_names)
+    has_dsm = band_indexes_support_dsm(band_idx)
+    has_topography = band_indexes_support_topography(band_idx)
 
     rgb_only_log_emitted = False
 
     def log_rgb_only_once() -> None:
         nonlocal rgb_only_log_emitted
-        if rgb_only and not rgb_only_log_emitted:
+        if rgb_only and requires_topography and not rgb_only_log_emitted:
             LOGGER.info("RGB-only modu aktif: türev kanalları sıfırla dolduruldu; efektif girdi sadece RGB.")
             rgb_only_log_emitted = True
 
-    if mask_talls is not None and band_idx[3] <= 0:
+    if requires_topography and not rgb_only and not has_topography:
+        raise ValueError(
+            f"Model kanal semasi {resolved_channel_names} topografya gerektiriyor "
+            "ama --bands yalnizca RGB girisi sagliyor."
+        )
+
+    if mask_talls is not None and not has_dsm:
         LOGGER.warning("Yüksek obje maskeleme istendi ama DSM bandı eksik; devre dışı bırakılıyor.")
         mask_talls = None
 
@@ -2997,6 +3269,7 @@ def infer_tiled(
             precomputed_deriv is None
             and derivative_cache_tif is not None
             and derivative_cache_meta is not None
+            and requires_topography
             and not rgb_only
         ):
             info = load_derivative_raster_cache_info(
@@ -3099,15 +3372,24 @@ def infer_tiled(
                     col_end = col_start + int(window.width)
 
                     rgb_s = precomputed_deriv.rgb[:, row_start:row_end, col_start:col_end].copy()
-                    svf_s = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
-                    slrm_s = precomputed_deriv.slrm[row_start:row_end, col_start:col_end].copy()
-                    if rgb_only:
-                        log_rgb_only_once()
-                        Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
-                        Z = np.zeros((Hs, Ws), dtype=np.float32)
-                        svf_s = Z
-                        slrm_s = Z
-                    stack_s = stack_channels(rgb_s, svf_s, slrm_s)
+                    svf_s: Optional[np.ndarray] = None
+                    slrm_s: Optional[np.ndarray] = None
+                    if requires_topography:
+                        if rgb_only:
+                            log_rgb_only_once()
+                            Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
+                            Z = np.zeros((Hs, Ws), dtype=np.float32)
+                            svf_s = Z
+                            slrm_s = Z
+                        else:
+                            svf_s = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
+                            slrm_s = precomputed_deriv.slrm[row_start:row_end, col_start:col_end].copy()
+                    stack_s = assemble_model_input(
+                        rgb_s,
+                        channel_names=resolved_channel_names,
+                        svf=svf_s,
+                        slrm=slrm_s,
+                    )
                 elif deriv_ds is not None and deriv_band_map is not None:
                     def read_band(idx: int) -> Optional[np.ndarray]:
                         if idx <= 0:
@@ -3116,21 +3398,28 @@ def infer_tiled(
                         return np.ma.filled(data.astype(np.float32), np.nan)
 
                     rgb_s = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
+                    svf_s = None
+                    slrm_s = None
+                    if requires_topography:
+                        if rgb_only:
+                            log_rgb_only_once()
+                            Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
+                            Z = np.zeros((Hs, Ws), dtype=np.float32)
+                            svf_s = Z
+                            slrm_s = Z
+                        else:
+                            band_names: List[str] = ["svf", "slrm"]
+                            indexes = [int(deriv_band_map[name]) for name in band_names]
+                            deriv_stack = deriv_ds.read(indexes=indexes, window=window, boundless=True, masked=True)
+                            deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
+                            svf_s, slrm_s = deriv_stack[0], deriv_stack[1]
 
-                    if rgb_only:
-                        log_rgb_only_once()
-                        Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
-                        Z = np.zeros((Hs, Ws), dtype=np.float32)
-                        svf_s = Z
-                        slrm_s = Z
-                    else:
-                        band_names: List[str] = ["svf", "slrm"]
-                        indexes = [int(deriv_band_map[name]) for name in band_names]
-                        deriv_stack = deriv_ds.read(indexes=indexes, window=window, boundless=True, masked=True)
-                        deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
-                        svf_s, slrm_s = deriv_stack[0], deriv_stack[1]
-
-                    stack_s = stack_channels(rgb_s, svf_s, slrm_s)
+                    stack_s = assemble_model_input(
+                        rgb_s,
+                        channel_names=resolved_channel_names,
+                        svf=svf_s,
+                        slrm=slrm_s,
+                    )
                 else:
                     def read_band(idx: int) -> Optional[np.ndarray]:
                         if idx <= 0:
@@ -3139,26 +3428,33 @@ def infer_tiled(
                         return np.ma.filled(data.astype(np.float32), np.nan)
 
                     rgb_s = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-                    dtm_s = read_band(band_idx[4])
-                    if dtm_s is None:
-                        break
-
-                    if rgb_only:
-                        log_rgb_only_once()
-                        Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
-                        Z = np.zeros((Hs, Ws), dtype=np.float32)
-                        svf_s = Z
-                        slrm_s = Z
-                    else:
-                        svf_s, slrm_s = compute_derivatives_with_rvt(
-                            dtm_s,
-                            pixel_size=pixel_size,
-                            radii=rvt_radii,
-                            gaussian_lrm_sigma=gaussian_lrm_sigma,
-                            show_progress=False,
-                            log_steps=False,
-                        )
-                    stack_s = stack_channels(rgb_s, svf_s, slrm_s)
+                    svf_s = None
+                    slrm_s = None
+                    if requires_topography:
+                        if rgb_only:
+                            log_rgb_only_once()
+                            Hs, Ws = rgb_s.shape[1], rgb_s.shape[2]
+                            Z = np.zeros((Hs, Ws), dtype=np.float32)
+                            svf_s = Z
+                            slrm_s = Z
+                        else:
+                            dtm_s = read_band(band_idx[4])
+                            if dtm_s is None:
+                                raise ValueError("DTM band gerekli; topografik kanal hesabi yapilamadi.")
+                            svf_s, slrm_s = compute_derivatives_with_rvt(
+                                dtm_s,
+                                pixel_size=pixel_size,
+                                radii=rvt_radii,
+                                gaussian_lrm_sigma=gaussian_lrm_sigma,
+                                show_progress=False,
+                                log_steps=False,
+                            )
+                    stack_s = assemble_model_input(
+                        rgb_s,
+                        channel_names=resolved_channel_names,
+                        svf=svf_s,
+                        slrm=slrm_s,
+                    )
 
                 Hs, Ws = stack_s.shape[1], stack_s.shape[2]
                 ch = min(TILE_SAMPLE_CROP_SIZE, Hs)
@@ -3206,6 +3502,8 @@ def infer_tiled(
             pad_w = max(0, tile - win_width)
             
             # Precomputed derivatives kullan (cache modunda)
+            dsm: Optional[np.ndarray] = None
+            dtm: Optional[np.ndarray] = None
             if precomputed_deriv is not None:
                 row_start = int(window.row_off)
                 col_start = int(window.col_off)
@@ -3213,22 +3511,25 @@ def infer_tiled(
                 col_end = col_start + win_width
                 
                 rgb = precomputed_deriv.rgb[:, row_start:row_end, col_start:col_end].copy()
-                svf = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
-                slrm = precomputed_deriv.slrm[row_start:row_end, col_start:col_end].copy()
+                svf: Optional[np.ndarray] = None
+                slrm: Optional[np.ndarray] = None
+                if requires_topography and not rgb_only:
+                    svf = precomputed_deriv.svf[row_start:row_end, col_start:col_end].copy()
+                    slrm = precomputed_deriv.slrm[row_start:row_end, col_start:col_end].copy()
                 
                 if pad_h or pad_w:
                     rgb = np.pad(rgb, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    svf = np.pad(svf, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    slrm = np.pad(slrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    if svf is not None:
+                        svf = np.pad(svf, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    if slrm is not None:
+                        slrm = np.pad(slrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
 
-                if rgb_only:
+                if requires_topography and rgb_only:
                     log_rgb_only_once()
                     Ht, Wt = rgb.shape[1], rgb.shape[2]
                     Z = np.zeros((Ht, Wt), dtype=np.float32)
                     svf = Z
                     slrm = Z
-
-                valid_mask = np.isfinite(svf)
             elif deriv_ds is not None and deriv_band_map is not None:
                 def read_band(idx: int) -> Optional[np.ndarray]:
                     if idx <= 0:
@@ -3237,20 +3538,28 @@ def infer_tiled(
                     return np.ma.filled(data.astype(np.float32), np.nan)
 
                 rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-
-                band_names: List[str] = ["svf", "slrm"]
-                indexes = [int(deriv_band_map[name]) for name in band_names]
-                deriv_stack = deriv_ds.read(indexes=indexes, window=window, boundless=True, masked=True)
-                deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
-
-                svf, slrm = deriv_stack[0], deriv_stack[1]
+                svf = None
+                slrm = None
+                if requires_topography and not rgb_only:
+                    band_names: List[str] = ["svf", "slrm"]
+                    indexes = [int(deriv_band_map[name]) for name in band_names]
+                    deriv_stack = deriv_ds.read(indexes=indexes, window=window, boundless=True, masked=True)
+                    deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
+                    svf, slrm = deriv_stack[0], deriv_stack[1]
 
                 if pad_h or pad_w:
                     rgb = np.pad(rgb, ((0, 0), (0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    svf = np.pad(svf, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
-                    slrm = np.pad(slrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    if svf is not None:
+                        svf = np.pad(svf, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
+                    if slrm is not None:
+                        slrm = np.pad(slrm, ((0, pad_h), (0, pad_w)), mode="constant", constant_values=np.nan)
 
-                valid_mask = np.isfinite(svf)
+                if requires_topography and rgb_only:
+                    log_rgb_only_once()
+                    Ht, Wt = rgb.shape[1], rgb.shape[2]
+                    Z = np.zeros((Ht, Wt), dtype=np.float32)
+                    svf = Z
+                    slrm = Z
             else:
                 # Normal mod - Her tile için RVT hesapla
                 def read_band(idx: int) -> Optional[np.ndarray]:
@@ -3260,10 +3569,14 @@ def infer_tiled(
                     return np.ma.filled(data.astype(np.float32), np.nan)
 
                 rgb = np.stack([read_band(band_idx[i]) for i in range(3)], axis=0)
-                dsm = read_band(band_idx[3])
-                dtm = read_band(band_idx[4])
-                if dtm is None:
-                    raise ValueError("DTM band is required (five-band input expected).")
+                svf = None
+                slrm = None
+                if has_dsm:
+                    dsm = read_band(band_idx[3])
+                if requires_topography or mask_talls is not None:
+                    dtm = read_band(band_idx[4]) if has_topography else None
+                    if requires_topography and not rgb_only and dtm is None:
+                        raise ValueError("DTM band gerekli; topografik kanal hesabi yapilamadi.")
 
                 if pad_h or pad_w:
                     rgb = np.pad(
@@ -3272,12 +3585,13 @@ def infer_tiled(
                         mode="constant",
                         constant_values=np.nan,
                     )
-                    dtm = np.pad(
-                        dtm,
-                        ((0, pad_h), (0, pad_w)),
-                        mode="constant",
-                        constant_values=np.nan,
-                    )
+                    if dtm is not None:
+                        dtm = np.pad(
+                            dtm,
+                            ((0, pad_h), (0, pad_w)),
+                            mode="constant",
+                            constant_values=np.nan,
+                        )
                     if dsm is not None:
                         dsm = np.pad(
                             dsm,
@@ -3286,15 +3600,13 @@ def infer_tiled(
                             constant_values=np.nan,
                         )
 
-                valid_mask = np.isfinite(dtm)
-
-                if rgb_only:
+                if requires_topography and rgb_only:
                     log_rgb_only_once()
                     Ht, Wt = rgb.shape[1], rgb.shape[2]
                     Z = np.zeros((Ht, Wt), dtype=np.float32)
                     svf = Z
                     slrm = Z
-                else:
+                elif requires_topography:
                     svf, slrm = compute_derivatives_with_rvt(
                         dtm,
                         pixel_size=pixel_size,
@@ -3304,7 +3616,13 @@ def infer_tiled(
                         log_steps=False,
                     )
 
-            stacked = stack_channels(rgb, svf, slrm)
+            stacked = assemble_model_input(
+                rgb,
+                channel_names=resolved_channel_names,
+                svf=svf,
+                slrm=slrm,
+            )
+            valid_mask = np.all(np.isfinite(stacked), axis=0)
             if global_norm and fixed_lows is not None and fixed_highs is not None:
                 normed = robust_norm_fixed(stacked, fixed_lows, fixed_highs)
             else:
@@ -3358,11 +3676,11 @@ def infer_tiled(
             weight_acc[row_slice, col_slice] += W * valid_tile.astype(np.float32)
             valid_global[row_slice, col_slice] |= valid_tile
 
-            if mask_talls is not None:
+            if mask_talls is not None and ndsm_max is not None:
                 if precomputed_deriv is None and deriv_ds is None:
                     ndsm_tile = compute_ndsm(dsm, dtm)
                 else:
-                    _dsm_mt = src.read(band_idx[3], window=window, boundless=True, masked=True) if band_idx[3] > 0 else None
+                    _dsm_mt = src.read(band_idx[3], window=window, boundless=True, masked=True) if has_dsm else None
                     _dtm_mt = src.read(band_idx[4], window=window, boundless=True, masked=True)
                     _dsm_f = np.ma.filled(_dsm_mt.astype(np.float32), np.nan) if _dsm_mt is not None else None
                     _dtm_f = np.ma.filled(_dtm_mt.astype(np.float32), np.nan)
@@ -3427,7 +3745,7 @@ def infer_tiled(
                 sample_count=band_importance_samples,
                 mode=band_importance_mode,
                 channel_names=_resolve_importance_channel_names(
-                    channel_names,
+                    resolved_channel_names,
                     int(band_importance_sum.shape[0]) if band_importance_sum is not None else 0,
                 ),
             )
@@ -3547,6 +3865,11 @@ def infer_yolo_tiled(
         yolo_weights = "yolo11n-seg.pt"
         LOGGER.info("YOLO ağırlık dosyası belirtilmedi, varsayılan kullanılıyor: %s", yolo_weights)
         LOGGER.info("Not: Daha güçlü model için yolo_weights='yolo11s-seg.pt' kullanabilirsiniz.")
+
+    resolved_yolo_weights = _resolve_yolo_weights_path(yolo_weights)
+    if resolved_yolo_weights and str(resolved_yolo_weights) != str(yolo_weights):
+        LOGGER.info("YOLO agirlik dosyasi yerelde bulundu: %s", resolved_yolo_weights)
+    yolo_weights = resolved_yolo_weights or yolo_weights
     
     LOGGER.info("YOLO modeli yükleniyor: %s", yolo_weights)
     
@@ -5979,16 +6302,16 @@ def vectorize_predictions(
 
 
 
-def parse_band_indexes(band_string: str) -> Tuple[int, int, int, int, int]:
-    """Parse CSV band specification to integer tuple."""
+def parse_band_indexes(band_string: str) -> Tuple[int, ...]:
+    """Parse CSV band specification to a 3-band RGB or 5-band RGB+DSM+DTM tuple."""
     parts = [int(val.strip()) for val in band_string.split(",")]
-    if len(parts) != 5:
-        raise argparse.ArgumentTypeError("--bands must specify exactly five entries.")
+    if len(parts) not in (3, 5):
+        raise argparse.ArgumentTypeError("--bands must specify either 3 or 5 entries.")
     if any(idx <= 0 for idx in parts[:3]):
         raise argparse.ArgumentTypeError("RGB band indices must be positive (1-based).")
-    if parts[4] <= 0:
+    if len(parts) == 5 and parts[4] <= 0:
         raise argparse.ArgumentTypeError("DTM band index must be provided (>=1).")
-    return tuple(parts)  # type: ignore[return-value]
+    return tuple(parts)
 
 
 def create_raster_metadata(
@@ -7890,7 +8213,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     set_random_seeds(config.seed)
 
     if config.rgb_only:
-        LOGGER.info("RGB-only mode active: derivative channels are zero-filled; effective input is RGB.")
+        LOGGER.info("RGB-only bayragi aktif.")
 
     input_path = Path(config.input)
     if not input_path.exists():
@@ -7901,9 +8224,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             parser.error("--trained-model-only requires --enable-deep-learning.")
         if not config.weights:
             parser.error("--trained-model-only requires --weights.")
-        if config.enable_yolo:
-            LOGGER.info("trained_model_only active: disabling YOLO branch.")
-            config.enable_yolo = False
         if config.zero_shot_imagenet:
             LOGGER.info("trained_model_only active: forcing zero_shot_imagenet=false.")
             config.zero_shot_imagenet = False
@@ -8075,6 +8395,26 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     dl_task = str(config.dl_task).strip().lower()
 
     bands = parse_band_indexes(config.bands)
+    has_dsm = band_indexes_support_dsm(bands)
+    has_topography = band_indexes_support_topography(bands)
+    try:
+        resolved_dl_channel_names = resolve_model_channel_names(
+            band_idx=bands,
+            checkpoint_hints=checkpoint_hints,
+            metadata=training_metadata,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    dl_requires_topography = channel_names_require_topography(resolved_dl_channel_names)
+    if config.enable_classic and not has_topography:
+        parser.error("Klasik yontemler DTM gerektirir; --bands RGB-only iken classic inference calismaz.")
+    if config.enable_deep_learning and dl_requires_topography and not config.rgb_only and not has_topography:
+        parser.error(
+            f"Etkin derin ogrenme modeli kanal semasi {resolved_dl_channel_names} topografya gerektiriyor "
+            "ama --bands yalnizca RGB sagliyor. RGB-trained checkpoint kullanin veya DTM ekleyin."
+        )
+    if config.enable_deep_learning and config.rgb_only and not dl_requires_topography:
+        LOGGER.info("RGB-only bayragi acik ama etkin model zaten RGB3; topografik kanallar kullanilmayacak.")
     warn_if_training_inference_mismatch(
         metadata=training_metadata,
         input_path=input_path,
@@ -8179,9 +8519,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.warning("cache_derivatives_mode geçersiz (%s); 'auto' kullanılacak.", cache_mode)
         cache_mode = "auto"
 
+    needs_derivative_features = bool(
+        config.enable_classic
+        or (config.enable_deep_learning and dl_requires_topography and not config.rgb_only)
+    )
     cache_precompute_ok = True
     cache_precompute_msg = ""
-    if (config.enable_deep_learning or config.enable_classic) and config.cache_derivatives and cache_mode in ("auto", "npz"):
+    if needs_derivative_features and config.cache_derivatives and cache_mode in ("auto", "npz"):
         cache_precompute_ok, cache_precompute_msg = full_raster_cache_precompute_ok(
             input_path,
             bands,
@@ -8192,9 +8536,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if not cache_precompute_ok and cache_precompute_msg:
             LOGGER.warning(cache_precompute_msg)
     else:
-        LOGGER.info(f"  NPZ cache kontrolü atlandı (cache_derivatives={config.cache_derivatives}, cache_mode={cache_mode})")
+        LOGGER.info(
+            "  NPZ cache kontrolü atlandı (cache_derivatives=%s, cache_mode=%s, needs_derivative_features=%s)",
+            config.cache_derivatives,
+            cache_mode,
+            needs_derivative_features,
+        )
 
-    if (config.enable_deep_learning or config.enable_classic) and config.cache_derivatives:
+    if needs_derivative_features and config.cache_derivatives:
         if cache_mode in ("auto", "npz") and cache_precompute_ok:
             # Full-raster NPZ cache (küçük/orta rasterlar için en hızlı okuma)
             LOGGER.info("=" * 70)
@@ -8223,7 +8572,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 tpi_radii=config.tpi_radii,
             )
             if precomputed_deriv:
-                num_ch = get_num_channels(config.enable_curvature, config.enable_tpi)
+                num_ch = len(resolved_dl_channel_names)
                 LOGGER.info(f"✓ Türevler hazır ({num_ch} kanal) - Her encoder çok daha hızlı çalışacak!")
             else:
                 LOGGER.warning("RVT türevleri hesaplanamadı, normal moda devam ediliyor")
@@ -8299,7 +8648,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 derivative_cache_meta = None
             else:
                 deriv_band_count = len(dict(raster_info.get("band_map", {})))
-                model_ch = get_num_channels(config.enable_curvature, config.enable_tpi)
+                model_ch = len(resolved_dl_channel_names)
                 LOGGER.info("✓ Raster-cache hazır (deriv=%d band, model=%d kanal): %s", deriv_band_count, model_ch, derivative_cache_tif)
 
     combined_candidate_rows: List[Dict[str, Any]] = []
@@ -8367,18 +8716,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 per_weights = single_weight_fallback_path
                 LOGGER.info("[%s] Using --weights fallback: %s", suffix, per_weights)
 
-            # Kanal sayısını hesapla (9, 10, 11 veya 12)
-            num_channels = get_num_channels(
-                enable_curvature=config.enable_curvature,
-                enable_tpi=config.enable_tpi
-            )
-            run_channel_names: Tuple[str, ...] = tuple(MODEL_CHANNEL_NAMES[:num_channels])
+            # Checkpoint/band metadata'dan etkin kanal şemasını çöz.
             per_hints: Dict[str, Any] = {}
             if per_weights is not None:
                 per_hints = get_checkpoint_model_hints(per_weights)
-                hinted_names = per_hints.get("channel_names")
-                if isinstance(hinted_names, list) and len(hinted_names) == num_channels:
-                    run_channel_names = tuple(str(v) for v in hinted_names)
+            try:
+                run_channel_names = resolve_model_channel_names(
+                    band_idx=bands,
+                    checkpoint_hints=per_hints if per_weights is not None else None,
+                )
+            except ValueError as exc:
+                parser.error(f"[{suffix}] {exc}")
+            num_channels = len(run_channel_names)
+            if channel_names_require_topography(run_channel_names) and not config.rgb_only and not has_topography:
+                parser.error(
+                    f"[{suffix}] Model kanal semasi {run_channel_names} topografya gerektiriyor "
+                    "ama mevcut --bands yalnizca RGB girisi sagliyor."
+                )
             per_use_fpn = resolve_tile_classifier_use_fpn(
                 config.use_fpn_classifier,
                 per_hints if per_weights is not None else None,
@@ -8588,7 +8942,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         
         # Multi-encoder loop tamamlandı
         # Klasik yöntemler kapalıysa burada çık, açıksa devam et
-        if not config.enable_classic:
+        if not config.enable_classic and not config.enable_yolo:
             if config.export_candidate_excel:
                 combined_table_path = write_combined_candidate_locations_table(
                     rows=combined_candidate_rows,
@@ -8600,11 +8954,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             return
     
     # Tek model çalıştır (sadece encoders boş/none ise)
-    # Kanal sayısını hesapla (9, 10, 11 veya 12)
-    num_channels = get_num_channels(
-        enable_curvature=config.enable_curvature,
-        enable_tpi=config.enable_tpi
-    )
+    # Tek model için etkin kanal şemasını kullan.
+    single_channel_names: Tuple[str, ...] = tuple(resolved_dl_channel_names)
+    num_channels = len(single_channel_names)
     single_use_fpn = resolve_tile_classifier_use_fpn(
         config.use_fpn_classifier,
         checkpoint_hints if weights_path is not None else None,
@@ -8614,21 +8966,24 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         ckpt_in_ch = checkpoint_hints.get("in_channels")
         if isinstance(ckpt_in_ch, int) and ckpt_in_ch != num_channels:
             parser.error(
-                f"Checkpoint in_channels={ckpt_in_ch} fakat mevcut ayarlar {num_channels} kanal uretiyor. "
-                "enable_curvature/enable_tpi ayarlarinizi egitim konfigurasyonuyla eslestirin."
+                f"Checkpoint in_channels={ckpt_in_ch} fakat etkin kanal semasi "
+                f"{single_channel_names} ({num_channels} kanal)."
             )
         ckpt_channel_names = checkpoint_hints.get("channel_names")
-        if isinstance(ckpt_channel_names, list):
-            ckpt_channels = tuple(str(x) for x in ckpt_channel_names)
-            if ckpt_channels != MODEL_CHANNEL_NAMES:
+        raw_ckpt_channels = _raw_channel_names(ckpt_channel_names)
+        if raw_ckpt_channels is not None:
+            try:
+                ckpt_channels = normalize_model_channel_names(raw_ckpt_channels)
+            except ValueError as exc:
+                parser.error(f"Checkpoint channel_names gecersiz: {exc}")
+            if ckpt_channels != single_channel_names:
                 parser.error(
-                    f"Checkpoint channel_names={ckpt_channels} fakat mevcut kanal semasi {MODEL_CHANNEL_NAMES}. "
-                    "Bu checkpoint yeni RGB+DSM+DTM kanal duzeniyle uyumlu degil; modeli yeniden egitin."
+                    f"Checkpoint channel_names={ckpt_channels} fakat etkin kanal semasi {single_channel_names}."
                 )
         elif ckpt_in_ch == num_channels:
             LOGGER.warning(
-                "Checkpoint channel_names bilgisi icermiyor. Yeni kanal semasi %s; eski 12-kanal checkpoint semantik olarak uyumsuz olabilir.",
-                list(MODEL_CHANNEL_NAMES),
+                "Checkpoint channel_names bilgisi icermiyor. Etkin kanal semasi %s.",
+                list(single_channel_names),
             )
         LOGGER.info("Loading trained weights in single-encoder mode: %s", weights_path)
         if dl_task == "tile_classification":
@@ -8694,12 +9049,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     else:
         model = None
 
-    single_channel_names: Tuple[str, ...] = tuple(MODEL_CHANNEL_NAMES[:num_channels])
-    hinted_single_names = checkpoint_hints.get("channel_names")
-    if isinstance(hinted_single_names, list) and len(hinted_single_names) == num_channels:
-        single_channel_names = tuple(str(v) for v in hinted_single_names)
-
-    if bands[3] <= 0:
+    if config.mask_talls is not None and not has_dsm:
         LOGGER.warning(
             "DSM band not provided; nDSM channel will be zero and tall-object masking will be disabled."
         )

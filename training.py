@@ -84,7 +84,7 @@ CONFIG: dict[str, object] = {
     # data:
     # Egitim veri kok dizini.
     # Beklenen yapi: train/images, train/masks, val/images, val/masks
-    "data": "workspace/training_data",
+    "data": "workspace/training_data_topo5_merged",
 
     # task:
     # segmentation       : Piksel maskesi ogrenilir
@@ -115,16 +115,23 @@ CONFIG: dict[str, object] = {
     # batch_size:
     # Batch boyutu.
     # Yuksek deger daha stabil gradient verebilir; daha fazla VRAM ister.
-    "batch_size": 16,
+    "batch_size": 32,
 
     # lr:
     # Ogrenme orani (AdamW).
     # Cok yuksek olursa kararsizlik, cok dusuk olursa yavas ogrenme gorulebilir.
-    "lr": 1e-4,
+    "lr": 2e-4,
 
     # loss:
     # Optimize edilen kayip fonksiyonu.
-    # bce | dice | combined | focal
+    # bce      : Piksel/batch bazli stabil temel kayip. Tile classification icin
+    #            en guvenli baslangic secenegidir. balance_mode/pos_weight ile calisir.
+    # dice     : Tahmin-mask overlap'ini dogrudan iter. Kucuk/seyrek pozitif
+    #            maskelerde segmentation icin faydali olabilir. Tile classification'ta desteklenmez.
+    # combined : BCE + Dice. Hem stabil optimizasyon hem de daha iyi overlap dengesi
+    #            verir; segmentation icin genelde en pratik secenektir.
+    # focal    : Kolay negatifleri bastirip zor orneklere daha cok odaklanir.
+    #            Kuvvetli sinif dengesizliginde ozellikle tile classification'ta yararlidir.
     # Not: balance_mode/pos_weight ayarlari sadece bce ve combined icin etkilidir.
     "loss": "bce",
 
@@ -219,7 +226,7 @@ CONFIG: dict[str, object] = {
     # None: kapali (tum train ornekleri kullanilir)
     # 1.0: negatif ~= pozitif
     # 0.5: negatif ~= pozitifin yarisi
-    "train_neg_to_pos_ratio": 2, #None,
+    "train_neg_to_pos_ratio": None,
 
     # train_neg_sample_seed:
     # Oran bazli negatif alt-orneklemede rastgelelik tohumu.
@@ -773,6 +780,8 @@ class ArchaeologyDataset(Dataset):
 # ==============================================================================
 
 class DiceLoss(nn.Module):
+    # Overlap'i dogrudan optimize eder.
+    # Pozitif alan cok kucukse segmentation tarafinda BCE'ye gore daha faydali olabilir.
     """Dice Loss - Segmentasyon için yaygın kullanılan kayıp fonksiyonu."""
     
     def __init__(self, smooth: float = 1.0):
@@ -793,6 +802,8 @@ class DiceLoss(nn.Module):
 
 
 class BCELoss(nn.Module):
+    # En temel ve genelde en stabil binary kayip secenegi.
+    # pos_weight ile pozitif sinif daha agir cezalandirilabilir.
     """BCE loss with optional positive class weight for class imbalance."""
 
     def __init__(self, pos_weight: float = 1.0):
@@ -817,6 +828,8 @@ class BCELoss(nn.Module):
 
 
 class CombinedLoss(nn.Module):
+    # BCE'nin stabilitesini ve Dice'in overlap odagini birlestirir.
+    # Segmentasyon icin pratik ve dengeli bir varsayilan alternatiftir.
     """BCE + Dice Loss kombinasyonu."""
     
     def __init__(
@@ -838,6 +851,8 @@ class CombinedLoss(nn.Module):
 
 
 class FocalLoss(nn.Module):
+    # Kolay negatiflerin etkisini azaltir, zor orneklere odaklanir.
+    # Kuvvetli sinif dengesizliginde ozellikle tile classification'ta yararli olabilir.
     """Focal Loss - Dengesiz sınıflar için etkili."""
     
     def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
@@ -1774,6 +1789,10 @@ def create_model(config: TrainingConfig) -> nn.Module:
 
 
 def create_loss(config: TrainingConfig) -> nn.Module:
+    # Pratik secim ozeti:
+    # - tile_classification: genelde bce, dengesizlik cok gucluyse focal
+    # - segmentation: bce en stabil baslangic, dice overlap odakli,
+    #   combined ise ikisi arasinda dengeli bir secim
     """Kayıp fonksiyonu oluşturur."""
 
     task_type = str(config.task_type).strip().lower()
@@ -2634,12 +2653,21 @@ def main():
         default=float(CONFIG["lr"]),
         help="Learning rate",
     )
+    # Loss secimi kisaca:
+    # - bce: en stabil temel secenek
+    # - dice: overlap odakli, segmentation icin
+    # - combined: BCE + Dice dengesi
+    # - focal: kuvvetli dengesizlikte zor orneklere odaklanir
     parser.add_argument(
         "--loss",
         type=str,
         default=str(CONFIG["loss"]),
         choices=["bce", "dice", "combined", "focal"],
         help=(
+            # bce: stabil temel secenek
+            # dice: overlap odakli segmentation
+            # combined: BCE + Dice dengesi
+            # focal: zor/dengesiz orneklere odaklanir
             "Kayıp fonksiyonu. "
             "Class balance ayarları (balance_mode/pos_weight) sadece bce ve combined loss için etkilidir."
         ),

@@ -40,7 +40,11 @@ import numpy as np
 import rasterio
 from rasterio.windows import Window, from_bounds
 
-from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
+from archeo_shared.channels import (
+    METADATA_SCHEMA_VERSION,
+    MODEL_CHANNEL_NAMES,
+    expected_channel_names,
+)
 
 try:
     from archaeo_detect import (
@@ -65,6 +69,7 @@ CONFIG = {
     "output_dir": "workspace/training_data_classification",
     "tile_size": 256,
     "overlap": 128,
+    "feature_mode": "topo5",
     "bands": "1,2,3,4,5",
     "sampling_mode": "full_grid",
     "positive_ratio_threshold": 0.02,
@@ -98,6 +103,12 @@ SAMPLING_MODE_SELECTED_REGIONS = "selected_regions"
 SAMPLING_MODES = (
     SAMPLING_MODE_FULL_GRID,
     SAMPLING_MODE_SELECTED_REGIONS,
+)
+FEATURE_MODE_RGB3 = "rgb3"
+FEATURE_MODE_TOPO5 = "topo5"
+FEATURE_MODES = (
+    FEATURE_MODE_RGB3,
+    FEATURE_MODE_TOPO5,
 )
 
 _SAVE_TILE_WORKER_CONTEXT: Dict[str, object] = {}
@@ -246,6 +257,31 @@ def sanitize_name(value: str) -> str:
     token = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(value))
     token = token.strip("_")
     return token or "source"
+
+
+def normalize_feature_mode(raw: object) -> str:
+    feature_mode = str(raw).strip().lower()
+    if feature_mode not in FEATURE_MODES:
+        raise ValueError(
+            f"Desteklenmeyen feature_mode: {raw!r}. Beklenen: {', '.join(FEATURE_MODES)}"
+        )
+    return feature_mode
+
+
+def feature_mode_channel_names(feature_mode: object) -> Tuple[str, ...]:
+    normalized = normalize_feature_mode(feature_mode)
+    if normalized == FEATURE_MODE_RGB3:
+        return expected_channel_names(3)
+    return expected_channel_names(len(MODEL_CHANNEL_NAMES))
+
+
+def parse_feature_band_indexes(raw: str, feature_mode: object) -> Tuple[int, ...]:
+    channel_names = feature_mode_channel_names(feature_mode)
+    return parse_int_csv(raw, expected_len=len(channel_names))
+
+
+def feature_mode_uses_derivatives(feature_mode: object) -> bool:
+    return normalize_feature_mode(feature_mode) == FEATURE_MODE_TOPO5
 
 
 def parse_int_csv(raw: str, expected_len: Optional[int] = None) -> Tuple[int, ...]:
@@ -593,19 +629,20 @@ def validate_source_raster(
             f"Raster {raster_path} icinde {src.count} bant var ama {band_idx} istendi."
         )
 
-    dsm_dtype = np.dtype(src.dtypes[int(band_idx[3]) - 1])
-    dtm_dtype = np.dtype(src.dtypes[int(band_idx[4]) - 1])
-    if (
-        np.issubdtype(dsm_dtype, np.integer)
-        and np.issubdtype(dtm_dtype, np.integer)
-        and dsm_dtype.itemsize <= 1
-        and dtm_dtype.itemsize <= 1
-    ):
-        raise ValueError(
-            "DSM/DTM bantlari 8-bit gorunuyor "
-            f"({dsm_dtype}/{dtm_dtype}) -> {raster_path}. "
-            "Bu durumda rakim verisi 0-255'e ezilmis olabilir; float32 DSM/DTM iceren bir 5-band GeoTIFF kullanin."
-        )
+    if len(band_idx) >= 5:
+        dsm_dtype = np.dtype(src.dtypes[int(band_idx[3]) - 1])
+        dtm_dtype = np.dtype(src.dtypes[int(band_idx[4]) - 1])
+        if (
+            np.issubdtype(dsm_dtype, np.integer)
+            and np.issubdtype(dtm_dtype, np.integer)
+            and dsm_dtype.itemsize <= 1
+            and dtm_dtype.itemsize <= 1
+        ):
+            raise ValueError(
+                "DSM/DTM bantlari 8-bit gorunuyor "
+                f"({dsm_dtype}/{dtm_dtype}) -> {raster_path}. "
+                "Bu durumda rakim verisi 0-255'e ezilmis olabilir; float32 DSM/DTM iceren bir 5-band GeoTIFF kullanin."
+            )
 
 
 def split_window_by_rows(
@@ -669,6 +706,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path(CONFIG["output_dir"]))
     parser.add_argument("--tile-size", type=int, default=int(CONFIG["tile_size"]))
     parser.add_argument("--overlap", type=int, default=int(CONFIG["overlap"]))
+    parser.add_argument(
+        "--feature-mode",
+        choices=FEATURE_MODES,
+        default=str(CONFIG["feature_mode"]),
+        help="Tile tensor semasi: rgb3=R,G,B veya topo5=R,G,B,SVF,SLRM",
+    )
     parser.add_argument("--bands", type=str, default=str(CONFIG["bands"]))
     parser.add_argument(
         "--sampling-mode",
@@ -735,6 +778,7 @@ def parse_args() -> argparse.Namespace:
 
 def validate_args(args: argparse.Namespace) -> None:
     errors: List[str] = []
+    feature_mode = normalize_feature_mode(getattr(args, "feature_mode", FEATURE_MODE_TOPO5))
     if args.tile_size <= 0:
         errors.append(f"tile_size > 0 olmali, verilen: {args.tile_size}")
     if args.overlap < 0:
@@ -744,7 +788,7 @@ def validate_args(args: argparse.Namespace) -> None:
             f"overlap tile_size'dan kucuk olmali ({args.overlap} >= {args.tile_size})"
         )
     try:
-        band_idx = parse_int_csv(args.bands, expected_len=5)
+        band_idx = parse_feature_band_indexes(args.bands, feature_mode)
         if any(b <= 0 for b in band_idx):
             errors.append(f"bands 1-bazli pozitif olmali, verilen: {args.bands}")
     except ValueError as exc:
@@ -1036,7 +1080,9 @@ def collect_selected_region_records(
     pairs: Sequence[SourcePair],
     args: argparse.Namespace,
 ) -> Tuple[List[TileRecord], Dict[str, object], Dict[str, object]]:
-    band_idx = parse_int_csv(args.bands, expected_len=5)
+    feature_mode = normalize_feature_mode(args.feature_mode)
+    channel_names = feature_mode_channel_names(feature_mode)
+    band_idx = parse_feature_band_indexes(args.bands, feature_mode)
     tile_size = int(args.tile_size)
     stride = int(args.tile_size - args.overlap)
     negative_to_positive_ratio = float(args.negative_to_positive_ratio)
@@ -1225,8 +1271,9 @@ def collect_selected_region_records(
         "schema_version": METADATA_SCHEMA_VERSION,
         "task_type": "tile_classification",
         "dataset_layout": "classification_folders",
-        "num_channels": len(MODEL_CHANNEL_NAMES),
-        "channel_names": list(MODEL_CHANNEL_NAMES),
+        "feature_mode": feature_mode,
+        "num_channels": len(channel_names),
+        "channel_names": list(channel_names),
         "bands": str(args.bands),
         "tile_size": int(args.tile_size),
         "overlap": int(args.overlap),
@@ -1256,7 +1303,9 @@ def collect_tile_records(
     pairs: Sequence[SourcePair],
     args: argparse.Namespace,
 ) -> Tuple[List[TileRecord], Dict[str, object]]:
-    band_idx = parse_int_csv(args.bands, expected_len=5)
+    feature_mode = normalize_feature_mode(args.feature_mode)
+    channel_names = feature_mode_channel_names(feature_mode)
+    band_idx = parse_feature_band_indexes(args.bands, feature_mode)
     tile_size = int(args.tile_size)
     num_workers = max(1, int(args.num_workers))
     stride = int(args.tile_size - args.overlap)
@@ -1337,8 +1386,9 @@ def collect_tile_records(
         "schema_version": METADATA_SCHEMA_VERSION,
         "task_type": "tile_classification",
         "dataset_layout": "classification_folders",
-        "num_channels": len(MODEL_CHANNEL_NAMES),
-        "channel_names": list(MODEL_CHANNEL_NAMES),
+        "feature_mode": feature_mode,
+        "num_channels": len(channel_names),
+        "channel_names": list(channel_names),
         "bands": str(args.bands),
         "tile_size": int(args.tile_size),
         "overlap": int(args.overlap),
@@ -1497,18 +1547,22 @@ def compute_tile_stack(
     window: Window,
     band_idx: Sequence[int],
     normalize: bool,
+    feature_mode: str = FEATURE_MODE_TOPO5,
 ) -> np.ndarray:
     data, _ = read_window_data(src, band_idx, window)
     rgb = data[:3]
-    dtm = data[4]
-    pixel_size = float((abs(src.transform.a) + abs(src.transform.e)) / 2.0)
-    svf, slrm = compute_derivatives_with_rvt(
-        dtm,
-        pixel_size=pixel_size,
-        show_progress=False,
-        log_steps=False,
-    )
-    stacked = stack_channels(rgb, svf, slrm)
+    if feature_mode_uses_derivatives(feature_mode):
+        dtm = data[4]
+        pixel_size = float((abs(src.transform.a) + abs(src.transform.e)) / 2.0)
+        svf, slrm = compute_derivatives_with_rvt(
+            dtm,
+            pixel_size=pixel_size,
+            show_progress=False,
+            log_steps=False,
+        )
+        stacked = stack_channels(rgb, svf, slrm)
+    else:
+        stacked = rgb.astype(np.float32, copy=False)
     if normalize:
         stacked = robust_norm(stacked)
     return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -1519,6 +1573,7 @@ def compute_tile_stack_from_precomputed(
     precomputed: PrecomputedDerivatives,
     window: Window,
     normalize: bool,
+    feature_mode: str = FEATURE_MODE_TOPO5,
 ) -> np.ndarray:
     row_start = int(window.row_off)
     col_start = int(window.col_off)
@@ -1526,9 +1581,12 @@ def compute_tile_stack_from_precomputed(
     col_end = col_start + int(window.width)
 
     rgb = precomputed.rgb[:, row_start:row_end, col_start:col_end].copy()
-    svf = precomputed.svf[row_start:row_end, col_start:col_end].copy()
-    slrm = precomputed.slrm[row_start:row_end, col_start:col_end].copy()
-    stacked = stack_channels(rgb, svf, slrm)
+    if feature_mode_uses_derivatives(feature_mode):
+        svf = precomputed.svf[row_start:row_end, col_start:col_end].copy()
+        slrm = precomputed.slrm[row_start:row_end, col_start:col_end].copy()
+        stacked = stack_channels(rgb, svf, slrm)
+    else:
+        stacked = rgb.astype(np.float32, copy=False)
     if normalize:
         stacked = robust_norm(stacked)
     return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -1542,15 +1600,19 @@ def compute_tile_stack_from_raster_cache(
     window: Window,
     band_idx: Sequence[int],
     normalize: bool,
+    feature_mode: str = FEATURE_MODE_TOPO5,
 ) -> np.ndarray:
     data, _ = read_window_data(src, band_idx, window)
     rgb = data[:3]
-    band_names = ["svf", "slrm"]
-    indexes = [int(derivative_band_map[name]) for name in band_names]
-    deriv_stack = derivative_src.read(indexes=indexes, window=window, masked=True)
-    deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
-    svf, slrm = deriv_stack
-    stacked = stack_channels(rgb, svf, slrm)
+    if feature_mode_uses_derivatives(feature_mode):
+        band_names = ["svf", "slrm"]
+        indexes = [int(derivative_band_map[name]) for name in band_names]
+        deriv_stack = derivative_src.read(indexes=indexes, window=window, masked=True)
+        deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
+        svf, slrm = deriv_stack
+        stacked = stack_channels(rgb, svf, slrm)
+    else:
+        stacked = rgb.astype(np.float32, copy=False)
     if normalize:
         stacked = robust_norm(stacked)
     return np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -1571,6 +1633,7 @@ def _init_save_tile_worker(
     output_dir: str,
     file_ext: str,
     tile_prefix: str,
+    feature_mode: str,
     derivative_cache_tif: Optional[str] = None,
     derivative_band_map: Optional[Tuple[Tuple[str, int], ...]] = None,
 ) -> None:
@@ -1590,6 +1653,7 @@ def _init_save_tile_worker(
         "output_dir": Path(output_dir),
         "file_ext": str(file_ext),
         "tile_prefix": str(tile_prefix),
+        "feature_mode": normalize_feature_mode(feature_mode),
     }
 
 
@@ -1613,6 +1677,7 @@ def _save_tile_worker(record: TileRecord) -> str:
             window=window,
             band_idx=ctx["band_idx"],
             normalize=bool(ctx["normalize"]),
+            feature_mode=str(ctx["feature_mode"]),
         )
     else:
         stacked = compute_tile_stack(
@@ -1620,6 +1685,7 @@ def _save_tile_worker(record: TileRecord) -> str:
             window=window,
             band_idx=ctx["band_idx"],
             normalize=bool(ctx["normalize"]),
+            feature_mode=str(ctx["feature_mode"]),
         )
     output_dir = ctx["output_dir"]
     file_ext = str(ctx["file_ext"])
@@ -1672,7 +1738,8 @@ def save_tiles(
     records_by_source: Dict[str, List[TileRecord]] = defaultdict(list)
     for record in selected_records:
         records_by_source[record.source_name].append(record)
-    band_idx = parse_int_csv(args.bands, expected_len=5)
+    feature_mode = normalize_feature_mode(args.feature_mode)
+    band_idx = parse_feature_band_indexes(args.bands, feature_mode)
     file_ext = str(args.format)
     num_workers = int(args.num_workers)
     total_records = len(selected_records)
@@ -1686,7 +1753,15 @@ def save_tiles(
             records_by_source[source_name],
             key=lambda item: (SPLIT_ORDER.index(item.split), item.row_off, item.col_off),
         )
-        if direct_selected_region_mode:
+        if not feature_mode_uses_derivatives(feature_mode):
+            emit_progress(
+                phase="cache",
+                current=len(cache_records) + 1,
+                total=total_sources,
+                message=f"RGB-only mod: turev cache gerekmiyor ({pair.name})",
+            )
+            prepared_cache = PreparedDerivativeCache(mode="rgb3_no_derivatives")
+        elif direct_selected_region_mode:
             emit_progress(
                 phase="cache",
                 current=len(cache_records) + 1,
@@ -1741,6 +1816,7 @@ def save_tiles(
                     precomputed=prepared_cache.precomputed,
                     window=window,
                     normalize=bool(args.normalize),
+                    feature_mode=feature_mode,
                 )
                 tile_name = make_tile_name(
                     record,
@@ -1800,6 +1876,7 @@ def save_tiles(
                             window=window,
                             band_idx=band_idx,
                             normalize=bool(args.normalize),
+                            feature_mode=feature_mode,
                         )
                     else:
                         stacked = compute_tile_stack(
@@ -1807,6 +1884,7 @@ def save_tiles(
                             window=window,
                             band_idx=band_idx,
                             normalize=bool(args.normalize),
+                            feature_mode=feature_mode,
                         )
                     tile_name = make_tile_name(
                         record,
@@ -1860,6 +1938,7 @@ def save_tiles(
                 str(output_dir),
                 file_ext,
                 str(args.tile_prefix).strip(),
+                feature_mode,
                 str(prepared_cache.raster_cache_tif) if prepared_cache.raster_cache_tif is not None else None,
                 tuple(sorted((prepared_cache.raster_band_map or {}).items())),
             ),

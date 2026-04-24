@@ -112,6 +112,9 @@ enable_classic: false
 # NOT: YOLO11 segmentasyon modeli (..-seg.pt) kullanmanız önerilir
 # ÖNERİ: RGB tabanlı tespit için true yapın, ultralytics kurulumu gerektirir
 # NOT: Tile-level classification preset'inde kapalı tutulması önerilir.
+# NOT: enable_yolo=true oldugunda YOLO icin GPKG ve birlesik Excel ciktilari
+#      otomatik acilir; vectorize/export_candidate_excel ayarlarini ayrica
+#      acmaniz gerekmez.
 enable_yolo: false
 
 # enable_fusion: Derin öğrenme ve klasik yöntemlerin birleştirilmesi
@@ -201,7 +204,7 @@ encoders: "none"
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "workspace/checkpoints/epoch_008_TileClassifier_resnet50_5ch.pth"
+weights: "workspace/checkpoints/epoch_043_TileClassifier_resnet50_5ch.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
@@ -235,7 +238,7 @@ zero_shot_imagenet: false
 # - true: Tek model + egitilmis checkpoint zorlanir
 #         * encoders otomatik none'a cekilir (tek model)
 #         * zero_shot_imagenet devre disi kalir
-#         * yolo kapatilir (farkli model oldugu icin)
+#         * yolo istenirse ek olarak calisabilir
 #         * classic ve fusion istersen acik kalabilir
 #         * weights zorunlu olur
 # - false: Mevcut normal davranis (multi/zero-shot fallback mumkun)
@@ -524,7 +527,7 @@ fuse_encoders: "all"
 #
 # ÖNERİ: YOLOv8 daha olgun, daha fazla topluluk desteği var!
 #        Kuş bakışı için mutlaka fine-tune yapın!
-yolo_weights: "yolo11s-seg.pt"
+yolo_weights: "workspace/assets/yolo11s-seg.pt"
 
 # yolo_conf: Tespit güven eşiği
 # - Değer aralığı: 0.0 - 1.0
