@@ -33,6 +33,7 @@ from archaeo_detect import (
     compute_ndsm,
     resolve_training_metadata,
     _resolve_yolo_weights_path,
+    _build_candidate_box_records_from_prediction,
     _build_candidate_location_rows,
     _otsu_threshold_0to1,
     robust_norm,
@@ -924,6 +925,46 @@ class TestCandidateLocationTable:
         assert row["gps_lat"] == pytest.approx(0.00449, abs=0.001)
         assert row["gps_lon"] == pytest.approx(0.00449, abs=0.001)
         assert row["google_maps_url"].startswith("https://maps.google.com/?q=")
+
+    def test_build_candidate_box_records_from_prediction(self):
+        from rasterio.transform import Affine
+
+        mask = np.zeros((5, 5), dtype=np.uint8)
+        mask[1:3, 2:4] = 1
+        prob = np.zeros((5, 5), dtype=np.float32)
+        prob[1:3, 2:4] = np.array([[0.7, 0.8], [0.9, 1.0]], dtype=np.float32)
+        transform = Affine.translation(100, 200) * Affine.scale(2, -2)
+
+        records = _build_candidate_box_records_from_prediction(
+            mask=mask,
+            prob_map=prob,
+            transform=transform,
+            crs=RasterioCRS.from_epsg(3857),
+            min_area=1.0,
+            opening_size=1,
+            label_connectivity=8,
+            extra_fields={"source_label": "dl", "scale_level": None, "scale_factor": None},
+        )
+
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["candidate_id"] == 1
+        assert rec["candidate_type"] == "connected_component_box"
+        assert rec["review_status"] == "Kontrol edilecek"
+        assert rec["source_label"] == "dl"
+        assert rec["mask_area_m2"] == pytest.approx(16.0)
+        assert rec["bbox_area_m2"] == pytest.approx(16.0)
+        assert rec["score_mean"] == pytest.approx(0.85)
+        assert rec["score_max"] == pytest.approx(1.0)
+        assert rec["pixel_count"] == 4
+        assert rec["center_x_native"] == pytest.approx(106.0)
+        assert rec["center_y_native"] == pytest.approx(196.0)
+        assert rec["bbox_xmin"] == pytest.approx(104.0)
+        assert rec["bbox_xmax"] == pytest.approx(108.0)
+        assert rec["bbox_ymin"] == pytest.approx(194.0)
+        assert rec["bbox_ymax"] == pytest.approx(198.0)
+        assert rec["geometry"].geom_type == "Polygon"
+        assert rec["google_maps_url"].startswith("https://maps.google.com/?q=")
 
     def test_export_candidate_table_falls_back_to_builtin_xlsx_without_openpyxl(self, tmp_path, monkeypatch):
         from shapely.geometry import Polygon

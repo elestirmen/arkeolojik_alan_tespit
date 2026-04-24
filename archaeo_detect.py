@@ -77,9 +77,10 @@ except ImportError:
     smp = None  # segmentation_models_pytorch is optional; required only for DL inference
 
 try:
-    from shapely.geometry import mapping, shape
+    from shapely.geometry import Polygon, mapping, shape
     from shapely.ops import transform as shapely_transform
 except ImportError:
+    Polygon = None  # type: ignore[assignment]
     mapping = None  # type: ignore[assignment]
     shape = None  # type: ignore[assignment]
     shapely_transform = None  # type: ignore[assignment]
@@ -417,6 +418,53 @@ _COMBINED_CANDIDATE_CLUSTER_FIELD_ORDER = [
     "center_x_native",
     "center_y_native",
     "native_crs",
+    "gps_lon",
+    "gps_lat",
+    "google_maps_url",
+]
+
+_CANDIDATE_BOX_FIELD_ORDER = [
+    "source_label",
+    "scale_level",
+    "scale_factor",
+    "candidate_id",
+    "candidate_type",
+    "review_status",
+    "mask_area_m2",
+    "bbox_area_m2",
+    "score_mean",
+    "score_max",
+    "pixel_count",
+    "center_x_native",
+    "center_y_native",
+    "bbox_xmin",
+    "bbox_ymin",
+    "bbox_xmax",
+    "bbox_ymax",
+    "native_crs",
+    "gps_lon",
+    "gps_lat",
+    "google_maps_url",
+]
+
+_CANDIDATE_BOX_GPKG_FIELD_ORDER = [
+    "candidate_id",
+    "source_label",
+    "scale_level",
+    "scale_factor",
+    "candidate_type",
+    "review_status",
+    "mask_area_m2",
+    "bbox_area_m2",
+    "score_mean",
+    "score_max",
+    "pixel_count",
+    "center_x_native",
+    "center_y_native",
+    "bbox_xmin",
+    "bbox_ymin",
+    "bbox_xmax",
+    "bbox_ymax",
     "gps_lon",
     "gps_lat",
     "google_maps_url",
@@ -894,6 +942,12 @@ class PipelineDefaults:
         default=True,
         metadata={
             "help": "Adayları merkez koordinatları ve GPS (WGS84) kolonlarıyla tek bir birlesik Excel'e (.xlsx) aktar; multi-scale aciksa scale_level/scale_factor kolonlari da eklenir. openpyxl yoksa yerlesik XLSX yazici kullan."
+        },
+    )
+    export_candidate_boxes: bool = field(
+        default=True,
+        metadata={
+            "help": "Mevcut mask/probability ciktisindan birlesik aday kutulari uret; vectorize aciksa GPKG'ye ayri layer, Excel'e ayri sayfa olarak ekler. Yeni egitim/etiketleme gerektirmez."
         },
     )
     min_area: float = field(
@@ -5596,6 +5650,7 @@ def _excel_number_format_for_field(field_name: str) -> Optional[str]:
         "high_priority_count",
         "medium_priority_count",
         "low_priority_count",
+        "pixel_count",
     }:
         return "0"
     if field_name in {
@@ -5604,13 +5659,31 @@ def _excel_number_format_for_field(field_name: str) -> Optional[str]:
         "score_mean_max",
         "best_score_mean",
         "mean_score_mean",
+        "score_max",
     }:
         return "0.0%"
     if field_name in {"scale_factor", "best_scale_factor"}:
         return "0.00x"
-    if field_name in {"area_m2", "area_m2_sum", "area_m2_max", "total_area_m2", "max_area_m2"}:
+    if field_name in {
+        "area_m2",
+        "area_m2_sum",
+        "area_m2_max",
+        "total_area_m2",
+        "max_area_m2",
+        "mask_area_m2",
+        "bbox_area_m2",
+    }:
         return "#,##0.00"
-    if field_name in {"center_x_native", "center_y_native", "gps_lon", "gps_lat"}:
+    if field_name in {
+        "center_x_native",
+        "center_y_native",
+        "bbox_xmin",
+        "bbox_ymin",
+        "bbox_xmax",
+        "bbox_ymax",
+        "gps_lon",
+        "gps_lat",
+    }:
         return "#,##0.000000"
     return None
 
@@ -5660,7 +5733,14 @@ def _add_excel_color_scale(
 ) -> None:
     if ColorScaleRule is None or end_row <= start_row:
         return
-    score_fields = {"score_mean", "score_mean_avg", "score_mean_max", "best_score_mean", "mean_score_mean"}
+    score_fields = {
+        "score_mean",
+        "score_mean_avg",
+        "score_mean_max",
+        "best_score_mean",
+        "mean_score_mean",
+        "score_max",
+    }
     for col_idx, field_name in enumerate(field_order, start=1):
         if field_name not in score_fields:
             continue
@@ -5758,6 +5838,7 @@ def _write_combined_candidate_review_workbook(
     *,
     rows: Sequence[Dict[str, Any]],
     out_base: Path,
+    candidate_box_rows: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Optional[Path]:
     xlsx_path = _append_output_suffix(out_base, ".xlsx")
     if Workbook is None:
@@ -5782,6 +5863,9 @@ def _write_combined_candidate_review_workbook(
         cluster_rows,
         _COMBINED_CANDIDATE_CLUSTER_DISTANCE_M,
     )
+    box_rows = list(candidate_box_rows) if candidate_box_rows is not None else None
+    if box_rows is not None:
+        summary_metrics.append({"metric": "aday_kutu_sayisi", "value": len(box_rows)})
     raw_rows: List[Dict[str, Any]] = []
     for input_order, row in enumerate(rows, start=1):
         raw_row = dict(row)
@@ -5834,6 +5918,18 @@ def _write_combined_candidate_review_workbook(
         hyperlink_display_text="Haritada Ac",
     )
     ws_cluster.freeze_panes = "A2"
+
+    if box_rows is not None:
+        ws_boxes = wb.create_sheet("04_Aday_Kutulari")
+        _write_excel_table(
+            ws_boxes,
+            rows=box_rows,
+            field_order=_CANDIDATE_BOX_FIELD_ORDER,
+            start_row=1,
+            table_name="tblAdayKutulari",
+            hyperlink_display_text="Haritada Ac",
+        )
+        ws_boxes.freeze_panes = "A2"
 
     ws_raw = wb.create_sheet("99_Ham_Veriler")
     _write_excel_table(
@@ -5925,9 +6021,14 @@ def write_combined_candidate_locations_table(
     *,
     rows: Sequence[Dict[str, Any]],
     out_base: Path,
+    candidate_box_rows: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Optional[Path]:
     """Write the consolidated candidate workbook with review, summary and raw sheets."""
-    return _write_combined_candidate_review_workbook(rows=rows, out_base=out_base)
+    return _write_combined_candidate_review_workbook(
+        rows=rows,
+        out_base=out_base,
+        candidate_box_rows=candidate_box_rows,
+    )
 
 
 def _build_combined_candidate_extra_fields(
@@ -6094,6 +6195,212 @@ def build_candidate_location_rows_from_prediction(
             row.update(extra_fields)
         rows.append(row)
     return rows
+
+
+def _candidate_label_structure(label_connectivity: int) -> np.ndarray:
+    if int(label_connectivity) == 4:
+        return np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=int)
+    return np.ones((3, 3), dtype=int)
+
+
+def _component_bbox_polygon(
+    *,
+    transform: Affine,
+    row_start: int,
+    row_stop: int,
+    col_start: int,
+    col_stop: int,
+):
+    if Polygon is None:
+        return None
+    corners = [
+        transform * (float(col_start), float(row_start)),
+        transform * (float(col_stop), float(row_start)),
+        transform * (float(col_stop), float(row_stop)),
+        transform * (float(col_start), float(row_stop)),
+    ]
+    geom = Polygon(corners)
+    if not geom.is_valid:
+        geom = geom.buffer(0)
+    if geom.is_empty:
+        return None
+    return geom
+
+
+def _build_candidate_box_records_from_prediction(
+    *,
+    mask: np.ndarray,
+    prob_map: np.ndarray,
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    min_area: float,
+    opening_size: int,
+    label_connectivity: int,
+    extra_fields: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Build object-like candidate boxes from connected prediction components.
+
+    This is a post-processing view of the existing tile/polygon output. It does
+    not require bbox labels, a detector model, or an additional segmentation
+    training pass.
+    """
+    if mask.size == 0 or prob_map.size == 0:
+        return []
+    if Polygon is None or shapely_transform is None or CRS is None or Transformer is None:
+        return []
+
+    k = max(1, int(opening_size))
+    cleaned_mask = grey_opening(mask.astype(np.uint8), size=(k, k))
+    labels, num_features = ndimage.label(
+        cleaned_mask.astype(bool),
+        structure=_candidate_label_structure(label_connectivity),
+    )
+    if num_features == 0:
+        return []
+
+    label_ids = np.arange(1, num_features + 1)
+    pixel_counts = np.asarray(
+        ndimage.sum(cleaned_mask.astype(np.uint8), labels, index=label_ids),
+        dtype=np.float64,
+    )
+    prob_sums = np.asarray(
+        ndimage.sum(prob_map.astype(np.float32), labels, index=label_ids),
+        dtype=np.float64,
+    )
+    prob_maxes = np.asarray(
+        ndimage.maximum(prob_map.astype(np.float32), labels, index=label_ids),
+        dtype=np.float64,
+    )
+    centers = ndimage.center_of_mass(cleaned_mask.astype(np.float32), labels, index=label_ids)
+    slices = ndimage.find_objects(labels)
+
+    pixel_width = abs(transform[0])
+    pixel_height = abs(transform[4])
+    pixel_area = float(pixel_width * pixel_height)
+    native_crs = _format_crs_label(crs)
+    _crs_obj, to_area, _to_native = _resolve_area_transformers(crs)
+
+    temp_records: List[Dict[str, Any]] = []
+    center_xs: List[float] = []
+    center_ys: List[float] = []
+    next_id = 1
+
+    for idx in range(num_features):
+        pixels = float(pixel_counts[idx])
+        if pixels <= 0:
+            continue
+        mask_area_m2 = pixels * pixel_area
+        if mask_area_m2 < float(min_area):
+            continue
+        component_slice = slices[idx] if idx < len(slices) else None
+        if component_slice is None:
+            continue
+        row_slice, col_slice = component_slice
+        geom = _component_bbox_polygon(
+            transform=transform,
+            row_start=int(row_slice.start),
+            row_stop=int(row_slice.stop),
+            col_start=int(col_slice.start),
+            col_stop=int(col_slice.stop),
+        )
+        if geom is None:
+            continue
+        if to_area:
+            bbox_area_m2 = float(shapely_transform(to_area.transform, geom).area)
+        else:
+            bbox_area_m2 = float(geom.area)
+
+        row_c, col_c = centers[idx]
+        center_x, center_y = transform * (float(col_c) + 0.5, float(row_c) + 0.5)
+        center_x = float(center_x)
+        center_y = float(center_y)
+        center_xs.append(center_x)
+        center_ys.append(center_y)
+
+        minx, miny, maxx, maxy = geom.bounds
+        mean_score = float(prob_sums[idx]) / pixels
+        rec: Dict[str, Any] = {
+            "id": next_id,
+            "candidate_id": next_id,
+            "candidate_type": "connected_component_box",
+            "review_status": "Kontrol edilecek",
+            "area_m2": mask_area_m2,
+            "mask_area_m2": mask_area_m2,
+            "bbox_area_m2": bbox_area_m2,
+            "score_mean": mean_score,
+            "score_max": float(prob_maxes[idx]),
+            "pixel_count": int(round(pixels)),
+            "center_x_native": center_x,
+            "center_y_native": center_y,
+            "bbox_xmin": float(minx),
+            "bbox_ymin": float(miny),
+            "bbox_xmax": float(maxx),
+            "bbox_ymax": float(maxy),
+            "native_crs": native_crs,
+            "gps_lon": None,
+            "gps_lat": None,
+            "google_maps_url": "",
+            "geometry": geom,
+        }
+        if extra_fields:
+            rec.update(extra_fields)
+        temp_records.append(rec)
+        next_id += 1
+
+    if not temp_records:
+        return []
+
+    gps_lons, gps_lats = _transform_points_to_wgs84(center_xs, center_ys, crs)
+    for idx, rec in enumerate(temp_records):
+        gps_lon = gps_lons[idx]
+        gps_lat = gps_lats[idx]
+        rec["gps_lon"] = gps_lon
+        rec["gps_lat"] = gps_lat
+        if gps_lat is not None and gps_lon is not None:
+            rec["google_maps_url"] = f"https://maps.google.com/?q={gps_lat:.8f},{gps_lon:.8f}"
+    return temp_records
+
+
+def _candidate_box_records_to_rows(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {field_name: rec.get(field_name) for field_name in _CANDIDATE_BOX_FIELD_ORDER}
+        for rec in records
+    ]
+
+
+def write_candidate_boxes_layer_from_prediction(
+    *,
+    mask: np.ndarray,
+    prob_map: np.ndarray,
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    gpkg_path: Path,
+    layer_name: str,
+    min_area: float,
+    opening_size: int,
+    label_connectivity: int,
+    extra_fields: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    records = _build_candidate_box_records_from_prediction(
+        mask=mask,
+        prob_map=prob_map,
+        transform=transform,
+        crs=crs,
+        min_area=min_area,
+        opening_size=opening_size,
+        label_connectivity=label_connectivity,
+        extra_fields=extra_fields,
+    )
+    if not records:
+        return []
+    _write_records_to_gpkg(
+        records=records,
+        crs=crs,
+        gpkg_path=gpkg_path,
+        layer_name=layer_name,
+        column_order=_CANDIDATE_BOX_GPKG_FIELD_ORDER,
+    )
+    return records
 
 
 def load_prediction_arrays(
@@ -8002,6 +8309,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         ),
     )
     parser.add_argument(
+        "--export-candidate-boxes",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("export_candidate_boxes"),
+        dest="export_candidate_boxes",
+        help=cli_help(
+            "export_candidate_boxes",
+            "(set --no-export-candidate-boxes to disable object-like candidate boxes).",
+        ),
+    )
+    parser.add_argument(
         "--arch",
         default=default_for("arch"),
         help=cli_help("arch"),
@@ -8652,6 +8969,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 LOGGER.info("✓ Raster-cache hazır (deriv=%d band, model=%d kanal): %s", deriv_band_count, model_ch, derivative_cache_tif)
 
     combined_candidate_rows: List[Dict[str, Any]] = []
+    combined_candidate_box_rows: List[Dict[str, Any]] = []
 
     # Derin öğrenme etkinse modelleri çalıştır
     if config.enable_deep_learning and ran_multi:
@@ -8930,6 +9248,52 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     except Exception as e:
                         LOGGER.warning("[%s] Tek Excel satirlari hazirlanamadi: %s", suffix, e)
 
+                if mask_arr is not None and prob_arr is not None and config.export_candidate_boxes:
+                    try:
+                        box_extra = _build_combined_candidate_extra_fields(
+                            source_label=f"dl_{suffix}",
+                        )
+                        if config.vectorize and vector_ok:
+                            boxes_gpkg_path, boxes_layer_name = _resolve_vector_gpkg_target(
+                                out_base=vector_base,
+                                layer_name=f"dl_{suffix}_candidate_boxes",
+                                gpkg_mode=config.gpkg_mode,
+                                single_gpkg_path=single_vector_gpkg_path,
+                            )
+                            box_records = write_candidate_boxes_layer_from_prediction(
+                                mask=mask_arr,
+                                prob_map=prob_arr,
+                                transform=outputs.transform,
+                                crs=outputs.crs,
+                                gpkg_path=boxes_gpkg_path,
+                                layer_name=boxes_layer_name,
+                                min_area=config.min_area,
+                                opening_size=config.vector_opening_size,
+                                label_connectivity=config.label_connectivity,
+                                extra_fields=box_extra,
+                            )
+                            LOGGER.info(
+                                "[%s] Aday kutu katmani: %s (%d kutu)",
+                                suffix,
+                                _format_gpkg_target(boxes_gpkg_path, boxes_layer_name),
+                                len(box_records),
+                            )
+                        else:
+                            box_records = _build_candidate_box_records_from_prediction(
+                                mask=mask_arr,
+                                prob_map=prob_arr,
+                                transform=outputs.transform,
+                                crs=outputs.crs,
+                                min_area=config.min_area,
+                                opening_size=config.vector_opening_size,
+                                label_connectivity=config.label_connectivity,
+                                extra_fields=box_extra,
+                            )
+                        if config.export_candidate_excel:
+                            combined_candidate_box_rows.extend(_candidate_box_records_to_rows(box_records))
+                    except Exception as e:
+                        LOGGER.warning("[%s] Aday kutulari hazirlanamadi: %s", suffix, e)
+
         if not dl_runs:
             parser.error(
                 "Hiç geçerli encoder çalıştırılamadı. --encoders değerlerini kontrol edin veya encoders=none kullanın."
@@ -8946,6 +9310,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             if config.export_candidate_excel:
                 combined_table_path = write_combined_candidate_locations_table(
                     rows=combined_candidate_rows,
+                    candidate_box_rows=combined_candidate_box_rows if config.export_candidate_boxes else None,
                     out_base=_combined_candidate_table_base(out_prefix),
                 )
                 if combined_table_path:
@@ -9196,6 +9561,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                             ),
                         )
                         combined_candidate_rows.extend(scale_rows)
+                        if config.export_candidate_boxes:
+                            scale_box_records = _build_candidate_box_records_from_prediction(
+                                mask=scale_mask_for_rows,
+                                prob_map=scale_prob_for_rows,
+                                transform=scale_outputs.transform,
+                                crs=scale_outputs.crs,
+                                min_area=config.min_area,
+                                opening_size=config.vector_opening_size,
+                                label_connectivity=config.label_connectivity,
+                                extra_fields=_build_combined_candidate_extra_fields(
+                                    source_label=f"dl_{scale_token}",
+                                    scale_level=si + 1,
+                                    scale_factor=float(scale),
+                                ),
+                            )
+                            combined_candidate_box_rows.extend(
+                                _candidate_box_records_to_rows(scale_box_records)
+                            )
+                            LOGGER.info(
+                                "Olcek %.2fx aday kutulari tek Excel listesine eklendi: %d satir",
+                                scale,
+                                len(scale_box_records),
+                            )
                         LOGGER.info(
                             "Ölçek %.2fx adayları tek Excel listesine eklendi: %d satır",
                             scale,
@@ -9675,6 +10063,54 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             elif config.vectorize:
                 LOGGER.warning("    Vekt?r ??kt?s? atland? (%s).", vector_reason)
 
+            if config.export_candidate_boxes:
+                try:
+                    box_extra = _build_combined_candidate_extra_fields(
+                        source_label=label,
+                        scale_level=job.scale_level,
+                        scale_factor=job.scale_factor,
+                    )
+                    if config.vectorize and vector_ok:
+                        boxes_gpkg_path, boxes_layer_name = _resolve_vector_gpkg_target(
+                            out_base=job.out_base,
+                            layer_name=f"{job.gpkg_layer_name or label}_candidate_boxes",
+                            gpkg_mode=config.gpkg_mode,
+                            single_gpkg_path=single_vector_gpkg_path,
+                        )
+                        box_records = write_candidate_boxes_layer_from_prediction(
+                            mask=mask_arr,
+                            prob_map=prob_arr,
+                            transform=job.transform,
+                            crs=job.crs,
+                            gpkg_path=boxes_gpkg_path,
+                            layer_name=boxes_layer_name,
+                            min_area=config.min_area,
+                            opening_size=config.vector_opening_size,
+                            label_connectivity=config.label_connectivity,
+                            extra_fields=box_extra,
+                        )
+                        LOGGER.info(
+                            "    Aday kutu katmani (%s): %s (%d kutu)",
+                            label,
+                            _format_gpkg_target(boxes_gpkg_path, boxes_layer_name),
+                            len(box_records),
+                        )
+                    else:
+                        box_records = _build_candidate_box_records_from_prediction(
+                            mask=mask_arr,
+                            prob_map=prob_arr,
+                            transform=job.transform,
+                            crs=job.crs,
+                            min_area=config.min_area,
+                            opening_size=config.vector_opening_size,
+                            label_connectivity=config.label_connectivity,
+                            extra_fields=box_extra,
+                        )
+                    if config.export_candidate_excel:
+                        combined_candidate_box_rows.extend(_candidate_box_records_to_rows(box_records))
+                except Exception as e:
+                    LOGGER.warning("Candidate box export failed (%s): %s", label, e)
+
             if config.export_candidate_excel:
                 if config.vectorize and vector_ok:
                     LOGGER.info(f"  ? {label} adaylar? tek Excel i?in haz?rlan?yor...")
@@ -9705,6 +10141,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         if config.export_candidate_excel:
             combined_table_path = write_combined_candidate_locations_table(
                 rows=combined_candidate_rows,
+                candidate_box_rows=combined_candidate_box_rows if config.export_candidate_boxes else None,
                 out_base=_combined_candidate_table_base(out_prefix),
             )
             if combined_table_path:
