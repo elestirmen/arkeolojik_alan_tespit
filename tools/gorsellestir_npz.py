@@ -13,6 +13,9 @@ RGB_STRETCH_LOW = 2.0
 RGB_STRETCH_HIGH = 98.0
 MAX_PERCENTILE_PIXELS = 200_000
 LISTBOX_INSERT_CHUNK = 1_000
+DELETED_DIR_NAME = "silinmis"
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKSPACE_DIR = os.path.join(PROJECT_DIR, "workspace")
 BAND_NAMES = {
     0: "R",
     1: "G",
@@ -67,7 +70,7 @@ class NPZViewerApp:
 
         self.btn_delete = ttk.Button(
             self.left_frame,
-            text="Seçili Dosyayı Sil (Del)",
+            text="Seçili Dosyayı Silinmişe Taşı (Del)",
             command=self.delete_current_file,
         )
         self.btn_delete.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -247,6 +250,23 @@ class NPZViewerApp:
     def stop_key_event(event):
         return "break" if event is not None else None
 
+    @staticmethod
+    def get_unique_path(directory, file_name):
+        target_path = os.path.join(directory, file_name)
+        if not os.path.exists(target_path):
+            return target_path
+
+        stem, ext = os.path.splitext(file_name)
+        counter = 1
+        while True:
+            candidate = os.path.join(directory, f"{stem}_{counter}{ext}")
+            if not os.path.exists(candidate):
+                return candidate
+            counter += 1
+
+    def get_deleted_dir(self):
+        return os.path.join(WORKSPACE_DIR, DELETED_DIR_NAME)
+
     def delete_current_file(self, event=None):
         selection = self.listbox.curselection()
         if not selection:
@@ -255,21 +275,24 @@ class NPZViewerApp:
         idx = selection[0]
         file_path = self.files[idx]
         file_name = os.path.basename(file_path)
+        deleted_dir = self.get_deleted_dir()
 
         confirm = messagebox.askyesno(
-            "NPZ Dosyasını Sil",
-            f"{file_name} dosyası silinsin mi?\n\nBu işlem geri alınamaz.",
+            "NPZ Dosyasını Silinmişe Taşı",
+            f"{file_name} dosyası silinmis klasörüne taşınsın mı?\n\nHedef: {deleted_dir}",
             icon=messagebox.WARNING,
         )
         if not confirm:
             return self.stop_key_event(event)
 
         try:
-            os.remove(file_path)
+            os.makedirs(deleted_dir, exist_ok=True)
+            target_path = self.get_unique_path(deleted_dir, file_name)
+            shutil.move(file_path, target_path)
         except FileNotFoundError:
             messagebox.showwarning("Dosya Bulunamadı", f"{file_name} zaten silinmiş görünüyor.")
         except OSError as exc:
-            messagebox.showerror("Silme Hatası", f"{file_name} silinemedi.\n\n{exc}")
+            messagebox.showerror("Taşıma Hatası", f"{file_name} silinmis klasörüne taşınamadı.\n\n{exc}")
             return self.stop_key_event(event)
 
         self.remove_selected_file_from_list(idx)
