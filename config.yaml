@@ -204,7 +204,7 @@ encoders: "none"
 #   Gerekirse training.py çıktınızdaki gerçek dosya adıyla değiştirin.
 # IDE-FIRST TRAINED PROFILE:
 # - training.py son basarili modeli aktif checkpoint olarak buraya kopyalar.
-weights: "workspace/checkpoints/epoch_040_TileClassifier_resnet50_5ch.pth"
+weights: "workspace/checkpoints/epoch_036_TileClassifier_resnet50_5ch.pth"
 
 # training_metadata: Egitim metadata dosyasi (.json)
 # - trained_model_only modunda tile/overlap/bands bu dosyadan otomatik kilitlenir.
@@ -848,6 +848,14 @@ export_candidate_excel: true
 # - false: Sadece mevcut poligon/aday Excel akisiyla devam eder
 # NOT: Yeni etiketleme veya ayri segmentation/object-detection egitimi gerektirmez.
 export_candidate_boxes: true
+
+# fallback_candidates_*: Hic aday cikmazsa Excel bos kalmasin diye en yuksek
+# skorlu esik alti noktalari "fallback_top_score" olarak ekler.
+# - Bunlar kesin tespit degil, inceleme adayidir.
+# - min_score null ise minimum skor uygulanmaz; sadece top_k kullanilir.
+fallback_candidates_enabled: true
+fallback_candidates_top_k: 20
+fallback_candidates_min_score: null
 
 # min_area: Minimum poligon alanı (metrekare)
 # - Bu alandan küçük poligonlar çıktıdan filtrelenir

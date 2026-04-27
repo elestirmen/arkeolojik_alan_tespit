@@ -362,6 +362,8 @@ _COMBINED_CANDIDATE_TABLE_FIELD_ORDER = [
     "source_label",
     "scale_level",
     "scale_factor",
+    "candidate_type",
+    "review_status",
     "candidate_id",
     "area_m2",
     "score_mean",
@@ -379,6 +381,8 @@ _COMBINED_CANDIDATE_PRIORITY_FIELD_ORDER = [
     "source_label",
     "scale_level",
     "scale_factor",
+    "candidate_type",
+    "review_status",
     "candidate_id",
     "score_mean",
     "area_m2",
@@ -479,6 +483,10 @@ _COMBINED_CANDIDATE_RAW_FIELD_ORDER = ["input_order"] + _COMBINED_CANDIDATE_TABL
 _COMBINED_CANDIDATE_PRIORITY_HIGH = 0.80
 _COMBINED_CANDIDATE_PRIORITY_MEDIUM = 0.60
 _COMBINED_CANDIDATE_CLUSTER_DISTANCE_M = 20.0
+_CANDIDATE_TYPE_THRESHOLD = "threshold_detection"
+_CANDIDATE_TYPE_FALLBACK = "fallback_top_score"
+_REVIEW_STATUS_DEFAULT = "Kontrol edilecek"
+_REVIEW_STATUS_FALLBACK = "Esik alti aday"
 
 
 def _safe_token(value: str) -> str:
@@ -954,6 +962,22 @@ class PipelineDefaults:
             "help": "Mevcut mask/probability ciktisindan birlesik aday kutulari uret; vectorize aciksa GPKG'ye ayri layer, Excel'e ayri sayfa olarak ekler. Yeni egitim/etiketleme gerektirmez."
         },
     )
+    fallback_candidates_enabled: bool = field(
+        default=True,
+        metadata={
+            "help": "Esik/min_area sonrasi hic aday yoksa birlesik Excel'e en yuksek skorlu esik alti adaylari ekle."
+        },
+    )
+    fallback_candidates_top_k: int = field(
+        default=20,
+        metadata={"help": "Fallback aktifken eklenecek maksimum en yuksek skorlu aday sayisi."},
+    )
+    fallback_candidates_min_score: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Fallback adaylari icin opsiyonel minimum skor. None/null ise sadece top_k kullanilir."
+        },
+    )
     min_area: float = field(
         default=80.0,
         metadata={"help": "Vektörleştirmede kabul edilecek minimum poligon alanı (metrekare)"},
@@ -1090,6 +1114,17 @@ class PipelineDefaults:
         
         if self.min_area < 0:
             errors.append(f"min_area negatif olamaz, verilen: {self.min_area}")
+
+        if self.fallback_candidates_top_k < 0:
+            errors.append(
+                f"fallback_candidates_top_k negatif olamaz, verilen: {self.fallback_candidates_top_k}"
+            )
+
+        if self.fallback_candidates_min_score is not None and not 0.0 <= self.fallback_candidates_min_score <= 1.0:
+            errors.append(
+                "fallback_candidates_min_score 0-1 arasinda olmali veya null olmali, "
+                f"verilen: {self.fallback_candidates_min_score}"
+            )
         
         if self.simplify is not None and self.simplify < 0:
             errors.append(f"simplify negatif olamaz, verilen: {self.simplify}")
@@ -1269,6 +1304,21 @@ def build_config_from_args(
             LOGGER.info(f"Config dosyası yüklendi: {yaml_path}")
         except Exception as e:
             LOGGER.warning(f"Config dosyası yüklenemedi ({yaml_path}): {e}")
+
+    fallback_group = base_config.pop("fallback_candidates", None)
+    if isinstance(fallback_group, dict):
+        fallback_key_map = {
+            "enabled": "fallback_candidates_enabled",
+            "top_k": "fallback_candidates_top_k",
+            "min_score": "fallback_candidates_min_score",
+        }
+        for nested_key, field_name in fallback_key_map.items():
+            if nested_key in fallback_group and field_name not in base_config:
+                base_config[field_name] = fallback_group[nested_key]
+                yaml_supplied_fields.add(field_name)
+        yaml_supplied_fields.discard("fallback_candidates")
+    elif fallback_group is not None:
+        LOGGER.warning("fallback_candidates config degeri sozluk olmali; yok sayiliyor.")
     
     # YAML'dan gelen listeleri tuple'a çevir
     list_to_tuple_fields = {'sigma_scales', 'morphology_radii', 'rvt_radii', 'tpi_radii',
@@ -5620,13 +5670,17 @@ def _build_combined_summary_metrics(
     }
 
     priority_counts = {"Yuksek": 0, "Orta": 0, "Dusuk": 0}
+    fallback_count = 0
     for row in rows:
         band = _combined_candidate_priority_band(_candidate_row_number(row, "score_mean"))
         if band in priority_counts:
             priority_counts[band] += 1
+        if str(row.get("candidate_type") or "") == _CANDIDATE_TYPE_FALLBACK:
+            fallback_count += 1
 
     return [
         {"metric": "toplam_aday_sayisi", "value": len(rows)},
+        {"metric": "fallback_aday_sayisi", "value": fallback_count},
         {"metric": "toplam_kume_sayisi", "value": len(cluster_rows)},
         {"metric": "benzersiz_kaynak_sayisi", "value": len(source_labels)},
         {"metric": "benzersiz_scale_sayisi", "value": len(scale_factors)},
@@ -6040,11 +6094,15 @@ def _build_combined_candidate_extra_fields(
     source_label: str,
     scale_level: Optional[int] = None,
     scale_factor: Optional[float] = None,
+    candidate_type: str = _CANDIDATE_TYPE_THRESHOLD,
+    review_status: str = _REVIEW_STATUS_DEFAULT,
 ) -> Dict[str, Any]:
     return {
         "source_label": str(source_label),
         "scale_level": scale_level,
         "scale_factor": scale_factor,
+        "candidate_type": str(candidate_type),
+        "review_status": str(review_status),
     }
 
 
@@ -6199,6 +6257,164 @@ def build_candidate_location_rows_from_prediction(
             row.update(extra_fields)
         rows.append(row)
     return rows
+
+
+def _fallback_candidate_min_separation_pixels(transform: Affine, min_area: float) -> int:
+    pixel_width = abs(float(transform[0]))
+    pixel_height = abs(float(transform[4]))
+    pixel_area = pixel_width * pixel_height
+    if not np.isfinite(pixel_area) or pixel_area <= 0:
+        return 8
+    if float(min_area) <= 0:
+        return 8
+    diameter_px = math.sqrt(max(float(min_area), pixel_area) / pixel_area)
+    return max(1, min(256, int(round(diameter_px * 0.5))))
+
+
+def _select_top_score_pixels(
+    prob_map: np.ndarray,
+    *,
+    top_k: int,
+    min_score: Optional[float],
+    min_separation_pixels: int,
+) -> List[Tuple[int, int, float]]:
+    if top_k <= 0 or prob_map.size == 0:
+        return []
+
+    scores = np.array(prob_map, dtype=np.float32, copy=True)
+    valid = np.isfinite(scores)
+    if min_score is not None:
+        valid &= scores >= float(min_score)
+    scores[~valid] = -np.inf
+
+    selected: List[Tuple[int, int, float]] = []
+    radius = max(0, int(min_separation_pixels))
+    height, width = scores.shape
+    for _ in range(int(top_k)):
+        flat_idx = int(np.argmax(scores))
+        score = float(scores.flat[flat_idx])
+        if not np.isfinite(score):
+            break
+        row, col = (int(v) for v in np.unravel_index(flat_idx, scores.shape))
+        selected.append((row, col, score))
+        if radius <= 0:
+            scores[row, col] = -np.inf
+            continue
+        r0 = max(0, row - radius)
+        r1 = min(height, row + radius + 1)
+        c0 = max(0, col - radius)
+        c1 = min(width, col + radius + 1)
+        scores[r0:r1, c0:c1] = -np.inf
+    return selected
+
+
+def build_fallback_candidate_location_rows_from_prediction(
+    *,
+    prob_map: np.ndarray,
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    min_area: float,
+    top_k: int,
+    min_score: Optional[float],
+    extra_fields: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Build low-threshold review rows from the highest probability pixels."""
+    selected = _select_top_score_pixels(
+        prob_map,
+        top_k=top_k,
+        min_score=min_score,
+        min_separation_pixels=_fallback_candidate_min_separation_pixels(transform, min_area),
+    )
+    if not selected:
+        return []
+
+    pixel_area = float(abs(transform[0]) * abs(transform[4]))
+    native_crs = _format_crs_label(crs)
+    native_xs: List[float] = []
+    native_ys: List[float] = []
+    for row, col, _score in selected:
+        center_x, center_y = transform * (float(col) + 0.5, float(row) + 0.5)
+        native_xs.append(float(center_x))
+        native_ys.append(float(center_y))
+
+    gps_lons, gps_lats = _transform_points_to_wgs84(native_xs, native_ys, crs)
+    rows: List[Dict[str, Any]] = []
+    for idx, (_row, _col, score) in enumerate(selected):
+        gps_lon = gps_lons[idx]
+        gps_lat = gps_lats[idx]
+        google_maps_url = ""
+        if gps_lat is not None and gps_lon is not None:
+            google_maps_url = f"https://maps.google.com/?q={gps_lat:.8f},{gps_lon:.8f}"
+        row = {
+            "candidate_id": idx + 1,
+            "candidate_type": _CANDIDATE_TYPE_FALLBACK,
+            "review_status": _REVIEW_STATUS_FALLBACK,
+            "area_m2": pixel_area,
+            "score_mean": float(score),
+            "center_x_native": native_xs[idx],
+            "center_y_native": native_ys[idx],
+            "native_crs": native_crs,
+            "gps_lon": gps_lon,
+            "gps_lat": gps_lat,
+            "google_maps_url": google_maps_url,
+        }
+        if extra_fields:
+            row.update(extra_fields)
+        row["candidate_type"] = _CANDIDATE_TYPE_FALLBACK
+        row["review_status"] = _REVIEW_STATUS_FALLBACK
+        rows.append(row)
+    return rows
+
+
+def _fallback_rows_for_empty_candidate_result(
+    *,
+    normal_rows: Sequence[Dict[str, Any]],
+    enabled: bool,
+    prob_map: np.ndarray,
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    min_area: float,
+    top_k: int,
+    min_score: Optional[float],
+    extra_fields: Optional[Dict[str, Any]],
+    label: str,
+) -> List[Dict[str, Any]]:
+    if normal_rows or not enabled or top_k <= 0:
+        return []
+    fallback_rows = build_fallback_candidate_location_rows_from_prediction(
+        prob_map=prob_map,
+        transform=transform,
+        crs=crs,
+        min_area=min_area,
+        top_k=top_k,
+        min_score=min_score,
+        extra_fields=extra_fields,
+    )
+    if fallback_rows:
+        LOGGER.info(
+            "    Esik ustu aday yok (%s); fallback top-score adaylari hazirlandi: %d",
+            label,
+            len(fallback_rows),
+        )
+    return fallback_rows
+
+
+def _use_fallback_rows_if_no_candidates(
+    *,
+    rows: Sequence[Dict[str, Any]],
+    fallback_rows: Sequence[Dict[str, Any]],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    if rows:
+        return list(rows)
+    if top_k <= 0 or not fallback_rows:
+        return list(rows)
+    selected = sorted((dict(row) for row in fallback_rows), key=_combined_candidate_sort_key)[: int(top_k)]
+    LOGGER.info(
+        "Esik/min_area sonrasi hic aday bulunamadi; birlesik Excel'e en yuksek skorlu %d fallback aday eklendi.",
+        len(selected),
+    )
+    return selected
 
 
 def _candidate_label_structure(label_connectivity: int) -> np.ndarray:
@@ -8323,6 +8539,30 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         ),
     )
     parser.add_argument(
+        "--fallback-candidates",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("fallback_candidates_enabled"),
+        dest="fallback_candidates_enabled",
+        help=cli_help(
+            "fallback_candidates_enabled",
+            "(set --no-fallback-candidates to leave the combined Excel empty when no candidate passes filters).",
+        ),
+    )
+    parser.add_argument(
+        "--fallback-candidates-top-k",
+        type=int,
+        default=default_for("fallback_candidates_top_k"),
+        dest="fallback_candidates_top_k",
+        help=cli_help("fallback_candidates_top_k"),
+    )
+    parser.add_argument(
+        "--fallback-candidates-min-score",
+        type=float,
+        default=default_for("fallback_candidates_min_score"),
+        dest="fallback_candidates_min_score",
+        help=cli_help("fallback_candidates_min_score"),
+    )
+    parser.add_argument(
         "--arch",
         default=default_for("arch"),
         help=cli_help("arch"),
@@ -8974,6 +9214,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     combined_candidate_rows: List[Dict[str, Any]] = []
     combined_candidate_box_rows: List[Dict[str, Any]] = []
+    combined_candidate_fallback_rows: List[Dict[str, Any]] = []
 
     # Derin öğrenme etkinse modelleri çalıştır
     if config.enable_deep_learning and ran_multi:
@@ -9249,6 +9490,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         )
                         combined_candidate_rows.extend(job_rows)
                         LOGGER.info("[%s] Tek Excel listesine eklenen aday sayisi: %d", suffix, len(job_rows))
+                        combined_candidate_fallback_rows.extend(
+                            _fallback_rows_for_empty_candidate_result(
+                                normal_rows=job_rows,
+                                enabled=config.fallback_candidates_enabled,
+                                prob_map=prob_arr,
+                                transform=outputs.transform,
+                                crs=outputs.crs,
+                                min_area=config.min_area,
+                                top_k=config.fallback_candidates_top_k,
+                                min_score=config.fallback_candidates_min_score,
+                                extra_fields=_build_combined_candidate_extra_fields(
+                                    source_label=f"dl_{suffix}",
+                                ),
+                                label=f"dl_{suffix}",
+                            )
+                        )
                     except Exception as e:
                         LOGGER.warning("[%s] Tek Excel satirlari hazirlanamadi: %s", suffix, e)
 
@@ -9312,8 +9569,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         # Klasik yöntemler kapalıysa burada çık, açıksa devam et
         if not config.enable_classic and not config.enable_yolo:
             if config.export_candidate_excel:
-                combined_table_path = write_combined_candidate_locations_table(
+                table_rows = _use_fallback_rows_if_no_candidates(
                     rows=combined_candidate_rows,
+                    fallback_rows=combined_candidate_fallback_rows,
+                    top_k=config.fallback_candidates_top_k,
+                )
+                combined_table_path = write_combined_candidate_locations_table(
+                    rows=table_rows,
                     candidate_box_rows=combined_candidate_box_rows if config.export_candidate_boxes else None,
                     out_base=_combined_candidate_table_base(out_prefix),
                 )
@@ -9592,6 +9854,24 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                             "Ölçek %.2fx adayları tek Excel listesine eklendi: %d satır",
                             scale,
                             len(scale_rows),
+                        )
+                        combined_candidate_fallback_rows.extend(
+                            _fallback_rows_for_empty_candidate_result(
+                                normal_rows=scale_rows,
+                                enabled=config.fallback_candidates_enabled,
+                                prob_map=scale_prob_for_rows,
+                                transform=scale_outputs.transform,
+                                crs=scale_outputs.crs,
+                                min_area=config.min_area,
+                                top_k=config.fallback_candidates_top_k,
+                                min_score=config.fallback_candidates_min_score,
+                                extra_fields=_build_combined_candidate_extra_fields(
+                                    source_label=f"dl_{scale_token}",
+                                    scale_level=si + 1,
+                                    scale_factor=float(scale),
+                                ),
+                                label=f"dl_{scale_token}",
+                            )
                         )
                     except Exception as exc:
                         LOGGER.warning(
@@ -10139,12 +10419,35 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     )
                     combined_candidate_rows.extend(job_rows)
                     LOGGER.info("    Tek Excel listesine eklenen aday sayisi (%s): %d", label, len(job_rows))
+                    combined_candidate_fallback_rows.extend(
+                        _fallback_rows_for_empty_candidate_result(
+                            normal_rows=job_rows,
+                            enabled=config.fallback_candidates_enabled,
+                            prob_map=prob_arr,
+                            transform=job.transform,
+                            crs=job.crs,
+                            min_area=config.min_area,
+                            top_k=config.fallback_candidates_top_k,
+                            min_score=config.fallback_candidates_min_score,
+                            extra_fields=_build_combined_candidate_extra_fields(
+                                source_label=label,
+                                scale_level=job.scale_level,
+                                scale_factor=job.scale_factor,
+                            ),
+                            label=label,
+                        )
+                    )
                 except Exception as e:
                     LOGGER.warning("Combined Excel row export failed (%s): %s", label, e)
 
         if config.export_candidate_excel:
-            combined_table_path = write_combined_candidate_locations_table(
+            table_rows = _use_fallback_rows_if_no_candidates(
                 rows=combined_candidate_rows,
+                fallback_rows=combined_candidate_fallback_rows,
+                top_k=config.fallback_candidates_top_k,
+            )
+            combined_table_path = write_combined_candidate_locations_table(
+                rows=table_rows,
                 candidate_box_rows=combined_candidate_box_rows if config.export_candidate_boxes else None,
                 out_base=_combined_candidate_table_base(out_prefix),
             )
