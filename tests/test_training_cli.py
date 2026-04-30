@@ -5,8 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-from archeo_shared.channels import MODEL_CHANNEL_NAMES, METADATA_SCHEMA_VERSION
-from training import TrainingConfig, _publish_active_artifacts
+from archeo_shared.channels import MODEL_CHANNEL_NAMES, METADATA_SCHEMA_VERSION, TOPO7_CHANNEL_NAMES
+from training import TrainingConfig, _publish_active_artifacts, _resolve_training_channels
 
 
 def test_training_help_returns_zero_exit_code():
@@ -26,6 +26,34 @@ def test_training_help_returns_zero_exit_code():
         f"stderr:\n{result.stderr.decode('utf-8', errors='replace')}"
     )
     assert b"usage:" in result.stdout.lower()
+
+
+def test_resolve_training_channels_accepts_topo7_metadata():
+    in_channels, channel_names = _resolve_training_channels(
+        source_metadata={
+            "num_channels": 7,
+            "channel_names": list(TOPO7_CHANNEL_NAMES),
+        },
+        data_channel_count=7,
+    )
+
+    assert in_channels == 7
+    assert channel_names == TOPO7_CHANNEL_NAMES
+
+
+def test_resolve_training_channels_rejects_metadata_data_mismatch():
+    try:
+        _resolve_training_channels(
+            source_metadata={
+                "num_channels": 5,
+                "channel_names": list(MODEL_CHANNEL_NAMES),
+            },
+            data_channel_count=7,
+        )
+    except ValueError as exc:
+        assert "uyusmuyor" in str(exc)
+    else:
+        raise AssertionError("Expected channel mismatch to fail")
 
 
 def test_training_fails_when_all_masks_are_negative(tmp_path):

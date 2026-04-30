@@ -331,6 +331,7 @@ def _validate_append_compatibility(
     *,
     tile_size: int,
     bands: str,
+    tpi_radii: Optional[Tuple[int, ...]] = None,
     normalize: bool,
     save_format: str,
     expected_channels: int = 5,
@@ -427,6 +428,15 @@ def _validate_append_compatibility(
             except ValueError:
                 mismatches.append(
                     f"bands degeri parse edilemedi (mevcut: {metadata.get('bands')}, yeni: {bands})"
+                )
+        if metadata.get("tpi_radii") is not None and tpi_radii is not None:
+            try:
+                old_tpi = tuple(int(v) for v in metadata["tpi_radii"])
+                new_tpi = tuple(int(v) for v in tpi_radii)
+                _check("tpi_radii", old_tpi, new_tpi)
+            except (TypeError, ValueError):
+                mismatches.append(
+                    f"tpi_radii degeri parse edilemedi (mevcut: {metadata.get('tpi_radii')}, yeni: {tpi_radii})"
                 )
     elif image_shape is not None or mask_shape is not None:
         LOGGER.warning(

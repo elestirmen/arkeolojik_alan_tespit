@@ -15,11 +15,13 @@ Eger `config.local.yaml` varsa CLI otomatik olarak onu tercih eder; yoksa `confi
 
 KayÄ±tlÄ± profil **karo dÃ¼zeyinde sÄ±nÄ±flandÄ±rma** (`dl_task: tile_classification`) ve **tek eÄŸitilmiÅŸ checkpoint** (`trained_model_only: true`) iÃ§in ayarlÄ±dÄ±r. Bu modda:
 
+**Topo feature modlari:** topo modlarda kaynak raster yine **5 bantli GeoTIFF** kalir: **R, G, B, DSM, DTM**. `feature_mode: topo5` modeli **R, G, B, SVF, SLRM** ile besler. `feature_mode: topo7` modeli **R, G, B, SVF, SLRM, Slope, nDSM** ile besler. SVF/SLRM/Slope DTM'den uretilir; `nDSM = DSM - DTM`; DSM ve DTM ham kanal olarak modele verilmez. Egitim ve inference metadata'si `in_channels` ve `channel_names` tuttugu icin topo5 checkpoint topo7 tensorle, topo7 checkpoint de topo5 tensorle sessizce calismaz; acik sema hatasi verir.
+
 - **`weights`** (`.pth` dosyasÄ±) ve **`training_metadata`** (eÄŸitimden gelen JSON) kullanÄ±lÄ±r.
 - **`tile`**, **`overlap`** ve **`bands`** Ã§Ä±karÄ±m sÄ±rasÄ±nda `training_metadata.json` iÃ§inden kilitlenir; YAMLâ€™da yalnÄ±zca `overlap` deÄŸerini artÄ±rarak uyumsuzluÄŸu gidermeyin â€” farklÄ± overlap iÃ§in veri Ã¼retimini ve eÄŸitimi o overlap ile yeniden yapÄ±n.
 - BaÅŸarÄ±lÄ± bir `training.py` Ã§alÄ±ÅŸmasÄ±ndan sonra en iyi aÄŸÄ±rlÄ±klar `workspace/checkpoints/active/model.pth` dosyasÄ±na, metadata ise `workspace/checkpoints/active/training_metadata.json` dosyasÄ±na kopyalanÄ±r (`weights` yolunu `workspace/checkpoints/active/` altÄ±ndaki baÅŸka bir checkpointâ€™e de yÃ¶nlendirebilirsiniz).
 
-**Model girdi kanallarÄ± (gÃ¼ncel kod):** derin Ã¶ÄŸrenme tensÃ¶rÃ¼ **5 kanaldÄ±r** â€” **R, G, B, SVF, SLRM** â€” sÄ±rasÄ±yla `archeo_shared/channels.py` iÃ§indeki `MODEL_CHANNEL_NAMES` ile tanÄ±mlÄ±dÄ±r. GeoTIFF **5 bantlÄ±** kalÄ±r (RGB + DSM + DTM). **SVF** (Sky-View Factor) ve **SLRM** (RVT ile DTM Ã¼zerinde hesaplanan Simple Local Relief Model) `archaeo_detect.py` ve veri hazÄ±rlÄ±k betikleri **iÃ§inde tÃ¼retilir**; ayrÄ± GeoTIFF bandÄ± deÄŸildirler. Eski belgelerde geÃ§en **12 kanallÄ±** tensÃ¶r (nDSM, Ã§ok Ã¶lÃ§ekli TPI, ek RVT aÃ§Ä±klÄ±k kanallarÄ± vb.) **Ã¶nceki bir ÅŸemayÄ±** anlatÄ±r; mevcut eÄŸitim ve Ã§Ä±karÄ±m yolu bu yapÄ±yÄ± kullanmaz.
+**Model girdi kanallari (guncel kod):** `MODEL_CHANNEL_NAMES` **topo5 geriye uyumluluk varsayilani** olarak kalir: **R, G, B, SVF, SLRM**. Yeni topo7 akislari `feature_mode: topo7` / metadata `channel_names` ile **R, G, B, SVF, SLRM, Slope, nDSM** semasini secer. Eski belgelerde gecen **12 kanalli** tensor onceki bir semayi anlatir; guncel egitim ve cikarim yolu bunu kullanmaz.
 
 ---
 

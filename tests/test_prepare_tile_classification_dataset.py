@@ -12,6 +12,8 @@ from rasterio.windows import Window
 
 from prepare_tile_classification_dataset import (
     _implicit_invalid_mask,
+    compute_tile_stack,
+    feature_mode_channel_names,
     positive_ratio_from_mask,
     read_window_data,
     save_tiles,
@@ -57,6 +59,59 @@ def test_read_window_data_converts_implicit_fill_pixels_to_nan() -> None:
     assert bool(valid[0, 1]) is False
     assert np.isnan(data[:, 0, 1]).all()
     assert bool(valid[1, 1]) is True
+
+
+def test_compute_tile_stack_topo5_and_topo7_shapes_and_ndsm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arr = np.ones((5, 3, 3), dtype=np.float32)
+    arr[0] = 10.0
+    arr[1] = 20.0
+    arr[2] = 30.0
+    arr[3] = np.arange(9, dtype=np.float32).reshape(3, 3) + 100.0
+    arr[4] = np.arange(9, dtype=np.float32).reshape(3, 3) + 90.0
+
+    profile = {
+        "driver": "GTiff",
+        "height": 3,
+        "width": 3,
+        "count": 5,
+        "dtype": "float32",
+        "transform": from_origin(0, 3, 1, 1),
+    }
+
+    monkeypatch.setattr(
+        "prepare_tile_classification_dataset.compute_derivatives_with_rvt",
+        lambda dtm, **_: (
+            np.full(dtm.shape, 0.5, dtype=np.float32),
+            np.full(dtm.shape, 2.0, dtype=np.float32),
+        ),
+    )
+
+    with MemoryFile() as memfile:
+        with memfile.open(**profile) as ds:
+            ds.write(arr)
+        with memfile.open() as src:
+            topo5 = compute_tile_stack(
+                src=src,
+                window=Window(0, 0, 3, 3),
+                band_idx=(1, 2, 3, 4, 5),
+                normalize=False,
+                feature_mode="topo5",
+            )
+            topo7 = compute_tile_stack(
+                src=src,
+                window=Window(0, 0, 3, 3),
+                band_idx=(1, 2, 3, 4, 5),
+                normalize=False,
+                feature_mode="topo7",
+            )
+
+    assert topo5.shape == (5, 3, 3)
+    assert topo7.shape == (7, 3, 3)
+    assert feature_mode_channel_names("topo7") == ("R", "G", "B", "SVF", "SLRM", "Slope", "nDSM")
+    assert np.allclose(topo7[6], 10.0)
+    assert np.isfinite(topo7[5]).all()
 
 
 def test_validate_source_raster_rejects_uint8_dsm_dtm() -> None:
@@ -285,3 +340,83 @@ def test_save_tiles_selected_regions_skips_derivative_cache(
     )
 
     assert metadata["derivative_cache"][0]["mode"] == "selected_regions_direct"
+
+
+def test_ground_truth_mask_can_be_saved_as_topo7_dataset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raster_path = tmp_path / "source.tif"
+    mask_path = tmp_path / "source_ground_truth.tif"
+    profile = {
+        "driver": "GTiff",
+        "height": 4,
+        "width": 4,
+        "count": 5,
+        "dtype": "float32",
+        "transform": from_origin(0, 4, 1, 1),
+    }
+    raster_data = np.ones((5, 4, 4), dtype=np.float32)
+    raster_data[3] = 20.0
+    raster_data[4] = 12.0
+    with rasterio.open(raster_path, "w", **profile) as dst:
+        dst.write(raster_data)
+
+    mask_profile = dict(profile)
+    mask_profile["count"] = 1
+    mask_profile["dtype"] = "uint8"
+    mask_profile["nodata"] = 0
+    mask_data = np.zeros((1, 4, 4), dtype=np.uint8)
+    mask_data[:, 1:3, 1:3] = 1
+    with rasterio.open(mask_path, "w", **mask_profile) as dst:
+        dst.write(mask_data)
+
+    monkeypatch.setattr(
+        "prepare_tile_classification_dataset.compute_derivatives_with_rvt",
+        lambda dtm, **_: (
+            np.full(dtm.shape, 0.25, dtype=np.float32),
+            np.full(dtm.shape, 1.25, dtype=np.float32),
+        ),
+    )
+
+    output_dir = tmp_path / "dataset_topo7"
+    (output_dir / "train" / "Positive").mkdir(parents=True)
+    metadata: dict[str, object] = {}
+    pair = SourcePair(name="source", raster_path=raster_path, mask_path=mask_path)
+    record = TileRecord(
+        source_name="source",
+        split="train",
+        label="Positive",
+        row_off=0,
+        col_off=0,
+        positive_ratio=0.25,
+        valid_ratio=1.0,
+        positive_pixels=4,
+        total_pixels=16,
+    )
+    args = argparse.Namespace(
+        feature_mode="topo7",
+        bands="1,2,3,4,5",
+        tpi_radii="5,15,30",
+        format="npz",
+        num_workers=1,
+        tile_size=4,
+        normalize=False,
+        tile_prefix="",
+        sampling_mode="selected_regions",
+    )
+
+    save_tiles(
+        output_dir=output_dir,
+        pairs=[pair],
+        selected_records=[record],
+        metadata=metadata,
+        args=args,
+    )
+
+    saved_path = output_dir / record.output_relpath
+    with np.load(saved_path) as packed:
+        image = packed["image"]
+
+    assert image.shape == (7, 4, 4)
+    assert np.allclose(image[6], 8.0)

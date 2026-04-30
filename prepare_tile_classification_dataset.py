@@ -43,8 +43,9 @@ from rasterio.windows import Window, from_bounds
 
 from archeo_shared.channels import (
     METADATA_SCHEMA_VERSION,
-    MODEL_CHANNEL_NAMES,
-    expected_channel_names,
+    channel_names_for_feature_mode,
+    input_band_count_for_feature_mode,
+    normalize_feature_mode as normalize_shared_feature_mode,
 )
 from archeo_shared.console import configure_utf8_console
 
@@ -53,15 +54,18 @@ configure_utf8_console()
 try:
     from archaeo_detect import (
         PrecomputedDerivatives,
+        assemble_model_input,
         build_derivative_raster_cache,
         compute_derivatives_with_rvt,
+        compute_ndsm,
+        compute_slope,
+        derivative_band_names_for_channel_names,
         full_raster_cache_precompute_ok,
         get_cache_path,
         get_derivative_raster_cache_paths,
         load_derivative_raster_cache_info,
         precompute_derivatives,
         robust_norm,
-        stack_channels,
     )
 except ImportError:
     print("HATA: archaeo_detect.py bulunamadi.", file=sys.stderr)
@@ -110,9 +114,11 @@ SAMPLING_MODES = (
 )
 FEATURE_MODE_RGB3 = "rgb3"
 FEATURE_MODE_TOPO5 = "topo5"
+FEATURE_MODE_TOPO7 = "topo7"
 FEATURE_MODES = (
     FEATURE_MODE_RGB3,
     FEATURE_MODE_TOPO5,
+    FEATURE_MODE_TOPO7,
 )
 
 _SAVE_TILE_WORKER_CONTEXT: Dict[str, object] = {}
@@ -264,28 +270,26 @@ def sanitize_name(value: str) -> str:
 
 
 def normalize_feature_mode(raw: object) -> str:
-    feature_mode = str(raw).strip().lower()
-    if feature_mode not in FEATURE_MODES:
-        raise ValueError(
-            f"Desteklenmeyen feature_mode: {raw!r}. Beklenen: {', '.join(FEATURE_MODES)}"
-        )
-    return feature_mode
+    return normalize_shared_feature_mode(raw)
 
 
 def feature_mode_channel_names(feature_mode: object) -> Tuple[str, ...]:
-    normalized = normalize_feature_mode(feature_mode)
-    if normalized == FEATURE_MODE_RGB3:
-        return expected_channel_names(3)
-    return expected_channel_names(len(MODEL_CHANNEL_NAMES))
+    return channel_names_for_feature_mode(feature_mode)
 
 
 def parse_feature_band_indexes(raw: str, feature_mode: object) -> Tuple[int, ...]:
-    channel_names = feature_mode_channel_names(feature_mode)
-    return parse_int_csv(raw, expected_len=len(channel_names))
+    return parse_int_csv(
+        raw,
+        expected_len=input_band_count_for_feature_mode(feature_mode),
+    )
 
 
 def feature_mode_uses_derivatives(feature_mode: object) -> bool:
-    return normalize_feature_mode(feature_mode) == FEATURE_MODE_TOPO5
+    return normalize_feature_mode(feature_mode) in {FEATURE_MODE_TOPO5, FEATURE_MODE_TOPO7}
+
+
+def feature_mode_requires_dsm(feature_mode: object) -> bool:
+    return normalize_feature_mode(feature_mode) == FEATURE_MODE_TOPO7
 
 
 def parse_int_csv(raw: str, expected_len: Optional[int] = None) -> Tuple[int, ...]:
@@ -714,7 +718,7 @@ def parse_args() -> argparse.Namespace:
         "--feature-mode",
         choices=FEATURE_MODES,
         default=str(CONFIG["feature_mode"]),
-        help="Tile tensor semasi: rgb3=R,G,B veya topo5=R,G,B,SVF,SLRM",
+        help="Tile tensor semasi: rgb3=R,G,B; topo5=R,G,B,SVF,SLRM; topo7=R,G,B,SVF,SLRM,Slope,nDSM",
     )
     parser.add_argument("--bands", type=str, default=str(CONFIG["bands"]))
     parser.add_argument(
@@ -1086,7 +1090,7 @@ def collect_selected_region_records(
     pairs: Sequence[SourcePair],
     args: argparse.Namespace,
 ) -> Tuple[List[TileRecord], Dict[str, object], Dict[str, object]]:
-    feature_mode = normalize_feature_mode(args.feature_mode)
+    feature_mode = normalize_feature_mode(getattr(args, "feature_mode", FEATURE_MODE_TOPO5))
     channel_names = feature_mode_channel_names(feature_mode)
     band_idx = parse_feature_band_indexes(args.bands, feature_mode)
     tile_size = int(args.tile_size)
@@ -1309,7 +1313,7 @@ def collect_tile_records(
     pairs: Sequence[SourcePair],
     args: argparse.Namespace,
 ) -> Tuple[List[TileRecord], Dict[str, object]]:
-    feature_mode = normalize_feature_mode(args.feature_mode)
+    feature_mode = normalize_feature_mode(getattr(args, "feature_mode", FEATURE_MODE_TOPO5))
     channel_names = feature_mode_channel_names(feature_mode)
     band_idx = parse_feature_band_indexes(args.bands, feature_mode)
     tile_size = int(args.tile_size)
@@ -1435,6 +1439,9 @@ def prepare_derivative_cache_for_source(
     cache_mode = str(getattr(args, "derivative_cache_mode", "none")).strip().lower()
     if cache_mode == "none":
         return PreparedDerivativeCache(mode="none")
+    required_derivative_names = derivative_band_names_for_channel_names(
+        feature_mode_channel_names(getattr(args, "feature_mode", FEATURE_MODE_TOPO5))
+    )
 
     cache_dir = resolve_derivative_cache_dir(args, pair.raster_path)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1501,6 +1508,16 @@ def prepare_derivative_cache_for_source(
             rvt_radii=None,
             gaussian_lrm_sigma=None,
         )
+        if raster_info is not None:
+            band_map = {str(k): int(v) for k, v in dict(raster_info.get("band_map", {})).items()}
+            missing = [name for name in required_derivative_names if name not in band_map]
+            if missing:
+                print(
+                    "BILGI: Mevcut derivative raster-cache topo semasi eksik "
+                    f"({', '.join(missing)}); yeniden olusturulacak.",
+                    flush=True,
+                )
+                raster_info = None
     if raster_info is None:
         _remove_raster_cache_files()
         try:
@@ -1547,6 +1564,26 @@ def prepare_derivative_cache_for_source(
     )
 
 
+def _assemble_feature_stack(
+    *,
+    rgb: np.ndarray,
+    feature_mode: str,
+    svf: Optional[np.ndarray] = None,
+    slrm: Optional[np.ndarray] = None,
+    slope: Optional[np.ndarray] = None,
+    ndsm: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    channel_names = feature_mode_channel_names(feature_mode)
+    return assemble_model_input(
+        rgb,
+        channel_names=channel_names,
+        svf=svf,
+        slrm=slrm,
+        slope=slope,
+        ndsm=ndsm,
+    )
+
+
 def compute_tile_stack(
     *,
     src: rasterio.DatasetReader,
@@ -1558,6 +1595,7 @@ def compute_tile_stack(
     data, _ = read_window_data(src, band_idx, window)
     rgb = data[:3]
     if feature_mode_uses_derivatives(feature_mode):
+        dsm = data[3]
         dtm = data[4]
         pixel_size = float((abs(src.transform.a) + abs(src.transform.e)) / 2.0)
         svf, slrm = compute_derivatives_with_rvt(
@@ -1566,7 +1604,16 @@ def compute_tile_stack(
             show_progress=False,
             log_steps=False,
         )
-        stacked = stack_channels(rgb, svf, slrm)
+        slope = compute_slope(dtm, pixel_size=pixel_size) if normalize_feature_mode(feature_mode) == FEATURE_MODE_TOPO7 else None
+        ndsm = compute_ndsm(dsm, dtm) if normalize_feature_mode(feature_mode) == FEATURE_MODE_TOPO7 else None
+        stacked = _assemble_feature_stack(
+            rgb=rgb,
+            feature_mode=feature_mode,
+            svf=svf,
+            slrm=slrm,
+            slope=slope,
+            ndsm=ndsm,
+        )
     else:
         stacked = rgb.astype(np.float32, copy=False)
     if normalize:
@@ -1590,7 +1637,19 @@ def compute_tile_stack_from_precomputed(
     if feature_mode_uses_derivatives(feature_mode):
         svf = precomputed.svf[row_start:row_end, col_start:col_end].copy()
         slrm = precomputed.slrm[row_start:row_end, col_start:col_end].copy()
-        stacked = stack_channels(rgb, svf, slrm)
+        slope = None
+        ndsm = None
+        if normalize_feature_mode(feature_mode) == FEATURE_MODE_TOPO7:
+            slope = precomputed.slope[row_start:row_end, col_start:col_end].copy()
+            ndsm = precomputed.ndsm[row_start:row_end, col_start:col_end].copy()
+        stacked = _assemble_feature_stack(
+            rgb=rgb,
+            feature_mode=feature_mode,
+            svf=svf,
+            slrm=slrm,
+            slope=slope,
+            ndsm=ndsm,
+        )
     else:
         stacked = rgb.astype(np.float32, copy=False)
     if normalize:
@@ -1611,12 +1670,21 @@ def compute_tile_stack_from_raster_cache(
     data, _ = read_window_data(src, band_idx, window)
     rgb = data[:3]
     if feature_mode_uses_derivatives(feature_mode):
-        band_names = ["svf", "slrm"]
+        band_names = list(derivative_band_names_for_channel_names(feature_mode_channel_names(feature_mode)))
         indexes = [int(derivative_band_map[name]) for name in band_names]
         deriv_stack = derivative_src.read(indexes=indexes, window=window, masked=True)
         deriv_stack = np.ma.filled(deriv_stack.astype(np.float32), np.nan)
-        svf, slrm = deriv_stack
-        stacked = stack_channels(rgb, svf, slrm)
+        deriv_by_name = {
+            name: deriv_stack[idx] for idx, name in enumerate(band_names)
+        }
+        stacked = _assemble_feature_stack(
+            rgb=rgb,
+            feature_mode=feature_mode,
+            svf=deriv_by_name.get("svf"),
+            slrm=deriv_by_name.get("slrm"),
+            slope=deriv_by_name.get("slope"),
+            ndsm=deriv_by_name.get("ndsm"),
+        )
     else:
         stacked = rgb.astype(np.float32, copy=False)
     if normalize:
@@ -1762,7 +1830,7 @@ def save_tiles(
     records_by_source: Dict[str, List[TileRecord]] = defaultdict(list)
     for record in selected_records:
         records_by_source[record.source_name].append(record)
-    feature_mode = normalize_feature_mode(args.feature_mode)
+    feature_mode = normalize_feature_mode(getattr(args, "feature_mode", FEATURE_MODE_TOPO5))
     band_idx = parse_feature_band_indexes(args.bands, feature_mode)
     file_ext = str(args.format)
     num_workers = int(args.num_workers)

@@ -15,11 +15,13 @@ If `config.local.yaml` exists, the CLI prefers it automatically; otherwise it fa
 
 The checked-in profile targets **tile-level classification** (`dl_task: tile_classification`) with a **single trained checkpoint** (`trained_model_only: true`). In that mode:
 
+**Topo feature modes:** topo source rasters remain **5-band GeoTIFFs**: **R, G, B, DSM, DTM**. `feature_mode: topo5` builds **R, G, B, SVF, SLRM**. `feature_mode: topo7` builds **R, G, B, SVF, SLRM, Slope, nDSM**. SVF/SLRM/Slope are derived from DTM; `nDSM = DSM - DTM`; DSM and DTM are not passed as raw model channels. Training and inference metadata stores `in_channels` and `channel_names`, so topo5 checkpoints cannot run against topo7 tensors, or vice versa, without an explicit schema error.
+
 - Use **`weights`** (your `.pth` file) and **`training_metadata`** (JSON from training).
 - **`tile`**, **`overlap`**, and **`bands`** are taken from `training_metadata.json` during inference—do not "fix" mismatches by editing overlap in YAML; retrain with the desired overlap if needed.
 - After a successful `training.py` run, the best weights are published to `workspace/checkpoints/active/model.pth` and metadata to `workspace/checkpoints/active/training_metadata.json` (you may point `weights` to another file in `workspace/checkpoints/active/` if you prefer).
 
-**Model input channels (current code):** the deep-learning stack is **5 channels** — **R, G, B, SVF, SLRM** — in that order (`archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`). The GeoTIFF remains **5 bands** (RGB + DSM + DTM). **SVF** (Sky-View Factor) and **SLRM** (Simple Local Relief Model from RVT, computed on DTM) are **derived inside** `archaeo_detect.py` / the dataset scripts; they are not separate GeoTIFF bands. Older documentation that referred to a 12-channel tensor (nDSM, multi-scale TPI, extra RVT openness channels, etc.) describes a **previous schema**, not the current training + inference path.
+**Model input channels (current code):** `MODEL_CHANNEL_NAMES` remains the **topo5 compatibility default**: **R, G, B, SVF, SLRM**. New topo7 runs use `feature_mode: topo7` / metadata `channel_names` to select **R, G, B, SVF, SLRM, Slope, nDSM**. Older documentation that referred to a 12-channel tensor describes a previous schema, not the current training + inference path.
 
 ---
 

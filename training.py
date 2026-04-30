@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Arkeolojik Alan Tespiti - 5 Kanallı U-Net Eğitim Scripti
+Arkeolojik Alan Tespiti - DL eğitim scripti
 
-Bu script, egitim_verisi_olusturma.py ile oluşturulan 5 kanallı tile'ları
-kullanarak U-Net modelini eğitir.
+Bu script, hazırlanan tile datasetlerinden 3, 5 veya 7 kanallı modeli eğitir.
+Kanal sayısı metadata'dan veya veriden otomatik doğrulanır.
 
 Özellikler:
-    - 5 kanallı girdi desteği (RGB + SVF + SLRM)
+    - rgb3, topo5 ve topo7 girdi desteği
     - CBAM Attention modülü (opsiyonel)
     - Mixed precision training (AMP)
     - Erken durdurma (Early stopping)
@@ -53,7 +53,12 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
 from tqdm import tqdm
 
-from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
+from archeo_shared.channels import (
+    METADATA_SCHEMA_VERSION,
+    MODEL_CHANNEL_NAMES,
+    canonicalize_channel_names,
+    expected_channel_names,
+)
 from archeo_shared.modeling import AttentionWrapper, CBAM, ChannelAttention, SpatialAttention
 
 # Segmentation Models PyTorch
@@ -442,9 +447,10 @@ def _count_positive_tiles_from_class_dirs(
 
 class ArchaeologyDataset(Dataset):
     """
-    5 kanallı arkeolojik alan tespiti veri seti.
+    Arkeolojik alan tespiti veri seti.
     
-    egitim_verisi_olusturma.py tarafından oluşturulan .npy dosyalarını okur.
+    prepare_tile_classification_dataset.py tarafından oluşturulan 3/5/7 kanallı
+    .npz/.npy dosyalarını okur.
     """
     
     def __init__(
@@ -1475,6 +1481,95 @@ def _infer_file_format(data_dir: Path, *, allow_missing_val: bool = False) -> st
         )
 
     return train_format
+
+
+def _load_image_channel_count(tile_path: Path) -> int:
+    """Read channel count from one .npy/.npz image tile."""
+    if tile_path.suffix.lower() == ".npy":
+        image = np.load(tile_path, mmap_mode="r")
+    else:
+        with np.load(tile_path) as packed:
+            if "image" not in packed:
+                raise ValueError(f"'image' anahtari bulunamadi: {tile_path}")
+            image = packed["image"]
+    if image.ndim != 3:
+        raise ValueError(f"Tile image shape (C,H,W) olmali: {tile_path} -> {image.shape}")
+    return int(image.shape[0])
+
+
+def _find_first_image_tile(data_dir: Path, data_layout: str) -> Optional[Path]:
+    """Find a representative training tile for channel-count inference."""
+    candidate_dirs: List[Path] = []
+    if data_layout == "classification_folders":
+        for split in ("train", "val"):
+            for label in CLASS_LABELS:
+                candidate_dirs.append(_resolve_class_dir(data_dir / split, label))
+    else:
+        candidate_dirs.extend(
+            [
+                data_dir / "train" / "images",
+                data_dir / "val" / "images",
+            ]
+        )
+    for directory in candidate_dirs:
+        for suffix in ("*.npz", "*.npy"):
+            matches = sorted(directory.glob(suffix)) if directory.exists() else []
+            if matches:
+                return matches[0]
+    return None
+
+
+def _infer_data_channel_count(data_dir: Path, data_layout: str) -> Optional[int]:
+    tile_path = _find_first_image_tile(data_dir, data_layout)
+    if tile_path is None:
+        return None
+    return _load_image_channel_count(tile_path)
+
+
+def _resolve_training_channels(
+    *,
+    source_metadata: Dict[str, Any],
+    data_channel_count: Optional[int],
+) -> Tuple[int, Tuple[str, ...]]:
+    """Resolve and validate training channel schema from metadata and data."""
+    metadata_channels_raw = source_metadata.get("channel_names")
+    metadata_channel_names: Optional[Tuple[str, ...]] = None
+    if isinstance(metadata_channels_raw, list) and metadata_channels_raw:
+        metadata_channel_names = canonicalize_channel_names(
+            tuple(str(x) for x in metadata_channels_raw)
+        )
+
+    metadata_count_raw = source_metadata.get("num_channels", source_metadata.get("in_channels"))
+    metadata_count: Optional[int] = None
+    if metadata_count_raw not in (None, ""):
+        metadata_count = int(metadata_count_raw)
+        expected_channel_names(metadata_count)
+
+    if metadata_channel_names is not None:
+        if metadata_count is not None and metadata_count != len(metadata_channel_names):
+            raise ValueError(
+                "metadata num_channels ile channel_names uzunlugu uyusmuyor: "
+                f"{metadata_count} vs {len(metadata_channel_names)}"
+            )
+        resolved_count = len(metadata_channel_names)
+        resolved_names = metadata_channel_names
+    elif metadata_count is not None:
+        resolved_count = metadata_count
+        resolved_names = expected_channel_names(metadata_count)
+    elif data_channel_count is not None:
+        resolved_count = int(data_channel_count)
+        resolved_names = expected_channel_names(resolved_count)
+    else:
+        resolved_count = len(MODEL_CHANNEL_NAMES)
+        resolved_names = tuple(MODEL_CHANNEL_NAMES)
+
+    if data_channel_count is not None and int(data_channel_count) != int(resolved_count):
+        raise ValueError(
+            "Egitim verisi kanal sayisi metadata ile uyusmuyor: "
+            f"veri={data_channel_count}, metadata/model={resolved_count}."
+        )
+
+    return int(resolved_count), tuple(resolved_names)
 
 
 def _load_mask_array(mask_path: Path, file_format: str) -> np.ndarray:
@@ -2824,7 +2919,7 @@ def train(config: TrainingConfig) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="5 kanallı arkeolojik tespit modeli eğitimi",
+        description="3/5/7 kanalli arkeolojik tespit modeli egitimi",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     
@@ -3182,22 +3277,37 @@ def main():
         sys.exit(1)
     
     # Metadata'dan kanal sayısını oku
+    try:
+        data_channel_count = _infer_data_channel_count(data_dir, data_layout)
+    except Exception as exc:
+        print(f"HATA: Egitim verisinden kanal sayisi okunamadi:\n{exc}")
+        sys.exit(1)
+
     metadata_path = data_dir / "metadata.json"
-    channel_names = MODEL_CHANNEL_NAMES
     source_metadata: Dict[str, Any] = {}
     source_metadata_path: Optional[Path] = None
     if metadata_path.exists():
         with open(metadata_path, encoding="utf-8") as f:
             source_metadata = json.load(f)
         source_metadata_path = metadata_path
-        in_channels = source_metadata.get("num_channels", 5)
-        LOGGER.info(f"Metadata'dan kanal sayısı okundu: {in_channels}")
-        raw_channel_names = source_metadata.get("channel_names")
-        if isinstance(raw_channel_names, list) and raw_channel_names:
-            channel_names = tuple(str(x) for x in raw_channel_names)
+
+    try:
+        in_channels, channel_names = _resolve_training_channels(
+            source_metadata=source_metadata,
+            data_channel_count=data_channel_count,
+        )
+    except Exception as exc:
+        print(f"HATA: Kanal semasi dogrulanamadi:\n{exc}")
+        sys.exit(1)
+
+    if metadata_path.exists():
+        LOGGER.info("Metadata'dan kanal semasi okundu: %s (%d kanal)", list(channel_names), in_channels)
     else:
-        in_channels = 5
-        LOGGER.warning(f"Metadata bulunamadı, varsayılan kanal sayısı kullanılıyor: {in_channels}")
+        LOGGER.warning(
+            "Metadata bulunamadi; kanal semasi veriden/cozumden alindi: %s (%d kanal)",
+            list(channel_names),
+            in_channels,
+        )
 
     auto_val_ratio = _resolve_auto_val_holdout_ratio(source_metadata)
 

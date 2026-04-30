@@ -184,6 +184,7 @@ CONFIG: dict[str, object] = {
     # dataset_default_feature_mode:
     # Export edilen tile tensorunun semasi.
     # "topo5" -> R,G,B,SVF,SLRM
+    # "topo7" -> R,G,B,SVF,SLRM,Slope,nDSM
     # "rgb3"  -> R,G,B
     "dataset_default_feature_mode": "topo5",
     
@@ -245,7 +246,7 @@ CONFIG: dict[str, object] = {
     "default_preview_bands_raw": "1,2,3",
     # default_model_bands_raw:
     # Tile export ve model tarafinda beklenen bant sirasi.
-    # topo5 icin format: R,G,B,DSM,DTM
+    # topo5/topo7 icin format: R,G,B,DSM,DTM
     # rgb3 icin format: R,G,B
     "default_model_bands_raw": "1,2,3,4,5",
     "default_model_bands_rgb_raw": "1,2,3",
@@ -570,7 +571,7 @@ def sanitize_name(value: str) -> str:
 
 def normalize_feature_mode(raw: object) -> str:
     value = str(raw).strip().lower()
-    if value not in {"rgb3", "topo5"}:
+    if value not in {"rgb3", "topo5", "topo7"}:
         raise ValueError(f"Desteklenmeyen feature_mode: {raw!r}")
     return value
 
@@ -1601,6 +1602,7 @@ class TileDatasetExportDialog(QDialog):
 
         self.combo_feature_mode = QComboBox(self)
         self.combo_feature_mode.addItem("topo5 - RGB + SVF + SLRM", "topo5")
+        self.combo_feature_mode.addItem("topo7 - RGB + SVF + SLRM + Slope + nDSM", "topo7")
         self.combo_feature_mode.addItem("rgb3 - sadece RGB", "rgb3")
         default_feature_index = self.combo_feature_mode.findData(
             normalize_feature_mode(default_feature_mode)
@@ -1610,7 +1612,7 @@ class TileDatasetExportDialog(QDialog):
 
         self.edit_model_bands = QLineEdit(default_bands_raw)
         self.edit_model_bands.setPlaceholderText(DEFAULT_MODEL_BANDS_RAW)
-        self.edit_model_bands.setToolTip("topo5: R,G,B,DSM,DTM | rgb3: R,G,B")
+        self.edit_model_bands.setToolTip("topo5/topo7: R,G,B,DSM,DTM | rgb3: R,G,B")
         form.addRow("Model bantlari:", self.edit_model_bands)
 
         self.spin_tile_size = QSpinBox(self)
@@ -1710,7 +1712,7 @@ class TileDatasetExportDialog(QDialog):
             "Onerilen baslangic: tile=256, overlap=128, pozitif esigi=0.02.\n"
             "Not: 0.02 esigi, tile'in sadece %2'si secili olsa bile Positive yazabilir; "
             "buyuk tile boyutlarinda secim tile'in kenarinda kalmis gibi gorunebilir.\n"
-            "topo5 mevcut modelle uyumludur; rgb3 sadece RGB tile dataset uretir.\n"
+            "topo5 mevcut 5 kanalli modelle uyumludur; topo7 Slope+nDSM ekler; rgb3 sadece RGB tile dataset uretir.\n"
             "PNG sadece rgb3 modunda kullanilabilir.\n"
             "Derivative cache varsayilan olarak <girdi_raster_klasoru>/cache altina yazilir.\n"
             "Hiz onemliyse NPY + auto cache + orta seviye worker sayisi iyi baslangictir."
@@ -1783,7 +1785,7 @@ class TileDatasetExportDialog(QDialog):
             parse_int_csv(current_bands, expected_len=expected_bands)
         except Exception:
             self.edit_model_bands.setText(placeholder)
-        uses_derivatives = feature_mode == "topo5"
+        uses_derivatives = feature_mode in {"topo5", "topo7"}
         self.combo_derivative_cache_mode.setEnabled(uses_derivatives)
         self.edit_derivative_cache_dir.setEnabled(uses_derivatives)
         self.btn_browse_derivative_cache_dir.setEnabled(uses_derivatives)
@@ -1801,7 +1803,7 @@ class TileDatasetExportDialog(QDialog):
             auto_output = self._auto_output_dir
             if auto_output.name:
                 stem = auto_output.name
-                suffixes = ("_rgb3", "_topo5")
+                suffixes = ("_rgb3", "_topo5", "_topo7")
                 for suffix in suffixes:
                     if stem.endswith(suffix):
                         stem = stem[: -len(suffix)]
@@ -1830,7 +1832,7 @@ class TileDatasetExportDialog(QDialog):
             if feature_mode == "rgb3":
                 self._validation.setText("RGB3 icin model bantlari 3 tamsayi olmali: R,G,B")
             else:
-                self._validation.setText("TOPO5 icin model bantlari 5 tamsayi olmali: R,G,B,DSM,DTM")
+                self._validation.setText("TOPO5/TOPO7 icin model bantlari 5 tamsayi olmali: R,G,B,DSM,DTM")
         elif not format_ok:
             self._validation.setText("PNG formati yalnizca RGB3 feature modu ile kullanilabilir.")
         elif not overlap_ok:
@@ -3158,7 +3160,7 @@ class MainWindow(QMainWindow):
             with rasterio.open(input_path) as src:
                 if src.count < max(band_idx):
                     return f"Raster {src.count} bant iceriyor ama model bantlari {band_idx} istiyor."
-                if normalized_mode == "topo5":
+                if normalized_mode in {"topo5", "topo7"}:
                     dsm_dtype = np.dtype(src.dtypes[int(band_idx[3]) - 1])
                     dtm_dtype = np.dtype(src.dtypes[int(band_idx[4]) - 1])
                     if (
@@ -3171,7 +3173,7 @@ class MainWindow(QMainWindow):
                             "Secilen DSM/DTM bantlari 8-bit gorunuyor "
                             f"({dsm_dtype}/{dtm_dtype}).\n\n"
                             "Bu durumda yukseklik verisi 0-255'e ezilmis olabilir; "
-                            "SVF, SLRM ve benzeri topografik bantlar guvenilir uretilemez.\n\n"
+                            "SVF, SLRM, Slope ve nDSM gibi topografik bantlar guvenilir uretilemez.\n\n"
                             "Float32 DSM/DTM iceren dogru 5-band GeoTIFF ile tekrar deneyin."
                         )
         except Exception as exc:

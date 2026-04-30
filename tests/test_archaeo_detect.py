@@ -20,7 +20,7 @@ from rasterio.crs import CRS as RasterioCRS
 # Proje kök dizinini path'e ekle
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES
+from archeo_shared.channels import METADATA_SCHEMA_VERSION, MODEL_CHANNEL_NAMES, TOPO7_CHANNEL_NAMES
 from archaeo_detect import (
     PipelineDefaults,
     apply_yolo_output_defaults,
@@ -31,6 +31,7 @@ from archaeo_detect import (
     export_candidate_locations_table,
     percentile_clip,
     compute_ndsm,
+    compute_slope,
     resolve_training_metadata,
     _resolve_yolo_weights_path,
     _build_candidate_box_records_from_prediction,
@@ -39,6 +40,7 @@ from archaeo_detect import (
     robust_norm,
     robust_norm_fixed,
     stack_channels,
+    stack_topo7_channels,
     fill_nodata,
     _local_variance,
     _hessian_response,
@@ -287,6 +289,27 @@ class TestNormalizationFunctions:
         assert np.array_equal(result[3], svf)
         assert np.array_equal(result[4], slrm)
 
+    def test_stack_topo7_channels_canonical_order(self):
+        rgb = np.array(
+            [
+                [[1, 2], [3, 4]],
+                [[5, 6], [7, 8]],
+                [[9, 10], [11, 12]],
+            ],
+            dtype=np.float32,
+        )
+        svf = np.full((2, 2), 13, dtype=np.float32)
+        slrm = np.full((2, 2), 14, dtype=np.float32)
+        slope = np.full((2, 2), 15, dtype=np.float32)
+        ndsm = np.full((2, 2), 16, dtype=np.float32)
+
+        result = stack_topo7_channels(rgb, svf, slrm, slope, ndsm)
+
+        assert result.shape == (7, 2, 2)
+        assert tuple(TOPO7_CHANNEL_NAMES) == ("R", "G", "B", "SVF", "SLRM", "Slope", "nDSM")
+        assert np.array_equal(result[5], slope)
+        assert np.array_equal(result[6], ndsm)
+
 
 # ============================================================================
 # nDSM Hesaplama Testleri
@@ -324,6 +347,22 @@ class TestComputeNDSM:
 # ============================================================================
 # Otsu Eşikleme Testleri
 # ============================================================================
+
+def test_compute_slope_returns_finite_values_for_valid_dtm():
+    dtm = np.array(
+        [
+            [0.0, 1.0, 2.0],
+            [0.0, 1.0, 2.0],
+            [0.0, 1.0, 2.0],
+        ],
+        dtype=np.float32,
+    )
+
+    slope = compute_slope(dtm, pixel_size=1.0)
+
+    assert slope.shape == dtm.shape
+    assert np.isfinite(slope).all()
+
 
 def test_compute_derivatives_with_rvt_uses_sky_view_factor_for_openness(monkeypatch) -> None:
     import archaeo_detect as module
@@ -746,7 +785,7 @@ class TestConfigOverride:
             configured_path=Path("missing_training_metadata.json"),
             weights_path=Path("workspace/checkpoints/epoch_008_TileClassifier_resnet50_5ch.pth"),
             checkpoint_hints={
-                "schema_version": 3,
+                "schema_version": METADATA_SCHEMA_VERSION,
                 "task_type": "tile_classification",
                 "arch": "TileClassifier",
                 "encoder": "resnet50",

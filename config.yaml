@@ -17,10 +17,10 @@
 # gore cozulur. CLI'dan verilen yollar ise calistiginiz working directory'ye
 # gore cozulur.
 #
-# 5-KANAL MODEL: Girdi GeoTIFF hâlâ 5 bantlı (R, G, B, DSM, DTM). Ağ girişi ise
-# 5 kanaldır: R, G, B, SVF, SLRM — SVF ve SLRM DSM/DTM’den (ve gerekiyorsa
-# ilgili ön işlemlerden) içeride türetilir; ayrıca “ek topografik kanal”
-# (curvature/TPI vb.) bu şemada kullanılmaz.
+# MODEL FEATURE SEMALARI: Girdi GeoTIFF topo modlarda 5 bantlidir (R,G,B,DSM,DTM).
+# topo5 ag girisi: R,G,B,SVF,SLRM.
+# topo7 ag girisi: R,G,B,SVF,SLRM,Slope,nDSM.
+# DSM/DTM ham kanal olarak modele verilmez; topografik kanallar iceride turetilir.
 # Repo ici calisma verileri icin varsayilan kok: workspace/
 # ============================================================================
 
@@ -60,6 +60,18 @@ out_prefix: null
 #   - "1,2,3,0,5"    → RGB + DSM yok + DTM
 #   - "1,2,3,0,0"    → Geçersiz (DTM zorunlu)
 bands: "1,2,3,4,5"
+
+# feature_mode: Derin ogrenme modelinin bekledigi kanal semasi.
+# - "auto"  : checkpoint/training_metadata varsa oradan, yoksa bands'tan cikarilir
+# - "topo5" : R,G,B,SVF,SLRM (mevcut 5 kanal checkpointler)
+# - "topo7" : R,G,B,SVF,SLRM,Slope,nDSM (yeni 7 kanal checkpointler)
+# - "rgb3"  : R,G,B
+# Not: topo5/topo7 icin girdi GeoTIFF yine 5 banttir: R,G,B,DSM,DTM.
+# SVF, SLRM ve Slope DTM'den; nDSM DSM-DTM olarak iceride turetilir.
+# DSM/DTM ham kanal olarak modele verilmez.
+# Ornek topo7 kullanim:
+#   feature_mode: "topo7"
+feature_mode: "auto"
 
 
 # ============================================================================
@@ -145,8 +157,8 @@ dl_task: "tile_classification"
 # Derin öğrenme yöntemi etkinse (enable_deep_learning: true), bu parametreler
 # hangi model mimarisinin ve encoder'ın kullanılacağını belirler.
 #
-# Kanal sayısı: TileClassifier girişi 5 kanaldır — R, G, B, SVF, SLRM (girdi
-# GeoTIFF bantları R,G,B,DSM,DTM kalır; SVF/SLRM tensör içinde hesaplanır).
+# Kanal sayisi feature_mode/metadata ile belirlenir: rgb3=3, topo5=5, topo7=7.
+# topo5/topo7 icin GeoTIFF bantlari R,G,B,DSM,DTM kalir; topografik kanallar iceride hesaplanir.
 
 # arch: Segmentasyon model mimarisi
 # - Segmentation Models PyTorch (SMP) kütüphanesinden desteklenen mimari
@@ -412,15 +424,15 @@ tpi_radii: [5, 15, 30]    # enable_tpi: false iken etkisiz; cache anahtarı içi
 # ============================================================================
 # BÖLÜM 4.6: CBAM ATTENTION MEKANİZMASI — varsayılan kapalı
 # ============================================================================
-# CBAM ayrı bir mimari seçenektir; 5 kanallı tensör girişinden bağımsızdır (5-bant
-# şema değişikliği ile aynı şey değildir). İhtiyaç yoksa kapalı tutun; CBAM’lı
+# CBAM ayri bir mimari secenektir; feature_mode kanal semasindan bagimsizdir.
+# Ihtiyac yoksa kapali tutun; CBAM'li
 # checkpoint kullanıyorsanız true yapın.
 #
 # # --- Eski uzun CBAM notları kaldırıldı; gerektiğinde eski config sürümüne bakın.
 enable_attention: false
 
 # attention_reduction: Attention için kanal azaltma oranı (enable_attention: true iken)
-# Örnek: 5 kanal / 4 → ara temsil → tekrar 5 kanala genişletme
+# Ornek: in_channels / 4 -> ara temsil -> tekrar in_channels'a genisletme
 attention_reduction: 4
 
 

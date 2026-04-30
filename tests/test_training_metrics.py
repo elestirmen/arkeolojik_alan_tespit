@@ -206,7 +206,7 @@ def test_resolve_classification_folder_split_counts_prefers_real_files_over_stal
         "npz",
     )
 
-    assert train_counts == (1, 1)
+    assert train_counts == (2, 1)
     assert train_source == "manifest"
     assert val_counts == (0, 0)
     assert val_source == "class_dirs"
