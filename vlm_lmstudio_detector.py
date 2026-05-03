@@ -86,6 +86,9 @@ class VlmLmStudioConfig:
     max_tiles: int = 0
     timeout: int = 120
     temperature: float = 0.0
+    export_every: int = 50
+    resume: bool = True
+    resume_jsonl_path: Optional[Path | str] = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,7 @@ class VlmDetectionSummary:
     paths: VlmOutputPaths
     total_tiles: int
     processed_tiles: int
+    resumed_tiles: int
     raw_candidate_count: int
     candidate_count: int
     error_count: int
@@ -170,6 +174,68 @@ def run_vlm_lmstudio_detection(
         if config.max_tiles > 0:
             total_tiles = min(total_tiles, int(config.max_tiles))
 
+        resume_source = _resolve_resume_source(config, paths)
+        records, processed_tile_indexes = _load_resume_records(
+            resume_source,
+            total_tiles=total_tiles,
+            raster_width=src.width,
+            raster_height=src.height,
+            tile=config.tile,
+            overlap=config.overlap,
+            selected_views=selected_views,
+            analysis_mode=layout.analysis_mode,
+            logger=log,
+        )
+        candidate_records: List[Dict[str, Any]] = []
+        error_records: List[Dict[str, Any]] = []
+        for record in records:
+            if _is_exportable_candidate(record, config.confidence_threshold):
+                candidate_records.append(record)
+            if record.get("status") == "error":
+                error_records.append(record)
+        raw_candidate_count = sum(1 for record in records if bool(record.get("candidate")) and bool(record.get("geometry")))
+        skipped_count = sum(1 for record in records if record.get("status") == "skipped")
+        resumed_tiles = len(records)
+        if resumed_tiles:
+            log.info(
+                "VLM resume: %d/%d tile onceki JSONL'den yuklendi: %s",
+                resumed_tiles,
+                total_tiles,
+                resume_source,
+            )
+        use_response_format = True
+        log.info(
+            "VLM tile planı: toplam=%d, tile=%d, overlap=%d, views=%s, analysis_mode=%s, gsd=%s",
+            total_tiles,
+            config.tile,
+            config.overlap,
+            ",".join(selected_views),
+            layout.analysis_mode,
+            f"{prompt_gsd_m:.3f} m/px" if prompt_gsd_m is not None else "unknown",
+        )
+        log.info(
+            "VLM resume=%s, export_every=%d",
+            "on" if config.resume else "off",
+            config.export_every,
+        )
+
+        if len(processed_tile_indexes) >= total_tiles:
+            _write_jsonl_records(paths.jsonl, records)
+            _write_jsonl_records(paths.raw_errors_jsonl, error_records)
+            _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
+            log.info("VLM resume tum hedef tile'lari kapsiyor; LM Studio'ya yeni istek gonderilmedi.")
+            return VlmDetectionSummary(
+                paths=paths,
+                total_tiles=total_tiles,
+                processed_tiles=len(records),
+                resumed_tiles=resumed_tiles,
+                raw_candidate_count=raw_candidate_count,
+                candidate_count=len(candidate_records),
+                error_count=len(error_records),
+                used_views=tuple(selected_views),
+                analysis_mode=layout.analysis_mode,
+            )
+
         client = _make_openai_client(config)
         try:
             resolved_model = _resolve_lmstudio_model(client, config, logger=log)
@@ -181,39 +247,52 @@ def run_vlm_lmstudio_detection(
                 layout=layout,
                 selected_views=selected_views,
             )
-            _write_jsonl_records(paths.jsonl, [run_record])
-            _write_jsonl_records(paths.raw_errors_jsonl, [run_record])
-            _write_candidate_csv(paths.csv, [])
-            _write_candidate_xlsx(paths.xlsx, [], logger=log)
-            _write_candidate_geojson(paths.geojson, [], src.crs)
-            _write_candidate_gpkg(paths.gpkg, [], src.crs, logger=log)
+            _write_jsonl_records(paths.jsonl, [*records, run_record])
+            _write_jsonl_records(paths.raw_errors_jsonl, [*error_records, run_record])
+            _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
             raise
 
-        records: List[Dict[str, Any]] = []
-        candidate_records: List[Dict[str, Any]] = []
-        error_records: List[Dict[str, Any]] = []
-        raw_candidate_count = 0
-        use_response_format = True
         log.info("VLM modeli: %s", config.model)
-        log.info(
-            "VLM tile planı: toplam=%d, tile=%d, overlap=%d, views=%s, analysis_mode=%s, gsd=%s",
-            total_tiles,
-            config.tile,
-            config.overlap,
-            ",".join(selected_views),
-            layout.analysis_mode,
-            f"{prompt_gsd_m:.3f} m/px" if prompt_gsd_m is not None else "unknown",
-        )
-        skipped_count = 0
 
         with paths.jsonl.open("w", encoding="utf-8") as jsonl_fh, paths.raw_errors_jsonl.open(
             "w", encoding="utf-8"
         ) as raw_fh:
+            for record in records:
+                _write_jsonl_line(jsonl_fh, record)
+            for record in error_records:
+                _write_jsonl_line(raw_fh, record)
+            if resumed_tiles:
+                _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
+                log.info(
+                    "VLM resume ara ciktilari guncellendi: %d/%d tile, esik_ustu=%d -> %s",
+                    len(records),
+                    total_tiles,
+                    len(candidate_records),
+                    paths.xlsx,
+                )
+
             progress_iter = _generate_windows(src.width, src.height, config.tile, config.overlap)
-            with tqdm(total=total_tiles, desc="VLM tiles", unit="tile", leave=False) as pbar:
+            with tqdm(
+                total=total_tiles,
+                initial=min(len(processed_tile_indexes), total_tiles),
+                desc="VLM tiles",
+                unit="tile",
+                leave=False,
+            ) as pbar:
+                _set_progress_postfix(
+                    pbar,
+                    records=records,
+                    error_records=error_records,
+                    skipped_count=skipped_count,
+                    raw_candidate_count=raw_candidate_count,
+                    candidate_records=candidate_records,
+                )
+                tiles_since_export = 0
                 for tile_index, (window, row, col) in enumerate(progress_iter, start=1):
                     if config.max_tiles > 0 and tile_index > config.max_tiles:
                         break
+                    if tile_index in processed_tile_indexes:
+                        continue
 
                     tile_record_base = _base_tile_record(
                         tile_index=tile_index,
@@ -287,21 +366,23 @@ def run_vlm_lmstudio_detection(
                         raw_record = dict(record)
                         if response_text is not None:
                             raw_record["raw_response"] = response_text
-                        raw_fh.write(json.dumps(raw_record, ensure_ascii=False) + "\n")
+                        _write_jsonl_line(raw_fh, raw_record)
                         error_records.append(record)
                         if error_type == "vision_unsupported":
                             log.error(
                                 "VLM modeli goruntu girdisini desteklemiyor gibi gorunuyor: %s",
                                 message,
                             )
-                            jsonl_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                            _write_jsonl_line(jsonl_fh, record)
                             records.append(record)
+                            processed_tile_indexes.add(tile_index)
                             pbar.update(1)
                             break
                         log.warning("VLM tile %s hata ile atlandi: %s", tile_index, message)
 
-                    jsonl_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    _write_jsonl_line(jsonl_fh, record)
                     records.append(record)
+                    processed_tile_indexes.add(tile_index)
                     if record.get("status") == "skipped":
                         skipped_count += 1
                     if bool(record.get("candidate")) and bool(record.get("geometry")):
@@ -310,16 +391,26 @@ def run_vlm_lmstudio_detection(
                         candidate_records.append(record)
 
                     pbar.update(1)
-                    pbar.set_postfix(
-                        {
-                            "ok": len(records) - len(error_records) - skipped_count,
-                            "skip": skipped_count,
-                            "err": len(error_records),
-                            "cand": raw_candidate_count,
-                            "out": len(candidate_records),
-                        }
+                    tiles_since_export += 1
+                    _set_progress_postfix(
+                        pbar,
+                        records=records,
+                        error_records=error_records,
+                        skipped_count=skipped_count,
+                        raw_candidate_count=raw_candidate_count,
+                        candidate_records=candidate_records,
                     )
-                    if tile_index == 1 or tile_index % 25 == 0 or tile_index == total_tiles:
+                    if config.export_every > 0 and tiles_since_export >= config.export_every:
+                        _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
+                        tiles_since_export = 0
+                        log.info(
+                            "VLM ara ciktilar guncellendi: %d/%d tile, esik_ustu=%d -> %s",
+                            len(records),
+                            total_tiles,
+                            len(candidate_records),
+                            paths.xlsx,
+                        )
+                    if len(records) == 1 or len(records) % 25 == 0 or len(records) == total_tiles:
                         log.info(
                             "VLM ilerleme: %d/%d tile, model_aday=%d, esik_ustu=%d, skipped=%d, hata=%d",
                             len(records),
@@ -330,15 +421,13 @@ def run_vlm_lmstudio_detection(
                             len(error_records),
                         )
 
-        _write_candidate_csv(paths.csv, candidate_records)
-        _write_candidate_xlsx(paths.xlsx, candidate_records, logger=log)
-        _write_candidate_geojson(paths.geojson, candidate_records, src.crs)
-        _write_candidate_gpkg(paths.gpkg, candidate_records, src.crs, logger=log)
+        _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
 
         return VlmDetectionSummary(
             paths=paths,
             total_tiles=total_tiles,
             processed_tiles=len(records),
+            resumed_tiles=resumed_tiles,
             raw_candidate_count=raw_candidate_count,
             candidate_count=len(candidate_records),
             error_count=len(error_records),
@@ -356,6 +445,8 @@ def _validate_config(config: VlmLmStudioConfig) -> None:
         raise ValueError("vlm_overlap, vlm_tile degerinden kucuk olmali.")
     if config.max_tiles < 0:
         raise ValueError("vlm_max_tiles negatif olamaz.")
+    if config.export_every < 0:
+        raise ValueError("vlm_export_every negatif olamaz.")
     if not 0.0 <= config.confidence_threshold <= 1.0:
         raise ValueError("vlm_confidence_threshold 0-1 arasinda olmali.")
     if config.timeout <= 0:
@@ -399,6 +490,142 @@ def _build_output_paths(out_prefix: Path) -> VlmOutputPaths:
         gpkg=base.parent / f"{base.name}_vlm_candidates.gpkg",
         raw_errors_jsonl=base.parent / f"{base.name}_vlm_raw_errors.jsonl",
     )
+
+
+def _resolve_resume_source(config: VlmLmStudioConfig, paths: VlmOutputPaths) -> Optional[Path]:
+    if not config.resume:
+        return None
+    if config.resume_jsonl_path:
+        return Path(config.resume_jsonl_path)
+    if paths.jsonl.exists():
+        return paths.jsonl
+    return None
+
+
+def _load_resume_records(
+    path: Optional[Path],
+    *,
+    total_tiles: int,
+    raster_width: int,
+    raster_height: int,
+    tile: int,
+    overlap: int,
+    selected_views: Sequence[str],
+    analysis_mode: str,
+    logger: logging.Logger,
+) -> Tuple[List[Dict[str, Any]], set[int]]:
+    if path is None or not path.exists() or not path.is_file():
+        return [], set()
+
+    expected_windows: Dict[int, Tuple[int, int, int, int]] = {}
+    for tile_index, (window, row, col) in enumerate(_generate_windows(raster_width, raster_height, tile, overlap), start=1):
+        if tile_index > total_tiles:
+            break
+        expected_windows[tile_index] = (int(row), int(col), int(window.width), int(window.height))
+
+    expected_views = [str(view).strip().lower() for view in selected_views]
+    records_by_tile: Dict[int, Dict[str, Any]] = {}
+    bad_json_count = 0
+    mismatch_count = 0
+    duplicate_count = 0
+
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, start=1):
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    record = json.loads(text)
+                except json.JSONDecodeError:
+                    bad_json_count += 1
+                    continue
+                tile_index = _coerce_int(record.get("tile_index"))
+                if tile_index is None or tile_index <= 0 or tile_index > total_tiles:
+                    continue
+                expected = expected_windows.get(tile_index)
+                if expected is None or not _resume_record_matches_plan(
+                    record,
+                    expected=expected,
+                    selected_views=expected_views,
+                    analysis_mode=analysis_mode,
+                ):
+                    mismatch_count += 1
+                    continue
+                if tile_index in records_by_tile:
+                    duplicate_count += 1
+                records_by_tile[tile_index] = record
+    except OSError as exc:
+        logger.warning("VLM resume JSONL okunamadi (%s): %s", path, exc)
+        return [], set()
+
+    if bad_json_count:
+        logger.warning("VLM resume JSONL icinde %d bozuk satir atlandi: %s", bad_json_count, path)
+    if mismatch_count:
+        logger.warning(
+            "VLM resume JSONL icinde %d kayit mevcut tile/view ayarlariyla uyusmadigi icin atlandi.",
+            mismatch_count,
+        )
+    if duplicate_count:
+        logger.info("VLM resume JSONL icinde %d tekrarli tile kaydi bulundu; son kayit kullanildi.", duplicate_count)
+
+    processed = set(records_by_tile)
+    return [records_by_tile[idx] for idx in sorted(records_by_tile)], processed
+
+
+def _resume_record_matches_plan(
+    record: Dict[str, Any],
+    *,
+    expected: Tuple[int, int, int, int],
+    selected_views: Sequence[str],
+    analysis_mode: str,
+) -> bool:
+    expected_row, expected_col, expected_width, expected_height = expected
+    actual = (
+        _coerce_int(record.get("tile_row")),
+        _coerce_int(record.get("tile_col")),
+        _coerce_int(record.get("tile_width")),
+        _coerce_int(record.get("tile_height")),
+    )
+    if actual != (expected_row, expected_col, expected_width, expected_height):
+        return False
+
+    record_mode = str(record.get("analysis_mode") or "").strip()
+    if record_mode and record_mode != analysis_mode:
+        return False
+
+    record_views = _normalise_resume_views(record.get("used_views"))
+    if record_views and record_views != list(selected_views):
+        return False
+    return True
+
+
+def _normalise_resume_views(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = [part.strip() for part in text.split(",")]
+        else:
+            parsed = [part.strip() for part in text.split(",")]
+    elif isinstance(value, (list, tuple)):
+        parsed = list(value)
+    else:
+        return []
+    return [str(view).strip().lower() for view in parsed if str(view).strip()]
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _generate_windows(width: int, height: int, tile: int, overlap: int) -> Iterator[Tuple[Window, int, int]]:
@@ -1325,11 +1552,49 @@ def _looks_like_response_format_error(exc: Exception) -> bool:
     return "response_format" in text or "json_object" in text or "json schema" in text
 
 
+def _write_jsonl_line(fh: Any, record: Dict[str, Any]) -> None:
+    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    fh.flush()
+
+
 def _write_jsonl_records(path: Path, records: Sequence[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         for record in records:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            _write_jsonl_line(fh, record)
+
+
+def _write_candidate_outputs(
+    paths: VlmOutputPaths,
+    records: Sequence[Dict[str, Any]],
+    crs: Optional[RasterioCRS],
+    *,
+    logger: logging.Logger,
+) -> None:
+    _write_candidate_csv(paths.csv, records)
+    _write_candidate_xlsx(paths.xlsx, records, logger=logger)
+    _write_candidate_geojson(paths.geojson, records, crs)
+    _write_candidate_gpkg(paths.gpkg, records, crs, logger=logger)
+
+
+def _set_progress_postfix(
+    pbar: Any,
+    *,
+    records: Sequence[Dict[str, Any]],
+    error_records: Sequence[Dict[str, Any]],
+    skipped_count: int,
+    raw_candidate_count: int,
+    candidate_records: Sequence[Dict[str, Any]],
+) -> None:
+    pbar.set_postfix(
+        {
+            "ok": len(records) - len(error_records) - skipped_count,
+            "skip": skipped_count,
+            "err": len(error_records),
+            "cand": raw_candidate_count,
+            "out": len(candidate_records),
+        }
+    )
 
 
 CSV_COLUMNS = [

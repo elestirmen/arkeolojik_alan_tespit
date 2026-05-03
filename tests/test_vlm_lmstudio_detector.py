@@ -171,3 +171,68 @@ def test_bad_json_response_is_recorded_with_raw_response(tmp_path: Path, monkeyp
     assert summary.paths.xlsx.exists()
     assert summary.paths.geojson.exists()
     assert "raw_response" in summary.paths.raw_errors_jsonl.read_text(encoding="utf-8")
+
+
+def test_resume_skips_tiles_already_present_in_jsonl(tmp_path: Path, monkeypatch):
+    tif_path = tmp_path / "rgb_two_tiles.tif"
+    data = np.ones((3, 8, 16), dtype=np.uint8) * 120
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=16,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    resume_path = tmp_path / "previous_vlm_candidates.jsonl"
+    resume_path.write_text(
+        (
+            '{"tile_index":1,"tile_row":0,"tile_col":0,"tile_width":8,"tile_height":8,'
+            '"used_views":["rgb"],"has_rgb":true,"has_dsm":false,"has_dtm":false,'
+            '"analysis_mode":"rgb_only","candidate":false,"confidence":0.0,'
+            '"candidate_type":"none","bbox_xyxy":null,"bbox_global_xyxy":null,'
+            '"bbox_crs_xyxy":null,"center_x":null,"center_y":null,"gps_lon":null,'
+            '"gps_lat":null,"google_maps_url":"","visual_evidence":"",'
+            '"possible_false_positive":"","recommended_check":"rgb","status":"ok",'
+            '"error_type":null,"error_message":null,"geometry":null}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    calls = {"count": 0}
+
+    def fake_request(**kwargs):
+        calls["count"] += 1
+        return (
+            '{"candidate":false,"confidence":0,"candidate_type":"none","bbox_xyxy":null,'
+            '"visual_evidence":"","possible_false_positive":"","recommended_check":"rgb"}',
+            True,
+        )
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(vlm, "_request_vlm_json", fake_request)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tif_path,
+        out_prefix=tmp_path / "out" / "rgb",
+        config=vlm.VlmLmStudioConfig(
+            tile=8,
+            overlap=0,
+            max_tiles=2,
+            export_every=1,
+            resume=True,
+            resume_jsonl_path=resume_path,
+        ),
+    )
+
+    assert calls["count"] == 1
+    assert summary.processed_tiles == 2
+    assert summary.resumed_tiles == 1
+    assert len(summary.paths.jsonl.read_text(encoding="utf-8").strip().splitlines()) == 2
+    assert summary.paths.csv.exists()
+    assert summary.paths.xlsx.exists()

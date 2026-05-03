@@ -939,6 +939,14 @@ class PipelineDefaults:
         default=0,
         metadata={"help": "VLM icin islenecek maksimum karo sayisi; 0 sinirsiz"},
     )
+    vlm_export_every: int = field(
+        default=50,
+        metadata={"help": "VLM ara CSV/Excel/GeoJSON/GPKG ciktilarini kac tile'da bir guncelleyecegi. 0 ise sadece sonda yazar."},
+    )
+    vlm_resume: bool = field(
+        default=True,
+        metadata={"help": "VLM onceki JSONL kaydindan islenmis tile'lari atlayarak devam etsin."},
+    )
     vlm_timeout: int = field(
         default=120,
         metadata={"help": "LM Studio API istek zaman asimi (saniye)"},
@@ -1180,6 +1188,9 @@ class PipelineDefaults:
 
         if self.vlm_max_tiles < 0:
             errors.append(f"vlm_max_tiles negatif olamaz, verilen: {self.vlm_max_tiles}")
+
+        if self.vlm_export_every < 0:
+            errors.append(f"vlm_export_every negatif olamaz, verilen: {self.vlm_export_every}")
 
         if self.vlm_timeout <= 0:
             errors.append(f"vlm_timeout pozitif olmali, verilen: {self.vlm_timeout}")
@@ -7380,6 +7391,28 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str], config: Pipeline
     return WORKSPACE_OUTPUTS_DIR / session_folder / out_name
 
 
+def find_latest_vlm_resume_jsonl(out_prefix: Path) -> Optional[Path]:
+    """Find the newest previous VLM JSONL for the same output base name."""
+    try:
+        base = _output_base_path(out_prefix)
+        current = base.parent / f"{base.name}_vlm_candidates.jsonl"
+        current_resolved = current.resolve(strict=False)
+        pattern = f"*/{base.name}_vlm_candidates.jsonl"
+        candidates: List[Path] = []
+        for path in WORKSPACE_OUTPUTS_DIR.glob(pattern):
+            resolved = path.resolve(strict=False)
+            if resolved == current_resolved:
+                continue
+            if path.is_file() and path.stat().st_size > 0:
+                candidates.append(path)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+    except Exception as exc:
+        LOGGER.warning("VLM resume JSONL aranirken hata olustu: %s", exc)
+        return None
+
+
 def _normalize_param_value(value: Any) -> Any:
     """Convert values into JSON/text-friendly primitives."""
     if isinstance(value, Path):
@@ -9174,6 +9207,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("vlm_max_tiles"),
     )
     parser.add_argument(
+        "--vlm-export-every",
+        type=int,
+        default=default_for("vlm_export_every"),
+        dest="vlm_export_every",
+        help=cli_help("vlm_export_every"),
+    )
+    parser.add_argument(
+        "--vlm-resume",
+        action=argparse.BooleanOptionalAction,
+        default=default_for("vlm_resume"),
+        dest="vlm_resume",
+        help=cli_help("vlm_resume"),
+    )
+    parser.add_argument(
         "--vlm-timeout",
         type=int,
         default=default_for("vlm_timeout"),
@@ -10593,6 +10640,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 run_vlm_lmstudio_detection,
             )
 
+            vlm_resume_jsonl_path = find_latest_vlm_resume_jsonl(out_prefix) if config.vlm_resume else None
+            if vlm_resume_jsonl_path is not None:
+                LOGGER.info("VLM resume JSONL bulundu: %s", vlm_resume_jsonl_path)
+
             vlm_summary = run_vlm_lmstudio_detection(
                 input_path=input_path,
                 out_prefix=out_prefix,
@@ -10609,13 +10660,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     max_tiles=config.vlm_max_tiles,
                     timeout=config.vlm_timeout,
                     temperature=config.vlm_temperature,
+                    export_every=config.vlm_export_every,
+                    resume=config.vlm_resume,
+                    resume_jsonl_path=vlm_resume_jsonl_path,
                 ),
                 logger=LOGGER,
             )
             LOGGER.info(
-                "VLM taramasi tamamlandi: %d/%d tile, model_aday=%d, esik_ustu=%d, hata=%d. Mod=%s, view=%s",
+                "VLM taramasi tamamlandi: %d/%d tile, resume=%d, model_aday=%d, esik_ustu=%d, hata=%d. Mod=%s, view=%s",
                 vlm_summary.processed_tiles,
                 vlm_summary.total_tiles,
+                vlm_summary.resumed_tiles,
                 vlm_summary.raw_candidate_count,
                 vlm_summary.candidate_count,
                 vlm_summary.error_count,

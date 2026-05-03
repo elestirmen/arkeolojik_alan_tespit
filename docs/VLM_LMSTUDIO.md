@@ -35,6 +35,8 @@ vlm_views: "auto"
 vlm_gsd_m: 0.30
 vlm_confidence_threshold: 0.60
 vlm_max_tiles: 30
+vlm_export_every: 50
+vlm_resume: true
 vlm_timeout: 120
 vlm_temperature: 0.0
 ```
@@ -49,7 +51,9 @@ python archaeo_detect.py \
   --enable-vlm \
   --vlm-model auto \
   --vlm-views auto \
-  --vlm-max-tiles 30
+  --vlm-max-tiles 30 \
+  --vlm-export-every 50 \
+  --vlm-resume
 ```
 
 CLI argumanlari YAML degerlerini override eder. CLI argumani vermek zorunlu
@@ -134,6 +138,16 @@ icin tur bazli ek katmanlar olusturulur; ornegin `vlm_mound`,
 Bozuk JSON veya API hatalari tile bazinda JSONL hata kaydi olarak tutulur; tum
 pipeline bu yuzden dusmez. Bozuk ham cevaplar ayrica
 `*_vlm_raw_errors.jsonl` dosyasina yazilir.
+
+Uzun calismalarda `vlm_export_every: 50` ile her 50 yeni tile sonunda Excel,
+CSV, GeoJSON ve GPKG ara ciktilari guncellenir. JSONL her tile'dan hemen sonra
+flush edilir; bilgisayar kapanirsa o ana kadar yazilan tile kayitlari korunur.
+
+`vlm_resume: true` acikken yeni calisma basladiginda onceki session
+klasorlerinde ayni cikti adina sahip `*_vlm_candidates.jsonl` aranir. Bulunursa
+islenmis tile'lar okunur ve ayni tile/overlap/view planiyla uyusanlar atlanarak
+tarama kaldigi yerden devam eder. Tile boyutu, overlap veya view ayarlari
+degistiyse eski kayitlar guvenli tarafta kalmak icin kullanilmaz.
 
 `vlm_confidence_threshold` Excel/CSV/GPKG/GeoJSON'a yazilacak aday esigidir.
 Modelin aday dedigi tum tile cevaplari JSONL icinde kalir; tablo ve GIS

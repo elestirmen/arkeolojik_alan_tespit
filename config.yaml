@@ -39,7 +39,7 @@
 #input: "workspace/gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
 #input: "workspace/karlik_vadi.tif"
 #input: "workspace/on_veri/karlik_dag_rgb.tif"
-input: ""E:\SASPlanet_250505_[sasplanet.geojamal.com]\haritalarim\kapadokya_bing_map_3-2.tif"
+input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya_bing_map_3-2.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
 # - null ise: Girdi dosya adından otomatik üretilir
@@ -147,8 +147,8 @@ vlm_api_key: "lm-studio"
 # Ornek: vlm_model: "qwen2.5-vl-7b-instruct"
 vlm_model: "auto"
 
-vlm_tile: 1024
-vlm_overlap: 256
+vlm_tile: 512
+vlm_overlap: 128
 vlm_views: "auto"
 
 # VLM prompt icin GSD (metre/piksel). 0.30 => 30 cm nadir ortofoto.
@@ -160,7 +160,16 @@ vlm_gsd_m: 0.30
 # Tum model cevaplari yine *_vlm_candidates.jsonl icinde saklanir.
 vlm_confidence_threshold: 0.65
 
-vlm_max_tiles: 0
+vlm_max_tiles: 50
+
+# VLM uzun calismalarda her N yeni tile'da Excel/CSV/GeoJSON/GPKG ara ciktilarini gunceller.
+# 0 verilirse ara cikti yazmaz, yalnizca tarama sonunda yazar.
+vlm_export_every: 50
+
+# true: onceki session'lardaki ayni cikti taban adina sahip *_vlm_candidates.jsonl dosyasini
+# okuyup islenmis tile'lari atlar. Tile/overlap/view uyusmazsa eski kayitlar kullanilmaz.
+vlm_resume: true
+
 vlm_timeout: 120
 vlm_temperature: 0.0
 
