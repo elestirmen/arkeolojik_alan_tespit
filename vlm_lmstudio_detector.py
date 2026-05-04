@@ -222,7 +222,7 @@ def run_vlm_lmstudio_detection(
         if len(processed_tile_indexes) >= total_tiles:
             _write_jsonl_records(paths.jsonl, records)
             _write_jsonl_records(paths.raw_errors_jsonl, error_records)
-            _write_candidate_outputs(
+            paths = _write_candidate_outputs(
                 paths,
                 candidate_records,
                 src.crs,
@@ -256,7 +256,7 @@ def run_vlm_lmstudio_detection(
             )
             _write_jsonl_records(paths.jsonl, [*records, run_record])
             _write_jsonl_records(paths.raw_errors_jsonl, [*error_records, run_record])
-            _write_candidate_outputs(
+            paths = _write_candidate_outputs(
                 paths,
                 candidate_records,
                 src.crs,
@@ -276,7 +276,7 @@ def run_vlm_lmstudio_detection(
             for record in error_records:
                 _write_jsonl_line(raw_fh, record)
             if resumed_tiles:
-                _write_candidate_outputs(
+                paths = _write_candidate_outputs(
                     paths,
                     candidate_records,
                     src.crs,
@@ -422,7 +422,7 @@ def run_vlm_lmstudio_detection(
                         candidate_records=candidate_records,
                     )
                     if config.export_every > 0 and tiles_since_export >= config.export_every:
-                        _write_candidate_outputs(
+                        paths = _write_candidate_outputs(
                             paths,
                             candidate_records,
                             src.crs,
@@ -449,7 +449,7 @@ def run_vlm_lmstudio_detection(
                             len(error_records),
                         )
 
-        _write_candidate_outputs(
+        paths = _write_candidate_outputs(
             paths,
             candidate_records,
             src.crs,
@@ -1620,10 +1620,10 @@ def _write_candidate_outputs(
     all_records: Optional[Sequence[Dict[str, Any]]] = None,
     confidence_threshold: float = 0.0,
     logger: logging.Logger,
-) -> None:
+) -> VlmOutputPaths:
     sorted_records = _sort_candidate_records(records)
     _write_candidate_csv(paths.csv, sorted_records)
-    _write_candidate_xlsx(
+    xlsx_path = _write_candidate_xlsx(
         paths.xlsx,
         sorted_records,
         all_records=all_records,
@@ -1632,6 +1632,7 @@ def _write_candidate_outputs(
     )
     _write_candidate_geojson(paths.geojson, sorted_records, crs)
     _write_candidate_gpkg(paths.gpkg, sorted_records, crs, logger=logger)
+    return replace(paths, xlsx=xlsx_path)
 
 
 def _set_progress_postfix(
@@ -1748,14 +1749,14 @@ def _write_candidate_xlsx(
     all_records: Optional[Sequence[Dict[str, Any]]] = None,
     confidence_threshold: float = 0.0,
     logger: logging.Logger,
-) -> None:
+) -> Path:
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
         from openpyxl.worksheet.table import Table, TableStyleInfo
     except ImportError:
         logger.warning("VLM Excel yazimi atlandi; openpyxl kurulu degil. CSV ciktisi kullanilabilir: %s", path.with_suffix(".csv"))
-        return
+        return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
@@ -1832,7 +1833,51 @@ def _write_candidate_xlsx(
         table_name="VlmNotFoundTiles",
     )
 
-    wb.save(path)
+    return _save_workbook_with_excel_lock_fallback(wb, path, logger=logger)
+
+
+def _is_excel_lock_error(exc: OSError) -> bool:
+    return (
+        isinstance(exc, PermissionError)
+        or getattr(exc, "winerror", None) in {32, 33}
+        or getattr(exc, "errno", None) == 13
+    )
+
+
+def _xlsx_alternative_path(path: Path, index: int) -> Path:
+    suffix = "_alternatif" if index <= 1 else f"_alternatif_{index}"
+    return path.with_name(f"{path.stem}{suffix}{path.suffix}")
+
+
+def _save_workbook_with_excel_lock_fallback(
+    workbook: Any,
+    path: Path,
+    *,
+    logger: logging.Logger,
+) -> Path:
+    try:
+        workbook.save(path)
+        return path
+    except OSError as exc:
+        if not _is_excel_lock_error(exc):
+            raise
+        original_exc = exc
+
+    for index in range(1, 101):
+        alternative_path = _xlsx_alternative_path(path, index)
+        try:
+            workbook.save(alternative_path)
+        except OSError as exc:
+            if _is_excel_lock_error(exc):
+                continue
+            raise
+        logger.warning(
+            "VLM Excel dosyasi acik/kilitli gorunuyor; cikti alternatif adla kaydedildi: %s",
+            alternative_path,
+        )
+        return alternative_path
+
+    raise original_exc
 
 
 def _write_candidate_geojson(

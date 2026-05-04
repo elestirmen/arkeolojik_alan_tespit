@@ -226,6 +226,32 @@ def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
     assert "<autoFilter" not in sheet2_xml
 
 
+def test_xlsx_save_uses_alternative_name_when_excel_file_is_locked(tmp_path: Path):
+    class FakeWorkbook:
+        def __init__(self) -> None:
+            self.save_calls: list[Path] = []
+
+        def save(self, path: Path) -> None:
+            path = Path(path)
+            self.save_calls.append(path)
+            if path.name in {"vlm_candidates.xlsx", "vlm_candidates_alternatif.xlsx"}:
+                raise PermissionError("file is locked")
+            path.write_text("saved", encoding="utf-8")
+
+    workbook = FakeWorkbook()
+    target = tmp_path / "vlm_candidates.xlsx"
+
+    saved_path = vlm._save_workbook_with_excel_lock_fallback(workbook, target, logger=vlm.LOGGER)
+
+    assert saved_path == tmp_path / "vlm_candidates_alternatif_2.xlsx"
+    assert saved_path.read_text(encoding="utf-8") == "saved"
+    assert [path.name for path in workbook.save_calls] == [
+        "vlm_candidates.xlsx",
+        "vlm_candidates_alternatif.xlsx",
+        "vlm_candidates_alternatif_2.xlsx",
+    ]
+
+
 def test_rgb_alpha_raster_is_not_treated_as_dsm(tmp_path: Path):
     tif_path = tmp_path / "rgba.tif"
     data = np.ones((4, 8, 8), dtype=np.uint8) * 255

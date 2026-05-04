@@ -164,7 +164,7 @@ vlm_max_tiles: 0
 
 # VLM uzun calismalarda her N yeni tile'da Excel/CSV/GeoJSON/GPKG ara ciktilarini gunceller.
 # 0 verilirse ara cikti yazmaz, yalnizca tarama sonunda yazar.
-vlm_export_every: 25
+vlm_export_every: 150
 
 # true: onceki session'lardaki ayni cikti taban adina sahip *_vlm_candidates.jsonl dosyasini
 # okuyup islenmis tile'lari atlar. Tile/overlap/view uyusmazsa eski kayitlar kullanilmaz.

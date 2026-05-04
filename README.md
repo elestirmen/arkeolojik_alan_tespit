@@ -36,6 +36,7 @@ The checked-in profile targets **tile-level classification** (`dl_task: tile_cla
 - [🏷️ Ground Truth Labeling Tool (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-labeling-tool-ground_truth_kare_etiketleme_qtpy)
 - [🗂️ Tile Classification Dataset Tool (`prepare_tile_classification_dataset.py`)](#%EF%B8%8F-tile-classification-dataset-tool-prepare_tile_classification_datasetpy)
 - [🎮 Usage](#-usage)
+- [VLM / LM Studio Candidate Scanning](#vlm--lm-studio-candidate-scanning)
 - [⚙️ Configuration](#️-configuration)
 - [📂 Output Files](#-output-files)
 - [🔬 How It Works](#-how-it-works)
@@ -54,10 +55,11 @@ The checked-in profile targets **tile-level classification** (`dl_task: tile_cla
 
 ## ✨ Features
 
-### 🧠 Four Powerful Methods
+### 🧠 Five Powerful Methods
 - **Deep Learning**: U-Net, DeepLabV3+ and other modern segmentation architectures
 - **YOLO11 (NEW!)**: Fast object detection and segmentation with Ultralytics YOLO11 + labeled terrain inventory 🏷️
   - ⚠️ **Note:** Fine-tuning required for nadir (bird's-eye) imagery (see docs/YOLO11_NADIR_TRAINING.md)
+- **LM Studio VLM scanner**: Optional OpenAI-compatible vision-language model pass that writes separate candidate tables and GIS layers without mixing into DL/fusion masks
 - **Classical Image Processing**: RVT (Relief Visualization Toolbox), Hessian matrix, Morphological operators
 - **Hybrid Fusion**: Smart fusion combining strengths of each method
 
@@ -677,6 +679,28 @@ python archaeo_detect.py \
   -v
 ```
 
+### VLM / LM Studio Candidate Scanning
+
+The optional VLM path calls a vision-capable model through LM Studio's OpenAI-compatible local server. It is a separate candidate generator: it does **not** modify the DL/classic/fusion probability rasters or masks.
+
+Minimal config:
+
+```yaml
+enable_vlm: true
+vlm_base_url: "http://127.0.0.1:8081"
+vlm_model: "auto"
+vlm_tile: 512
+vlm_overlap: 128
+vlm_views: "auto"
+vlm_gsd_m: 0.30
+vlm_confidence_threshold: 0.75
+vlm_resume: true
+```
+
+Before running, load a vision/multimodal model in LM Studio and start the Local Server. `vlm_model: "auto"` asks LM Studio for the currently loaded model. If you want to test prompt changes or force a fresh scan, run into a new output folder or temporarily set `vlm_resume: false`; otherwise matching records from the previous `*_vlm_candidates.jsonl` may be reused.
+
+The current prompt is intentionally conservative. A tile is exported only when the model gives clear multi-cue archaeological evidence above `vlm_confidence_threshold`. Lower the threshold for exploratory sweeps; raise it when false positives are too frequent.
+
 ### Command-Line Parameters (Full List)
 
 ```bash
@@ -719,12 +743,13 @@ System behavior is controlled by the `config.yaml` file. This file is **richly d
 7. **Advanced Topographic Analysis (legacy / off in default preset)**: `enable_curvature`, `enable_tpi`, `tpi_radii` still exist in `config.yaml` and `archaeo_detect.py` for experimentation, but the **checked-in 5-channel DL schema does not add curvature/TPI to the model tensor** (see comments at the top of `config.yaml`).
 8. **Fusion**: Hybrid combination settings (`alpha`, …) — requires both DL and classic enabled
 9. **YOLO11** (optional): Separate RGB-only inventory / segmentation path; usually off for the tile-classification preset
-10. **Tile Processing**: Memory and performance optimization (`tile` / `overlap` documented vs metadata-locked)
-11. **Normalization**: Data preprocessing
-12. **Masking**: Filtering tall structures (`mask_talls`, `rgb_only`)
-13. **Vectorization**: GIS output (`vectorize`, `min_area`, `export_candidate_excel`, …)
-14. **Performance**: Device, `half`, `seed`, `verbose`; automatic OOM guard for large rasters (full-raster derivative precompute is skipped if available RAM is insufficient)
-15. **Cache**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster cache tuning
+10. **VLM / LM Studio** (optional): `enable_vlm`, `vlm_base_url`, `vlm_model`, `vlm_views`, `vlm_confidence_threshold`, `vlm_resume`; writes separate VLM candidate outputs
+11. **Tile Processing**: Memory and performance optimization (`tile` / `overlap` documented vs metadata-locked)
+12. **Normalization**: Data preprocessing
+13. **Masking**: Filtering tall structures (`mask_talls`, `rgb_only`)
+14. **Vectorization**: GIS output (`vectorize`, `min_area`, `export_candidate_excel`, …)
+15. **Performance**: Device, `half`, `seed`, `verbose`; automatic OOM guard for large rasters (full-raster derivative precompute is skipped if available RAM is insufficient)
+16. **Cache**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster cache tuning
 
 #### Quick Configuration Scenarios:
 
@@ -755,6 +780,17 @@ alpha: 0.5
 encoders: "all"
 cache_derivatives: true
 ```
+
+**Scenario 4: LM Studio VLM Candidate Review**
+```yaml
+enable_vlm: true
+vlm_model: "auto"
+vlm_views: "auto"
+vlm_confidence_threshold: 0.75
+vlm_resume: true
+```
+
+Use `vlm_views: "rgb"` or a smaller `vlm_tile` if the local VLM is close to its VRAM limit. Keep `vlm_temperature: 0.0` for repeatable JSON-like responses.
 
 ### Data Preparation
 
@@ -871,6 +907,26 @@ When `export_candidate_excel: true` in `config.yaml`, companion `*_gps.xlsx` fil
 - Area information (in m²)
 - CRS information preserved
 - Can be opened directly in QGIS/ArcGIS
+
+### VLM / LM Studio Candidate Outputs
+
+When `enable_vlm: true`, the LM Studio pass writes its own files next to the other session outputs:
+
+```
+<out_name>_vlm_candidates.jsonl       -> every processed VLM tile record, including non-candidates and errors
+<out_name>_vlm_raw_errors.jsonl       -> raw/error records for debugging malformed model responses
+<out_name>_vlm_candidates.csv         -> exported candidates above `vlm_confidence_threshold`
+<out_name>_vlm_candidates.xlsx        -> Excel review workbook
+<out_name>_vlm_candidates.geojson     -> exported candidate geometries
+<out_name>_vlm_candidates.gpkg        -> exported candidate geometries as GeoPackage
+```
+
+The Excel workbook contains:
+
+- `vlm_candidates`: found/exported candidates sorted from highest to lowest `confidence`
+- `bulunmayan_tilelar`: scanned tiles that were not exported, with `not_found_reason` such as `no_candidate`, `below_threshold`, `skipped`, or `error`
+
+Google Maps URLs are written as clickable hyperlinks. If the target workbook is open in Excel and Windows locks it, the program does not stop; it saves an alternative file such as `*_vlm_candidates_alternatif.xlsx` or `*_vlm_candidates_alternatif_2.xlsx` and logs the actual path.
 
 ### 💾 Cache Files
 
@@ -1463,6 +1519,43 @@ ValueError: Expected 5 channels but got X
 2. **Check metadata.json**: Verify `num_channels` matches actual data
 3. **Verify file format**: Ensure `.npz` files contain an `image` key with shape `(5, H, W)` for the current schema
 
+#### ❌ Error 9: Too Many VLM False Positives
+
+**Symptoms:** VLM Excel contains many roads, field boundaries, shadows, vegetation marks, or natural textures.
+
+**Solutions:**
+1. Keep the conservative default `vlm_confidence_threshold: 0.75` or raise it to `0.80`.
+2. Use `vlm_views: "auto"` when DSM/DTM derivatives are available so the model can compare RGB and terrain cues.
+3. For RGB-only rasters, expect more uncertainty; use a higher threshold or review the `possible_false_positive` column carefully.
+4. If you changed the prompt/config, disable resume for a clean test:
+   ```yaml
+   vlm_resume: false
+   ```
+
+#### ❌ Error 10: LM Studio VRAM Usage Keeps Growing
+
+**Symptoms:** The model fits at load time, but VRAM increases during a long run and generation slows or fails.
+
+**Solutions:**
+1. Lower LM Studio context length first (for example `4096`, or `2048` for testing).
+2. Enable Flash Attention and KV cache quantization if your LM Studio/model runtime exposes those settings.
+3. If KV cache is offloaded to GPU, either disable that offload or reduce GPU layer offload so model weights leave more VRAM headroom.
+4. Use fewer VLM views (`vlm_views: "rgb"` or `"rgb,hillshade"`) or a smaller `vlm_tile` for memory-constrained runs.
+5. Watch VRAM with `nvidia-smi -l 1` while the run is active.
+
+#### ❌ Error 11: VLM Excel File Is Open
+
+**Symptoms:** You opened `*_vlm_candidates.xlsx` in Excel while the program is still running.
+
+**Behavior:** The program now falls back to an alternative filename instead of stopping:
+
+```
+*_vlm_candidates_alternatif.xlsx
+*_vlm_candidates_alternatif_2.xlsx
+```
+
+Check the log for the exact saved path.
+
 ### Debug Mode
 
 For detailed debugging:
@@ -1540,6 +1633,9 @@ A:
 2. Enable fusion
 3. Optimize threshold values
 4. Use high-quality data
+
+**Q: How should I interpret VLM results?**  
+A: Treat VLM output as a review queue, not final archaeology. The `vlm_candidates` Excel sheet is sorted by confidence; `bulunmayan_tilelar` records non-exported tiles and why they were excluded. The current VLM prompt is conservative and the default export threshold is `0.75` to reduce false positives.
 
 **Q: How do I train my own model?**  
 A: The project includes dedicated training scripts! See the [Model Training Guide](#-model-training-guide) section below for step-by-step instructions using `egitim_verisi_olusturma.py` and `training.py`.
