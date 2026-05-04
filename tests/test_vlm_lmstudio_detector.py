@@ -1,4 +1,5 @@
 from pathlib import Path
+from zipfile import ZipFile
 
 import numpy as np
 import rasterio
@@ -67,6 +68,13 @@ def test_prompt_includes_configured_gsd_scale():
     assert "0.30 m ground sampling distance" in prompt
     assert "307 m x 307 m" in prompt
     assert "nadir imagery" in prompt
+    assert "at least two supporting cues" in prompt
+    assert "If any non-archaeological explanation is as plausible as archaeology" in prompt
+    assert "below 0.75 means not strong enough for export" in prompt
+
+
+def test_vlm_default_confidence_threshold_is_conservative():
+    assert vlm.VlmLmStudioConfig().confidence_threshold == 0.75
 
 
 def test_wgs84_google_maps_fields_are_added_to_candidate_record():
@@ -207,6 +215,15 @@ def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
         missing_ws.cell(row=2, column=reason_col).value,
         missing_ws.cell(row=3, column=reason_col).value,
     ] == ["no_candidate", "below_threshold"]
+    assert found_ws.auto_filter.ref is None
+    assert missing_ws.auto_filter.ref is None
+
+    with ZipFile(xlsx_path) as archive:
+        sheet1_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        sheet2_xml = archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
+
+    assert "<autoFilter" not in sheet1_xml
+    assert "<autoFilter" not in sheet2_xml
 
 
 def test_rgb_alpha_raster_is_not_treated_as_dsm(tmp_path: Path):

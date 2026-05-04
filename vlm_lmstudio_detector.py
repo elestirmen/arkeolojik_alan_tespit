@@ -82,7 +82,7 @@ class VlmLmStudioConfig:
     overlap: int = 256
     views: str | Sequence[str] = "auto"
     gsd_m: Optional[float] = 0.30
-    confidence_threshold: float = 0.60
+    confidence_threshold: float = 0.75
     max_tiles: int = 0
     timeout: int = 120
     temperature: float = 0.0
@@ -1135,9 +1135,10 @@ def _request_vlm_json(
             {
                 "role": "system",
                 "content": (
-                    "You are a cautious archaeological remote-sensing analyst reviewing aerial and terrain-derived imagery. "
-                    "Your job is to flag plausible archaeological candidates, not to prove a site. "
-                    "Prefer false over speculative candidates when evidence is weak. "
+                    "You are a conservative archaeological remote-sensing analyst reviewing aerial and terrain-derived imagery. "
+                    "Your job is to flag only clear, review-worthy archaeological candidates. "
+                    "Prefer candidate=false over speculative candidates whenever the evidence is weak, single-cue, modern-looking, "
+                    "natural-looking, or explainable as agriculture, infrastructure, vegetation, shadow, or imagery artifact. "
                     "Return only strict JSON. Do not include markdown or commentary."
                 ),
             },
@@ -1207,19 +1208,29 @@ def _build_prompt(
             f"The tile size is {width}x{height} pixels. ",
             scale_text,
             f"Provided views: {', '.join(selected_views)}. ",
-            "Use all provided views together; do not treat a single noisy mark as enough evidence unless it forms a coherent pattern. ",
-            "Look for repeated or regular geometry, circular or oval forms, rectilinear traces, banks, ditches, terraces, mounds, ",
+            "Decision gate: set candidate=true only when the anomaly shows clear archaeological morphology and at least two supporting cues, "
+            "such as coherent circular/oval/rectilinear geometry, plausible archaeological scale, contrast with the surrounding terrain, "
+            "spatial organization, and support from more than one relevant view or visual cue. ",
+            "Before marking candidate=true, actively test alternative explanations: agriculture, field parcel edges, ploughing, irrigation, "
+            "drainage, roads or tracks, modern buildings or walls, vehicle marks, vegetation rows or individual tree crowns, natural gullies, "
+            "erosion, geology, shadows, seams, compression artifacts, and tile-edge artifacts. ",
+            "If any non-archaeological explanation is as plausible as archaeology, set candidate=false. ",
+            "Do not mark isolated color changes, vague texture, random stone/soil patterns, single shadows, single vegetation differences, "
+            "straight modern boundaries, road curves, or regular agricultural traces as archaeological candidates. ",
+            "Look for repeated or regular geometry, circular or oval forms, rectilinear traces, banks, ditches, terraces, mounds, tumuli, "
             "old route alignments, enclosures, foundation traces, and anomalies that are spatially organized rather than random. ",
-            "Common false positives include modern roads and tracks, field boundaries, drainage lines, plough lines, irrigation features, ",
-            "tree rows, individual tree crowns, building roofs, vehicles, shadows, image seams, compression artifacts, and tile-edge artifacts. ",
-            "If the evidence is weak, ambiguous, modern-looking, or only a natural texture, set candidate=false. ",
+            "Candidate-type rules: mound/tumulus requires a coherent raised or soil/vegetation signature with plausible size; "
+            "ring_ditch requires a continuous or strongly implied circular/oval ditch pattern; wall_trace/foundation/enclosure requires "
+            "intentional rectilinear or enclosed geometry; road_trace requires an old alignment that is not a modern road, track, or field edge. ",
+            "If the evidence is weak, ambiguous, modern-looking, only natural texture, or only one cue, set candidate=false. ",
             "If there is a candidate, return bbox_xyxy in tile pixel coordinates [x1,y1,x2,y2], not normalized coordinates. ",
             "The bbox should tightly cover the visible anomaly but is approximate and must not be treated as a final archaeological boundary. ",
-            "Confidence calibration: 0.60 means plausible but uncertain, 0.75 means clear multi-cue evidence, 0.90 means very strong evidence. ",
+            "Confidence calibration: below 0.75 means not strong enough for export, 0.75 means clear multi-cue evidence, "
+            "0.90 means very strong evidence with archaeology more likely than common false positives. ",
             "Use candidate_type=\"unknown\" when the pattern looks archaeological but the type is unclear. ",
             "If there is no candidate, return candidate=false, confidence=0, candidate_type=\"none\", bbox_xyxy=null. ",
             "Keep visual_evidence short and concrete; mention the specific views that support the decision. ",
-            "In possible_false_positive, name the most likely non-archaeological explanation. ",
+            "In possible_false_positive, name the strongest non-archaeological explanation considered, even for candidate=true. ",
             "In recommended_check, choose the single most useful next check from the allowed values. ",
             "Return exactly one JSON object with this schema and no markdown:\n",
             JSON_SCHEMA_TEXT,
@@ -1230,6 +1241,7 @@ def _build_prompt(
             "Data mode: RGB orthophoto only. No DSM, DTM, hillshade, nDSM, or slope information is available. "
             "Base your judgment on crop marks, soil marks, color/vegetation differences, surface texture, regular geometry, "
             "structure stains, and visible surface anomalies. "
+            "Because there is no topographic confirmation, be stricter: candidate=true should require very coherent geometry and plausible scale. "
             "Do not make strong micro-topographic claims in RGB-only mode."
         )
     elif analysis_mode == "rgb_dsm":
@@ -1237,14 +1249,15 @@ def _build_prompt(
             "Data mode: RGB plus DSM/elevation surface. DTM-derived terrain derivatives are not available. "
             "Use RGB for crop/soil/surface traces and DSM for elevated surface anomalies. "
             "Be careful: DSM can include vegetation, buildings, and other modern surface objects, so do not treat every height anomaly "
-            "as terrain archaeology."
+            "as terrain archaeology. Reject height patterns that align with trees, roofs, roads, field edges, or other modern surface objects."
         )
     else:
         mode_text = (
             "Data mode: RGB plus topographic derivative views. "
             "Use RGB for crop/soil/surface traces and hillshade/nDSM/DSM/DTM/slope views for micro-topographic evidence. "
             "Prioritize anomalies that appear consistently across relevant views, such as mounds, tumuli, ring ditches, banks, walls, "
-            "terraces, foundation traces, old road traces, enclosures, and regular terrain forms."
+            "terraces, foundation traces, old road traces, enclosures, and regular terrain forms. "
+            "Reject anomalies that appear in only one noisy view or are better explained by natural drainage, vegetation, or modern land use."
         )
     return f"{mode_text}\n\n{common}"
 
@@ -1777,7 +1790,6 @@ def _write_candidate_xlsx(
             cell.font = header_font
 
         sheet.freeze_panes = "A2"
-        sheet.auto_filter.ref = sheet.dimensions
         if sheet.max_row >= 2:
             table = Table(displayName=table_name, ref=sheet.dimensions)
             style = TableStyleInfo(

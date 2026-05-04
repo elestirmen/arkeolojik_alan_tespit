@@ -932,7 +932,7 @@ class PipelineDefaults:
         metadata={"help": "VLM prompt icin metre/piksel GSD. 0 veya null ise raster transform'dan otomatik tahmin edilir."},
     )
     vlm_confidence_threshold: float = field(
-        default=0.60,
+        default=0.75,
         metadata={"help": "VLM aday dis aktarimi icin minimum guven esigi"},
     )
     vlm_max_tiles: int = field(

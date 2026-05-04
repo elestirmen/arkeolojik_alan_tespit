@@ -158,7 +158,7 @@ vlm_gsd_m: 0.30
 # Excel/CSV/GPKG/GeoJSON'a yazilacak minimum VLM guven esigi.
 # Dusurmek daha cok aday, yukseltmek daha az ama daha secici aday uretir.
 # Tum model cevaplari yine *_vlm_candidates.jsonl icinde saklanir.
-vlm_confidence_threshold: 0.65
+vlm_confidence_threshold: 0.75
 
 vlm_max_tiles: 0
 
