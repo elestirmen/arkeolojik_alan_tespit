@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -157,6 +158,8 @@ def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
         "tile_col": 8,
         "candidate": True,
         "confidence": 0.62,
+        "review_confirmed": True,
+        "review_confidence": 0.62,
         "candidate_type": "mound",
         "google_maps_url": "",
         "status": "ok",
@@ -168,6 +171,8 @@ def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
         "tile_col": 0,
         "candidate": True,
         "confidence": 0.91,
+        "review_confirmed": True,
+        "review_confidence": 0.91,
         "candidate_type": "ring_ditch",
         "google_maps_url": "",
         "status": "ok",
@@ -189,6 +194,8 @@ def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
         "tile_col": 8,
         "candidate": True,
         "confidence": 0.31,
+        "review_confirmed": False,
+        "review_confidence": 0.0,
         "candidate_type": "unknown",
         "google_maps_url": "",
         "status": "ok",
@@ -205,25 +212,35 @@ def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
 
     wb = load_workbook(xlsx_path)
     found_ws = wb["vlm_candidates"]
+    first_stage_ws = wb["ilk_asama_pozitifler"]
+    second_stage_ws = wb["ikinci_asama_pozitifler"]
     missing_ws = wb["bulunmayan_tilelar"]
     tile_col = vlm.CSV_COLUMNS.index("tile_index") + 1
     reason_col = vlm.NOT_FOUND_COLUMNS.index("not_found_reason") + 1
 
     assert [found_ws.cell(row=2, column=tile_col).value, found_ws.cell(row=3, column=tile_col).value] == [1, 2]
+    assert [first_stage_ws.cell(row=2, column=tile_col).value, first_stage_ws.cell(row=3, column=tile_col).value] == [1, 2]
+    assert [second_stage_ws.cell(row=2, column=tile_col).value, second_stage_ws.cell(row=3, column=tile_col).value] == [1, 2]
     assert [missing_ws.cell(row=2, column=tile_col).value, missing_ws.cell(row=3, column=tile_col).value] == [3, 4]
     assert [
         missing_ws.cell(row=2, column=reason_col).value,
         missing_ws.cell(row=3, column=reason_col).value,
     ] == ["no_candidate", "below_threshold"]
     assert found_ws.auto_filter.ref is None
+    assert first_stage_ws.auto_filter.ref is None
+    assert second_stage_ws.auto_filter.ref is None
     assert missing_ws.auto_filter.ref is None
 
     with ZipFile(xlsx_path) as archive:
         sheet1_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
         sheet2_xml = archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
+        sheet3_xml = archive.read("xl/worksheets/sheet3.xml").decode("utf-8")
+        sheet4_xml = archive.read("xl/worksheets/sheet4.xml").decode("utf-8")
 
     assert "<autoFilter" not in sheet1_xml
     assert "<autoFilter" not in sheet2_xml
+    assert "<autoFilter" not in sheet3_xml
+    assert "<autoFilter" not in sheet4_xml
 
 
 def test_xlsx_save_uses_alternative_name_when_excel_file_is_locked(tmp_path: Path):
@@ -249,6 +266,28 @@ def test_xlsx_save_uses_alternative_name_when_excel_file_is_locked(tmp_path: Pat
         "vlm_candidates.xlsx",
         "vlm_candidates_alternatif.xlsx",
         "vlm_candidates_alternatif_2.xlsx",
+    ]
+
+
+def test_gpkg_write_uses_alternative_name_when_file_is_locked(tmp_path: Path):
+    calls: list[Path] = []
+    target = tmp_path / "vlm_candidates.gpkg"
+
+    def fake_writer(path: Path) -> None:
+        path = Path(path)
+        calls.append(path)
+        if path.name in {"vlm_candidates.gpkg", "vlm_candidates_alternatif.gpkg"}:
+            raise RuntimeError("database is locked")
+        path.write_text("saved", encoding="utf-8")
+
+    saved_path = vlm._write_gpkg_with_lock_fallback(target, fake_writer, logger=vlm.LOGGER)
+
+    assert saved_path == tmp_path / "vlm_candidates_alternatif_2.gpkg"
+    assert saved_path.read_text(encoding="utf-8") == "saved"
+    assert [path.name for path in calls] == [
+        "vlm_candidates.gpkg",
+        "vlm_candidates_alternatif.gpkg",
+        "vlm_candidates_alternatif_2.gpkg",
     ]
 
 
@@ -316,6 +355,245 @@ def test_bad_json_response_is_recorded_with_raw_response(tmp_path: Path, monkeyp
     assert summary.paths.xlsx.exists()
     assert summary.paths.geojson.exists()
     assert "raw_response" in summary.paths.raw_errors_jsonl.read_text(encoding="utf-8")
+
+
+def test_exportable_vlm_candidate_is_reviewed_before_final_export(tmp_path: Path, monkeypatch):
+    from openpyxl import load_workbook
+
+    tif_path = tmp_path / "rgb_candidate.tif"
+    data = np.ones((3, 8, 8), dtype=np.uint8) * 120
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    prompts: list[str] = []
+
+    def fake_request(**kwargs):
+        prompt = kwargs["prompt"]
+        prompts.append(prompt)
+        if "Second-pass review" in prompt:
+            return (
+                '{"confirmed":true,"review_confidence":0.88,'
+                '"review_reason":"coherent oval form persists after skeptical review",'
+                '"review_false_positive":"field mark","recommended_check":"field_check"}',
+                True,
+            )
+        return (
+            '{"candidate":true,"confidence":0.91,"candidate_type":"mound",'
+            '"bbox_xyxy":[1,1,6,6],"visual_evidence":"oval raised mark",'
+            '"possible_false_positive":"field mark","recommended_check":"hillshade"}',
+            True,
+        )
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(vlm, "_request_vlm_json", fake_request)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tif_path,
+        out_prefix=tmp_path / "out" / "rgb",
+        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1, confidence_threshold=0.75),
+    )
+
+    assert len(prompts) == 2
+    assert "Second-pass review" in prompts[1]
+    assert summary.candidate_count == 1
+
+    record = json.loads(summary.paths.jsonl.read_text(encoding="utf-8").strip())
+    assert record["candidate"] is True
+    assert record["review_confirmed"] is True
+    assert record["review_confidence"] == 0.88
+
+    wb = load_workbook(summary.paths.xlsx)
+    assert wb["ilk_asama_pozitifler"].max_row == 2
+    assert wb["ikinci_asama_pozitifler"].max_row == 2
+
+
+def test_resume_reviews_unreviewed_first_stage_candidates(tmp_path: Path, monkeypatch):
+    tif_path = tmp_path / "rgb_resume_candidate.tif"
+    data = np.ones((3, 8, 8), dtype=np.uint8) * 120
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    resume_path = tmp_path / "previous_vlm_candidates.jsonl"
+    resume_record = {
+        "tile_index": 1,
+        "tile_row": 0,
+        "tile_col": 0,
+        "tile_width": 8,
+        "tile_height": 8,
+        "used_views": ["rgb"],
+        "has_rgb": True,
+        "has_dsm": False,
+        "has_dtm": False,
+        "analysis_mode": "rgb_only",
+        "candidate": True,
+        "confidence": 0.91,
+        "candidate_type": "mound",
+        "bbox_xyxy": [1, 1, 6, 6],
+        "bbox_global_xyxy": [1, 1, 6, 6],
+        "bbox_crs_xyxy": [1, 2, 6, 7],
+        "center_x": 3.5,
+        "center_y": 4.5,
+        "gps_lon": None,
+        "gps_lat": None,
+        "google_maps_url": "",
+        "visual_evidence": "oval raised mark",
+        "possible_false_positive": "field mark",
+        "recommended_check": "hillshade",
+        "status": "ok",
+        "error_type": None,
+        "error_message": None,
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[1, 7], [6, 7], [6, 2], [1, 2], [1, 7]]],
+        },
+    }
+    resume_path.write_text(json.dumps(resume_record) + "\n", encoding="utf-8")
+
+    calls = {"count": 0}
+
+    def fake_request(**kwargs):
+        calls["count"] += 1
+        assert "Second-pass review" in kwargs["prompt"]
+        return (
+            '{"confirmed":true,"review_confidence":0.86,'
+            '"review_reason":"confirmed on review","review_false_positive":"field mark",'
+            '"recommended_check":"field_check"}',
+            True,
+        )
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(vlm, "_request_vlm_json", fake_request)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tif_path,
+        out_prefix=tmp_path / "out" / "rgb",
+        config=vlm.VlmLmStudioConfig(
+            tile=8,
+            overlap=0,
+            max_tiles=1,
+            resume=True,
+            resume_jsonl_path=resume_path,
+        ),
+    )
+
+    assert calls["count"] == 1
+    assert summary.resumed_tiles == 1
+    assert summary.candidate_count == 1
+    updated_record = json.loads(summary.paths.jsonl.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert updated_record["review_confirmed"] is True
+    assert updated_record["review_confidence"] == 0.86
+
+
+def test_partial_resume_continues_new_tiles_before_reviewing_old_candidates(tmp_path: Path, monkeypatch):
+    tif_path = tmp_path / "rgb_two_tiles_resume_candidate.tif"
+    data = np.ones((3, 8, 16), dtype=np.uint8) * 120
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=16,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    resume_path = tmp_path / "previous_vlm_candidates.jsonl"
+    resume_record = {
+        "tile_index": 1,
+        "tile_row": 0,
+        "tile_col": 0,
+        "tile_width": 8,
+        "tile_height": 8,
+        "used_views": ["rgb"],
+        "has_rgb": True,
+        "has_dsm": False,
+        "has_dtm": False,
+        "analysis_mode": "rgb_only",
+        "candidate": True,
+        "confidence": 0.91,
+        "candidate_type": "mound",
+        "bbox_xyxy": [1, 1, 6, 6],
+        "bbox_global_xyxy": [1, 1, 6, 6],
+        "bbox_crs_xyxy": [1, 2, 6, 7],
+        "center_x": 3.5,
+        "center_y": 4.5,
+        "gps_lon": None,
+        "gps_lat": None,
+        "google_maps_url": "",
+        "visual_evidence": "oval raised mark",
+        "possible_false_positive": "field mark",
+        "recommended_check": "hillshade",
+        "status": "ok",
+        "error_type": None,
+        "error_message": None,
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[1, 7], [6, 7], [6, 2], [1, 2], [1, 7]]],
+        },
+    }
+    resume_path.write_text(json.dumps(resume_record) + "\n", encoding="utf-8")
+
+    prompts: list[str] = []
+
+    def fake_request(**kwargs):
+        prompt = kwargs["prompt"]
+        prompts.append(prompt)
+        if "Second-pass review" in prompt:
+            return (
+                '{"confirmed":true,"review_confidence":0.86,'
+                '"review_reason":"confirmed on deferred review","review_false_positive":"field mark",'
+                '"recommended_check":"field_check"}',
+                True,
+            )
+        return (
+            '{"candidate":false,"confidence":0,"candidate_type":"none","bbox_xyxy":null,'
+            '"visual_evidence":"","possible_false_positive":"","recommended_check":"rgb"}',
+            True,
+        )
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(vlm, "_request_vlm_json", fake_request)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tif_path,
+        out_prefix=tmp_path / "out" / "rgb",
+        config=vlm.VlmLmStudioConfig(
+            tile=8,
+            overlap=0,
+            max_tiles=2,
+            resume=True,
+            resume_jsonl_path=resume_path,
+        ),
+    )
+
+    assert "Task: analyze this GeoTIFF tile" in prompts[0]
+    assert "Second-pass review" in prompts[1]
+    assert summary.processed_tiles == 2
+    assert summary.resumed_tiles == 1
+    assert summary.candidate_count == 1
 
 
 def test_resume_skips_tiles_already_present_in_jsonl(tmp_path: Path, monkeypatch):

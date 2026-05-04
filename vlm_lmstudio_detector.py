@@ -68,6 +68,14 @@ JSON_SCHEMA_TEXT = """{
   "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
 }"""
 
+REVIEW_SCHEMA_TEXT = """{
+  "confirmed": true,
+  "review_confidence": 0.0,
+  "review_reason": "...",
+  "review_false_positive": "...",
+  "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
+}"""
+
 
 class VlmConnectionError(RuntimeError):
     """Raised when the LM Studio server cannot be reached."""
@@ -186,13 +194,12 @@ def run_vlm_lmstudio_detection(
             analysis_mode=layout.analysis_mode,
             logger=log,
         )
-        candidate_records: List[Dict[str, Any]] = []
         error_records: List[Dict[str, Any]] = []
         for record in records:
-            if _is_exportable_candidate(record, config.confidence_threshold):
-                candidate_records.append(record)
             if record.get("status") == "error":
                 error_records.append(record)
+        first_stage_records, candidate_records = _candidate_record_lists(records, config.confidence_threshold)
+        resume_records_needing_review = _records_needing_review(records, config.confidence_threshold)
         raw_candidate_count = sum(1 for record in records if bool(record.get("candidate")) and bool(record.get("geometry")))
         skipped_count = sum(1 for record in records if record.get("status") == "skipped")
         resumed_tiles = len(records)
@@ -218,14 +225,18 @@ def run_vlm_lmstudio_detection(
             "on" if config.resume else "off",
             config.export_every,
         )
+        next_tile_index = _first_unprocessed_tile_index(processed_tile_indexes, total_tiles)
+        if resumed_tiles and next_tile_index is not None:
+            log.info("VLM resume devam noktasi: tile %d/%d", next_tile_index, total_tiles)
 
-        if len(processed_tile_indexes) >= total_tiles:
+        if len(processed_tile_indexes) >= total_tiles and not resume_records_needing_review:
             _write_jsonl_records(paths.jsonl, records)
             _write_jsonl_records(paths.raw_errors_jsonl, error_records)
             paths = _write_candidate_outputs(
                 paths,
                 candidate_records,
                 src.crs,
+                first_stage_records=first_stage_records,
                 all_records=records,
                 confidence_threshold=config.confidence_threshold,
                 logger=log,
@@ -260,6 +271,7 @@ def run_vlm_lmstudio_detection(
                 paths,
                 candidate_records,
                 src.crs,
+                first_stage_records=first_stage_records,
                 all_records=[*records, run_record],
                 confidence_threshold=config.confidence_threshold,
                 logger=log,
@@ -280,14 +292,16 @@ def run_vlm_lmstudio_detection(
                     paths,
                     candidate_records,
                     src.crs,
+                    first_stage_records=first_stage_records,
                     all_records=records,
                     confidence_threshold=config.confidence_threshold,
                     logger=log,
                 )
                 log.info(
-                    "VLM resume ara ciktilari guncellendi: %d/%d tile, esik_ustu=%d -> %s",
+                    "VLM resume ara ciktilari guncellendi: %d/%d tile, ilk_asama=%d, ikinci_asama=%d -> %s",
                     len(records),
                     total_tiles,
+                    len(first_stage_records),
                     len(candidate_records),
                     paths.xlsx,
                 )
@@ -325,6 +339,7 @@ def run_vlm_lmstudio_detection(
                     )
 
                     response_text: Optional[str] = None
+                    rendered: Optional[Sequence[Tuple[str, str]]] = None
                     try:
                         tile_arrays = _read_tile_arrays(src, layout, window)
                         if _is_empty_rgb_tile(tile_arrays["rgb"]):
@@ -359,6 +374,25 @@ def run_vlm_lmstudio_detection(
                                 raster_width=src.width,
                                 raster_height=src.height,
                             )
+                            if _is_exportable_candidate(record, config.confidence_threshold):
+                                use_response_format, raw_review_record = _review_candidate_record(
+                                    record,
+                                    client=client,
+                                    config=config,
+                                    rendered_views=rendered,
+                                    analysis_mode=layout.analysis_mode,
+                                    selected_views=selected_views,
+                                    gsd_m=prompt_gsd_m,
+                                    use_response_format=use_response_format,
+                                    logger=log,
+                                )
+                                if raw_review_record is not None:
+                                    _write_jsonl_line(raw_fh, raw_review_record)
+                                    log.warning(
+                                        "VLM tile %s ikinci asama inceleme hatasi: %s",
+                                        tile_index,
+                                        raw_review_record.get("review_error_message") or "",
+                                    )
                     except Exception as exc:
                         error_type = _classify_exception(exc)
                         message = _friendly_exception_message(exc, config)
@@ -409,6 +443,8 @@ def run_vlm_lmstudio_detection(
                     if bool(record.get("candidate")) and bool(record.get("geometry")):
                         raw_candidate_count += 1
                     if _is_exportable_candidate(record, config.confidence_threshold):
+                        first_stage_records.append(record)
+                    if _is_review_confirmed_candidate(record, config.confidence_threshold):
                         candidate_records.append(record)
 
                     pbar.update(1)
@@ -426,33 +462,85 @@ def run_vlm_lmstudio_detection(
                             paths,
                             candidate_records,
                             src.crs,
+                            first_stage_records=first_stage_records,
                             all_records=records,
                             confidence_threshold=config.confidence_threshold,
                             logger=log,
                         )
                         tiles_since_export = 0
                         log.info(
-                            "VLM ara ciktilar guncellendi: %d/%d tile, esik_ustu=%d -> %s",
+                            "VLM ara ciktilar guncellendi: %d/%d tile, ilk_asama=%d, ikinci_asama=%d -> %s",
                             len(records),
                             total_tiles,
+                            len(first_stage_records),
                             len(candidate_records),
                             paths.xlsx,
                         )
                     if len(records) == 1 or len(records) % 25 == 0 or len(records) == total_tiles:
                         log.info(
-                            "VLM ilerleme: %d/%d tile, model_aday=%d, esik_ustu=%d, skipped=%d, hata=%d",
+                            "VLM ilerleme: %d/%d tile, model_aday=%d, ilk_asama=%d, ikinci_asama=%d, skipped=%d, hata=%d",
                             len(records),
                             total_tiles,
                             raw_candidate_count,
+                            len(first_stage_records),
                             len(candidate_records),
                             skipped_count,
                             len(error_records),
                         )
 
+                if resume_records_needing_review:
+                    log.info(
+                        "VLM resume icinde ikinci asama inceleme eksik %d ilk asama aday bulundu; yeni tile'lardan sonra incelenecek.",
+                        len(resume_records_needing_review),
+                    )
+                    for record in resume_records_needing_review:
+                        try:
+                            window = Window(
+                                int(record.get("tile_col") or 0),
+                                int(record.get("tile_row") or 0),
+                                int(record.get("tile_width") or config.tile),
+                                int(record.get("tile_height") or config.tile),
+                            )
+                            tile_arrays = _read_tile_arrays(src, layout, window)
+                            rendered = _render_views(tile_arrays, selected_views, pixel_size=pixel_size)
+                            use_response_format, raw_review_record = _review_candidate_record(
+                                record,
+                                client=client,
+                                config=config,
+                                rendered_views=rendered,
+                                analysis_mode=layout.analysis_mode,
+                                selected_views=selected_views,
+                                gsd_m=prompt_gsd_m,
+                                use_response_format=use_response_format,
+                                logger=log,
+                            )
+                            if raw_review_record is not None:
+                                _write_jsonl_line(raw_fh, raw_review_record)
+                                log.warning(
+                                    "VLM resume tile %s ikinci asama inceleme hatasi: %s",
+                                    record.get("tile_index"),
+                                    raw_review_record.get("review_error_message") or "",
+                                )
+                        except Exception as exc:
+                            error_type = _classify_exception(exc)
+                            message = _friendly_exception_message(exc, config)
+                            _mark_review_error(record, error_type=error_type, message=message)
+                            raw_review_record = dict(record)
+                            raw_review_record["stage"] = "review"
+                            _write_jsonl_line(raw_fh, raw_review_record)
+                            log.warning(
+                                "VLM resume tile %s tekrar okunamadi/incelenemedi: %s",
+                                record.get("tile_index"),
+                                message,
+                            )
+                        _write_jsonl_line(jsonl_fh, record)
+                    first_stage_records, candidate_records = _candidate_record_lists(records, config.confidence_threshold)
+
         paths = _write_candidate_outputs(
             paths,
             candidate_records,
             src.crs,
+            first_stage_records=first_stage_records,
             all_records=records,
             confidence_threshold=config.confidence_threshold,
             logger=log,
@@ -661,6 +749,13 @@ def _coerce_int(value: Any) -> Optional[int]:
         return int(value)
     except Exception:
         return None
+
+
+def _first_unprocessed_tile_index(processed_tile_indexes: set[int], total_tiles: int) -> Optional[int]:
+    for tile_index in range(1, total_tiles + 1):
+        if tile_index not in processed_tile_indexes:
+            return tile_index
+    return None
 
 
 def _generate_windows(width: int, height: int, tile: int, overlap: int) -> Iterator[Tuple[Window, int, int]]:
@@ -1262,6 +1357,134 @@ def _build_prompt(
     return f"{mode_text}\n\n{common}"
 
 
+def _build_review_prompt(
+    record: Dict[str, Any],
+    *,
+    analysis_mode: str,
+    selected_views: Sequence[str],
+    gsd_m: Optional[float],
+) -> str:
+    scale_text = (
+        f"Approximate GSD is {float(gsd_m):.2f} m/pixel. "
+        if gsd_m is not None and gsd_m > 0
+        else "Exact GSD is unknown. "
+    )
+    first_pass = {
+        "tile_index": record.get("tile_index"),
+        "candidate_type": record.get("candidate_type"),
+        "confidence": record.get("confidence"),
+        "bbox_xyxy": record.get("bbox_xyxy"),
+        "visual_evidence": record.get("visual_evidence"),
+        "possible_false_positive": record.get("possible_false_positive"),
+        "recommended_check": record.get("recommended_check"),
+    }
+    return "".join(
+        [
+            "Second-pass review: a first-stage model proposed this tile as an archaeological candidate. ",
+            "Be more skeptical than the first pass. Confirm only if archaeology is clearly more likely than common false positives. ",
+            "Reject if the feature can plausibly be a road/track, field boundary, ploughing, irrigation/drainage, vegetation, tree crown, "
+            "building/modern wall, shadow, erosion, geology, image seam, compression artifact, or tile-edge artifact. ",
+            "Require coherent morphology, plausible archaeological scale, and at least two supporting cues. ",
+            scale_text,
+            f"Analysis mode: {analysis_mode}. Provided views: {', '.join(selected_views)}. ",
+            "First-stage proposal:\n",
+            json.dumps(first_pass, ensure_ascii=False),
+            "\nReturn confirmed=true only for candidates worth exporting after this skeptical review. ",
+            "If confirmed=false, set review_confidence=0. ",
+            "In review_reason, briefly state the decisive evidence or rejection reason. ",
+            "In review_false_positive, name the strongest non-archaeological explanation considered. ",
+            "Return exactly one JSON object with this schema and no markdown:\n",
+            REVIEW_SCHEMA_TEXT,
+        ]
+    )
+
+
+def _apply_review_result(
+    record: Dict[str, Any],
+    parsed: Dict[str, Any],
+    *,
+    raw_response: str,
+) -> None:
+    confirmed = bool(parsed.get("confirmed", False))
+    review_confidence = _coerce_float(parsed.get("review_confidence", 0.0), default=0.0)
+    if not confirmed:
+        review_confidence = 0.0
+    recommended_check = str(parsed.get("recommended_check", record.get("recommended_check", "field_check"))).strip().lower()
+    if recommended_check not in RECOMMENDED_CHECKS:
+        recommended_check = "field_check"
+    record.update(
+        {
+            "review_confirmed": confirmed,
+            "review_confidence": float(np.clip(review_confidence, 0.0, 1.0)),
+            "review_reason": str(parsed.get("review_reason", "") or ""),
+            "review_false_positive": str(parsed.get("review_false_positive", "") or ""),
+            "review_recommended_check": recommended_check,
+            "review_status": "ok",
+            "review_error_type": None,
+            "review_error_message": None,
+        }
+    )
+    if not isinstance(parsed.get("confirmed", None), bool):
+        record["review_raw_response_excerpt"] = raw_response[:500]
+
+
+def _review_candidate_record(
+    record: Dict[str, Any],
+    *,
+    client: Any,
+    config: VlmLmStudioConfig,
+    rendered_views: Sequence[Tuple[str, str]],
+    analysis_mode: str,
+    selected_views: Sequence[str],
+    gsd_m: Optional[float],
+    use_response_format: bool,
+    logger: logging.Logger,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    review_response_text: Optional[str] = None
+    try:
+        review_prompt = _build_review_prompt(
+            record,
+            analysis_mode=analysis_mode,
+            selected_views=selected_views,
+            gsd_m=gsd_m,
+        )
+        review_response_text, use_response_format = _request_vlm_json(
+            client=client,
+            config=config,
+            prompt=review_prompt,
+            rendered_views=rendered_views,
+            use_response_format=use_response_format,
+            logger=logger,
+        )
+        review_parsed = _parse_model_json(review_response_text)
+        _apply_review_result(record, review_parsed, raw_response=review_response_text)
+        return use_response_format, None
+    except Exception as exc:
+        error_type = _classify_exception(exc)
+        message = _friendly_exception_message(exc, config)
+        _mark_review_error(record, error_type=error_type, message=message)
+        raw_review_record = dict(record)
+        raw_review_record["stage"] = "review"
+        if review_response_text is not None:
+            raw_review_record["raw_response"] = review_response_text
+        return use_response_format, raw_review_record
+
+
+def _mark_review_error(record: Dict[str, Any], *, error_type: str, message: str) -> None:
+    record.update(
+        {
+            "review_confirmed": False,
+            "review_confidence": 0.0,
+            "review_reason": "",
+            "review_false_positive": "",
+            "review_recommended_check": record.get("recommended_check") or "field_check",
+            "review_status": "error",
+            "review_error_type": error_type,
+            "review_error_message": message,
+        }
+    )
+
+
 def _parse_model_json(text: str) -> Dict[str, Any]:
     raw = str(text or "").strip()
     json_text = _extract_json_object(raw)
@@ -1617,6 +1840,7 @@ def _write_candidate_outputs(
     records: Sequence[Dict[str, Any]],
     crs: Optional[RasterioCRS],
     *,
+    first_stage_records: Optional[Sequence[Dict[str, Any]]] = None,
     all_records: Optional[Sequence[Dict[str, Any]]] = None,
     confidence_threshold: float = 0.0,
     logger: logging.Logger,
@@ -1626,13 +1850,14 @@ def _write_candidate_outputs(
     xlsx_path = _write_candidate_xlsx(
         paths.xlsx,
         sorted_records,
+        first_stage_records=first_stage_records,
         all_records=all_records,
         confidence_threshold=confidence_threshold,
         logger=logger,
     )
     _write_candidate_geojson(paths.geojson, sorted_records, crs)
-    _write_candidate_gpkg(paths.gpkg, sorted_records, crs, logger=logger)
-    return replace(paths, xlsx=xlsx_path)
+    gpkg_path = _write_candidate_gpkg(paths.gpkg, sorted_records, crs, logger=logger)
+    return replace(paths, xlsx=xlsx_path, gpkg=gpkg_path)
 
 
 def _set_progress_postfix(
@@ -1664,6 +1889,14 @@ CSV_COLUMNS = [
     "candidate",
     "confidence",
     "candidate_type",
+    "review_confirmed",
+    "review_confidence",
+    "review_reason",
+    "review_false_positive",
+    "review_recommended_check",
+    "review_status",
+    "review_error_type",
+    "review_error_message",
     "bbox_xyxy",
     "bbox_global_xyxy",
     "bbox_crs_xyxy",
@@ -1706,6 +1939,36 @@ def _sort_candidate_records(records: Sequence[Dict[str, Any]]) -> List[Dict[str,
     return sorted(records, key=lambda record: (-_record_confidence(record), _record_tile_index(record)))
 
 
+def _is_review_confirmed_candidate(record: Dict[str, Any], threshold: float) -> bool:
+    return (
+        _is_exportable_candidate(record, threshold)
+        and bool(record.get("review_confirmed"))
+        and _record_confidence({"confidence": record.get("review_confidence")}) >= threshold
+    )
+
+
+def _candidate_record_lists(
+    records: Sequence[Dict[str, Any]],
+    threshold: float,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    first_stage_records: List[Dict[str, Any]] = []
+    confirmed_records: List[Dict[str, Any]] = []
+    for record in records:
+        if _is_exportable_candidate(record, threshold):
+            first_stage_records.append(record)
+        if _is_review_confirmed_candidate(record, threshold):
+            confirmed_records.append(record)
+    return first_stage_records, confirmed_records
+
+
+def _records_needing_review(records: Sequence[Dict[str, Any]], threshold: float) -> List[Dict[str, Any]]:
+    return [
+        record
+        for record in records
+        if _is_exportable_candidate(record, threshold) and not str(record.get("review_status") or "").strip()
+    ]
+
+
 def _not_found_reason(record: Dict[str, Any], threshold: float) -> str:
     status = str(record.get("status") or "").strip().lower()
     if status in {"skipped", "error", "warning"}:
@@ -1713,6 +1976,15 @@ def _not_found_reason(record: Dict[str, Any], threshold: float) -> str:
     if bool(record.get("candidate")):
         if not record.get("geometry"):
             return "missing_geometry"
+        review_status = str(record.get("review_status") or "").strip().lower()
+        if review_status == "error":
+            return "review_error"
+        if bool(record.get("review_confirmed")) and _record_confidence({"confidence": record.get("review_confidence")}) < threshold:
+            return "review_below_threshold"
+        if review_status == "ok" and not bool(record.get("review_confirmed")):
+            return "review_rejected"
+        if _record_confidence(record) >= threshold:
+            return "not_reviewed"
         if _record_confidence(record) < threshold:
             return "below_threshold"
     return "no_candidate"
@@ -1725,7 +1997,7 @@ def _not_found_records(
 ) -> List[Dict[str, Any]]:
     not_found: List[Dict[str, Any]] = []
     for record in records:
-        if _is_exportable_candidate(record, confidence_threshold):
+        if _is_review_confirmed_candidate(record, confidence_threshold):
             continue
         row = dict(record)
         row["not_found_reason"] = _not_found_reason(record, confidence_threshold)
@@ -1746,6 +2018,7 @@ def _write_candidate_xlsx(
     path: Path,
     records: Sequence[Dict[str, Any]],
     *,
+    first_stage_records: Optional[Sequence[Dict[str, Any]]] = None,
     all_records: Optional[Sequence[Dict[str, Any]]] = None,
     confidence_threshold: float = 0.0,
     logger: logging.Logger,
@@ -1821,6 +2094,23 @@ def _write_candidate_xlsx(
         sheet_records=_sort_candidate_records(records),
         table_name="VlmCandidates",
     )
+    first_stage_sheet_records = _sort_candidate_records(
+        list(first_stage_records) if first_stage_records is not None else list(records)
+    )
+    write_sheet(
+        wb.create_sheet("ilk_asama_pozitifler"),
+        title="ilk_asama_pozitifler",
+        columns=CSV_COLUMNS,
+        sheet_records=first_stage_sheet_records,
+        table_name="VlmFirstStage",
+    )
+    write_sheet(
+        wb.create_sheet("ikinci_asama_pozitifler"),
+        title="ikinci_asama_pozitifler",
+        columns=CSV_COLUMNS,
+        sheet_records=_sort_candidate_records(records),
+        table_name="VlmSecondStage",
+    )
     missing_records = _not_found_records(
         list(all_records) if all_records is not None else [],
         confidence_threshold=confidence_threshold,
@@ -1837,16 +2127,30 @@ def _write_candidate_xlsx(
 
 
 def _is_excel_lock_error(exc: OSError) -> bool:
+    return _is_output_lock_error(exc)
+
+
+def _is_output_lock_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
     return (
         isinstance(exc, PermissionError)
         or getattr(exc, "winerror", None) in {32, 33}
         or getattr(exc, "errno", None) == 13
+        or "database is locked" in text
+        or "file is locked" in text
+        or "permission denied" in text
+        or "access is denied" in text
+        or "being used by another process" in text
     )
 
 
-def _xlsx_alternative_path(path: Path, index: int) -> Path:
+def _alternative_output_path(path: Path, index: int) -> Path:
     suffix = "_alternatif" if index <= 1 else f"_alternatif_{index}"
     return path.with_name(f"{path.stem}{suffix}{path.suffix}")
+
+
+def _xlsx_alternative_path(path: Path, index: int) -> Path:
+    return _alternative_output_path(path, index)
 
 
 def _save_workbook_with_excel_lock_fallback(
@@ -1906,13 +2210,24 @@ def _write_candidate_gpkg(
     crs: Optional[RasterioCRS],
     *,
     logger: logging.Logger,
-) -> None:
+) -> Path:
     try:
         import fiona
     except ImportError:
         logger.warning("VLM GPKG yazimi atlandi; fiona kurulu degil.")
-        return
+        return path
 
+    def write_once(target_path: Path) -> None:
+        _write_candidate_gpkg_to_path(target_path, records, crs)
+
+    return _write_gpkg_with_lock_fallback(path, write_once, logger=logger)
+
+
+def _write_candidate_gpkg_to_path(
+    path: Path,
+    records: Sequence[Dict[str, Any]],
+    crs: Optional[RasterioCRS],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         path.unlink()
@@ -1931,6 +2246,37 @@ def _write_candidate_gpkg(
             crs,
             layer_name=f"vlm_{_safe_layer_token(candidate_type)}",
         )
+
+
+def _write_gpkg_with_lock_fallback(
+    path: Path,
+    writer: Any,
+    *,
+    logger: logging.Logger,
+) -> Path:
+    try:
+        writer(path)
+        return path
+    except Exception as exc:
+        if not _is_output_lock_error(exc):
+            raise
+        original_exc = exc
+
+    for index in range(1, 101):
+        alternative_path = _alternative_output_path(path, index)
+        try:
+            writer(alternative_path)
+        except Exception as exc:
+            if _is_output_lock_error(exc):
+                continue
+            raise
+        logger.warning(
+            "VLM GPKG dosyasi acik/kilitli gorunuyor; cikti alternatif adla kaydedildi: %s",
+            alternative_path,
+        )
+        return alternative_path
+
+    raise original_exc
 
 
 def _safe_layer_token(value: str) -> str:
@@ -1955,6 +2301,8 @@ def _write_candidate_gpkg_layer(
             "tile_row": "int",
             "tile_col": "int",
             "confidence": "float",
+            "review_conf": "float",
+            "review_ok": "int",
             "cand_type": "str",
             "bbox_px": "str",
             "bbox_crs": "str",
@@ -1972,6 +2320,7 @@ def _write_candidate_gpkg_layer(
             "has_dtm": "int",
             "mode": "str",
             "status": "str",
+            "review_stat": "str",
         },
     }
     open_kwargs: Dict[str, Any] = {
@@ -1994,6 +2343,8 @@ def _write_candidate_gpkg_layer(
                         "tile_row": int(record.get("tile_row") or 0),
                         "tile_col": int(record.get("tile_col") or 0),
                         "confidence": float(record.get("confidence") or 0.0),
+                        "review_conf": float(record.get("review_confidence") or 0.0),
+                        "review_ok": int(bool(record.get("review_confirmed"))),
                         "cand_type": str(record.get("candidate_type") or ""),
                         "bbox_px": _jsonish(record.get("bbox_xyxy")),
                         "bbox_crs": _jsonish(record.get("bbox_crs_xyxy")),
@@ -2011,6 +2362,7 @@ def _write_candidate_gpkg_layer(
                         "has_dtm": int(bool(record.get("has_dtm"))),
                         "mode": str(record.get("analysis_mode") or ""),
                         "status": str(record.get("status") or ""),
+                        "review_stat": str(record.get("review_status") or ""),
                     },
                 }
             )

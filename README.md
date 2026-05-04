@@ -697,9 +697,9 @@ vlm_confidence_threshold: 0.75
 vlm_resume: true
 ```
 
-Before running, load a vision/multimodal model in LM Studio and start the Local Server. `vlm_model: "auto"` asks LM Studio for the currently loaded model. If you want to test prompt changes or force a fresh scan, run into a new output folder or temporarily set `vlm_resume: false`; otherwise matching records from the previous `*_vlm_candidates.jsonl` may be reused.
+Before running, load a vision/multimodal model in LM Studio and start the Local Server. `vlm_model: "auto"` asks LM Studio for the currently loaded model. If `vlm_resume: true`, a restarted partial run loads the previous `*_vlm_candidates.jsonl` and continues from the first unprocessed tile. If older first-stage candidates still need the second-stage review, they are reviewed after the new tiles so the main scan resumes from where it stopped. If you want to test prompt changes or force a fresh scan, run into a new output folder or temporarily set `vlm_resume: false`.
 
-The current prompt is intentionally conservative. A tile is exported only when the model gives clear multi-cue archaeological evidence above `vlm_confidence_threshold`. Lower the threshold for exploratory sweeps; raise it when false positives are too frequent.
+The current prompt is intentionally conservative. A first-stage tile is considered positive only when the model gives clear multi-cue archaeological evidence above `vlm_confidence_threshold`. Those first-stage positives are then sent through a second skeptical reviewer prompt. Final CSV/GIS exports use the second-stage positives; Excel keeps both stages for audit and comparison. Lower the threshold for exploratory sweeps; raise it when false positives are too frequent.
 
 ### Command-Line Parameters (Full List)
 
@@ -923,10 +923,12 @@ When `enable_vlm: true`, the LM Studio pass writes its own files next to the oth
 
 The Excel workbook contains:
 
-- `vlm_candidates`: found/exported candidates sorted from highest to lowest `confidence`
-- `bulunmayan_tilelar`: scanned tiles that were not exported, with `not_found_reason` such as `no_candidate`, `below_threshold`, `skipped`, or `error`
+- `vlm_candidates`: final exported candidates after the second-stage review, sorted from highest to lowest first-stage `confidence`
+- `ilk_asama_pozitifler`: first-stage positives before skeptical review
+- `ikinci_asama_pozitifler`: second-stage confirmed positives; this matches the final exported candidate set
+- `bulunmayan_tilelar`: scanned tiles that were not finally exported, with `not_found_reason` such as `no_candidate`, `below_threshold`, `review_rejected`, `review_below_threshold`, `skipped`, or `error`
 
-Google Maps URLs are written as clickable hyperlinks. If the target workbook is open in Excel and Windows locks it, the program does not stop; it saves an alternative file such as `*_vlm_candidates_alternatif.xlsx` or `*_vlm_candidates_alternatif_2.xlsx` and logs the actual path.
+Google Maps URLs are written as clickable hyperlinks. If the target workbook is open in Excel, or the target GPKG is open in QGIS/ArcGIS and Windows locks it, the program does not stop; it saves an alternative file such as `*_vlm_candidates_alternatif.xlsx`, `*_vlm_candidates_alternatif_2.xlsx`, `*_vlm_candidates_alternatif.gpkg`, or `*_vlm_candidates_alternatif_2.gpkg` and logs the actual path.
 
 ### 💾 Cache Files
 
@@ -1525,9 +1527,10 @@ ValueError: Expected 5 channels but got X
 
 **Solutions:**
 1. Keep the conservative default `vlm_confidence_threshold: 0.75` or raise it to `0.80`.
-2. Use `vlm_views: "auto"` when DSM/DTM derivatives are available so the model can compare RGB and terrain cues.
-3. For RGB-only rasters, expect more uncertainty; use a higher threshold or review the `possible_false_positive` column carefully.
-4. If you changed the prompt/config, disable resume for a clean test:
+2. Compare `ilk_asama_pozitifler` and `ikinci_asama_pozitifler`; second-stage positives are the stricter set intended for export.
+3. Use `vlm_views: "auto"` when DSM/DTM derivatives are available so the model can compare RGB and terrain cues.
+4. For RGB-only rasters, expect more uncertainty; use a higher threshold or review the `possible_false_positive` / `review_false_positive` columns carefully.
+5. If you changed the prompt/config, disable resume for a clean test:
    ```yaml
    vlm_resume: false
    ```
@@ -1543,15 +1546,17 @@ ValueError: Expected 5 channels but got X
 4. Use fewer VLM views (`vlm_views: "rgb"` or `"rgb,hillshade"`) or a smaller `vlm_tile` for memory-constrained runs.
 5. Watch VRAM with `nvidia-smi -l 1` while the run is active.
 
-#### ❌ Error 11: VLM Excel File Is Open
+#### ❌ Error 11: VLM Excel or GPKG File Is Open
 
-**Symptoms:** You opened `*_vlm_candidates.xlsx` in Excel while the program is still running.
+**Symptoms:** You opened `*_vlm_candidates.xlsx` in Excel or `*_vlm_candidates.gpkg` in QGIS/ArcGIS while the program is still running.
 
 **Behavior:** The program now falls back to an alternative filename instead of stopping:
 
 ```
 *_vlm_candidates_alternatif.xlsx
 *_vlm_candidates_alternatif_2.xlsx
+*_vlm_candidates_alternatif.gpkg
+*_vlm_candidates_alternatif_2.gpkg
 ```
 
 Check the log for the exact saved path.
@@ -1635,7 +1640,7 @@ A:
 4. Use high-quality data
 
 **Q: How should I interpret VLM results?**  
-A: Treat VLM output as a review queue, not final archaeology. The `vlm_candidates` Excel sheet is sorted by confidence; `bulunmayan_tilelar` records non-exported tiles and why they were excluded. The current VLM prompt is conservative and the default export threshold is `0.75` to reduce false positives.
+A: Treat VLM output as a review queue, not final archaeology. `ilk_asama_pozitifler` shows everything that passed the first VLM pass; `ikinci_asama_pozitifler` and `vlm_candidates` show the stricter second-stage confirmed set. `bulunmayan_tilelar` records non-exported tiles and why they were excluded. The current VLM prompt is conservative and the default export threshold is `0.75` to reduce false positives.
 
 **Q: How do I train my own model?**  
 A: The project includes dedicated training scripts! See the [Model Training Guide](#-model-training-guide) section below for step-by-step instructions using `egitim_verisi_olusturma.py` and `training.py`.
