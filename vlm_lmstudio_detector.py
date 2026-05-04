@@ -222,7 +222,14 @@ def run_vlm_lmstudio_detection(
         if len(processed_tile_indexes) >= total_tiles:
             _write_jsonl_records(paths.jsonl, records)
             _write_jsonl_records(paths.raw_errors_jsonl, error_records)
-            _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
+            _write_candidate_outputs(
+                paths,
+                candidate_records,
+                src.crs,
+                all_records=records,
+                confidence_threshold=config.confidence_threshold,
+                logger=log,
+            )
             log.info("VLM resume tum hedef tile'lari kapsiyor; LM Studio'ya yeni istek gonderilmedi.")
             return VlmDetectionSummary(
                 paths=paths,
@@ -249,7 +256,14 @@ def run_vlm_lmstudio_detection(
             )
             _write_jsonl_records(paths.jsonl, [*records, run_record])
             _write_jsonl_records(paths.raw_errors_jsonl, [*error_records, run_record])
-            _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
+            _write_candidate_outputs(
+                paths,
+                candidate_records,
+                src.crs,
+                all_records=[*records, run_record],
+                confidence_threshold=config.confidence_threshold,
+                logger=log,
+            )
             raise
 
         log.info("VLM modeli: %s", config.model)
@@ -262,7 +276,14 @@ def run_vlm_lmstudio_detection(
             for record in error_records:
                 _write_jsonl_line(raw_fh, record)
             if resumed_tiles:
-                _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
+                _write_candidate_outputs(
+                    paths,
+                    candidate_records,
+                    src.crs,
+                    all_records=records,
+                    confidence_threshold=config.confidence_threshold,
+                    logger=log,
+                )
                 log.info(
                     "VLM resume ara ciktilari guncellendi: %d/%d tile, esik_ustu=%d -> %s",
                     len(records),
@@ -401,7 +422,14 @@ def run_vlm_lmstudio_detection(
                         candidate_records=candidate_records,
                     )
                     if config.export_every > 0 and tiles_since_export >= config.export_every:
-                        _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
+                        _write_candidate_outputs(
+                            paths,
+                            candidate_records,
+                            src.crs,
+                            all_records=records,
+                            confidence_threshold=config.confidence_threshold,
+                            logger=log,
+                        )
                         tiles_since_export = 0
                         log.info(
                             "VLM ara ciktilar guncellendi: %d/%d tile, esik_ustu=%d -> %s",
@@ -421,7 +449,14 @@ def run_vlm_lmstudio_detection(
                             len(error_records),
                         )
 
-        _write_candidate_outputs(paths, candidate_records, src.crs, logger=log)
+        _write_candidate_outputs(
+            paths,
+            candidate_records,
+            src.crs,
+            all_records=records,
+            confidence_threshold=config.confidence_threshold,
+            logger=log,
+        )
 
         return VlmDetectionSummary(
             paths=paths,
@@ -1569,12 +1604,21 @@ def _write_candidate_outputs(
     records: Sequence[Dict[str, Any]],
     crs: Optional[RasterioCRS],
     *,
+    all_records: Optional[Sequence[Dict[str, Any]]] = None,
+    confidence_threshold: float = 0.0,
     logger: logging.Logger,
 ) -> None:
-    _write_candidate_csv(paths.csv, records)
-    _write_candidate_xlsx(paths.xlsx, records, logger=logger)
-    _write_candidate_geojson(paths.geojson, records, crs)
-    _write_candidate_gpkg(paths.gpkg, records, crs, logger=logger)
+    sorted_records = _sort_candidate_records(records)
+    _write_candidate_csv(paths.csv, sorted_records)
+    _write_candidate_xlsx(
+        paths.xlsx,
+        sorted_records,
+        all_records=all_records,
+        confidence_threshold=confidence_threshold,
+        logger=logger,
+    )
+    _write_candidate_geojson(paths.geojson, sorted_records, crs)
+    _write_candidate_gpkg(paths.gpkg, sorted_records, crs, logger=logger)
 
 
 def _set_progress_postfix(
@@ -1627,6 +1671,53 @@ CSV_COLUMNS = [
     "error_message",
 ]
 
+NOT_FOUND_COLUMNS = [*CSV_COLUMNS, "not_found_reason"]
+
+
+def _record_confidence(record: Dict[str, Any]) -> float:
+    try:
+        return float(record.get("confidence") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _record_tile_index(record: Dict[str, Any]) -> int:
+    try:
+        return int(record.get("tile_index") or 0)
+    except Exception:
+        return 0
+
+
+def _sort_candidate_records(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(records, key=lambda record: (-_record_confidence(record), _record_tile_index(record)))
+
+
+def _not_found_reason(record: Dict[str, Any], threshold: float) -> str:
+    status = str(record.get("status") or "").strip().lower()
+    if status in {"skipped", "error", "warning"}:
+        return status
+    if bool(record.get("candidate")):
+        if not record.get("geometry"):
+            return "missing_geometry"
+        if _record_confidence(record) < threshold:
+            return "below_threshold"
+    return "no_candidate"
+
+
+def _not_found_records(
+    records: Sequence[Dict[str, Any]],
+    *,
+    confidence_threshold: float,
+) -> List[Dict[str, Any]]:
+    not_found: List[Dict[str, Any]] = []
+    for record in records:
+        if _is_exportable_candidate(record, confidence_threshold):
+            continue
+        row = dict(record)
+        row["not_found_reason"] = _not_found_reason(record, confidence_threshold)
+        not_found.append(row)
+    return not_found
+
 
 def _write_candidate_csv(path: Path, records: Sequence[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1641,6 +1732,8 @@ def _write_candidate_xlsx(
     path: Path,
     records: Sequence[Dict[str, Any]],
     *,
+    all_records: Optional[Sequence[Dict[str, Any]]] = None,
+    confidence_threshold: float = 0.0,
     logger: logging.Logger,
 ) -> None:
     try:
@@ -1654,39 +1747,78 @@ def _write_candidate_xlsx(
     path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
     ws = wb.active
-    ws.title = "vlm_candidates"
-    ws.append(list(CSV_COLUMNS))
-    for record in records:
-        flat = _flatten_record(record, CSV_COLUMNS)
-        ws.append([flat.get(col, "") for col in CSV_COLUMNS])
 
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    header_font = Font(color="FFFFFF", bold=True)
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
+    def write_sheet(
+        sheet: Any,
+        *,
+        title: str,
+        columns: Sequence[str],
+        sheet_records: Sequence[Dict[str, Any]],
+        table_name: str,
+    ) -> None:
+        sheet.title = title
+        sheet.append(list(columns))
+        for record in sheet_records:
+            flat = _flatten_record(record, columns)
+            sheet.append([flat.get(col, "") for col in columns])
 
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-    if ws.max_row >= 2:
-        table = Table(displayName="VlmCandidates", ref=ws.dimensions)
-        style = TableStyleInfo(
-            name="TableStyleMedium2",
-            showFirstColumn=False,
-            showLastColumn=False,
-            showRowStripes=True,
-            showColumnStripes=False,
-        )
-        table.tableStyleInfo = style
-        ws.add_table(table)
+        google_maps_col = columns.index("google_maps_url") + 1
+        for row_idx in range(2, sheet.max_row + 1):
+            cell = sheet.cell(row=row_idx, column=google_maps_col)
+            maps_url = str(cell.value or "").strip()
+            if maps_url:
+                cell.hyperlink = maps_url
+                cell.style = "Hyperlink"
 
-    for col_idx, column_name in enumerate(CSV_COLUMNS, start=1):
-        max_len = len(column_name)
-        for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
-            value = row[0].value
-            if value is not None:
-                max_len = max(max_len, min(len(str(value)), 80))
-        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = min(max(max_len + 2, 10), 60)
+        header_fill = PatternFill("solid", fgColor="1F4E78")
+        header_font = Font(color="FFFFFF", bold=True)
+        for cell in sheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        if sheet.max_row >= 2:
+            table = Table(displayName=table_name, ref=sheet.dimensions)
+            style = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False,
+            )
+            table.tableStyleInfo = style
+            sheet.add_table(table)
+
+        for col_idx, column_name in enumerate(columns, start=1):
+            max_len = len(column_name)
+            for row in sheet.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                value = row[0].value
+                if value is not None:
+                    max_len = max(max_len, min(len(str(value)), 80))
+            sheet.column_dimensions[sheet.cell(row=1, column=col_idx).column_letter].width = min(
+                max(max_len + 2, 10),
+                60,
+            )
+
+    write_sheet(
+        ws,
+        title="vlm_candidates",
+        columns=CSV_COLUMNS,
+        sheet_records=_sort_candidate_records(records),
+        table_name="VlmCandidates",
+    )
+    missing_records = _not_found_records(
+        list(all_records) if all_records is not None else [],
+        confidence_threshold=confidence_threshold,
+    )
+    write_sheet(
+        wb.create_sheet("bulunmayan_tilelar"),
+        title="bulunmayan_tilelar",
+        columns=NOT_FOUND_COLUMNS,
+        sheet_records=missing_records,
+        table_name="VlmNotFoundTiles",
+    )
 
     wb.save(path)
 

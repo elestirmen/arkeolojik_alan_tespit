@@ -107,6 +107,108 @@ def test_wgs84_google_maps_fields_are_added_to_candidate_record():
     assert record["google_maps_url"].startswith("https://www.google.com/maps?q=")
 
 
+def test_candidate_xlsx_google_maps_url_is_clickable(tmp_path: Path):
+    from openpyxl import load_workbook
+
+    maps_url = "https://www.google.com/maps?q=39.00000000,35.00000000"
+    xlsx_path = tmp_path / "vlm_candidates.xlsx"
+
+    vlm._write_candidate_xlsx(
+        xlsx_path,
+        [
+            {
+                "tile_index": 1,
+                "candidate": True,
+                "confidence": 0.8,
+                "candidate_type": "mound",
+                "google_maps_url": maps_url,
+                "status": "ok",
+            }
+        ],
+        logger=vlm.LOGGER,
+    )
+
+    wb = load_workbook(xlsx_path)
+    ws = wb["vlm_candidates"]
+    google_maps_col = vlm.CSV_COLUMNS.index("google_maps_url") + 1
+    cell = ws.cell(row=2, column=google_maps_col)
+
+    assert cell.value == maps_url
+    assert cell.hyperlink is not None
+    assert cell.hyperlink.target == maps_url
+    assert cell.style == "Hyperlink"
+
+
+def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
+    from openpyxl import load_workbook
+
+    xlsx_path = tmp_path / "vlm_candidates.xlsx"
+    low_confidence = {
+        "tile_index": 2,
+        "tile_row": 0,
+        "tile_col": 8,
+        "candidate": True,
+        "confidence": 0.62,
+        "candidate_type": "mound",
+        "google_maps_url": "",
+        "status": "ok",
+        "geometry": {"type": "Point", "coordinates": [1, 1]},
+    }
+    high_confidence = {
+        "tile_index": 1,
+        "tile_row": 0,
+        "tile_col": 0,
+        "candidate": True,
+        "confidence": 0.91,
+        "candidate_type": "ring_ditch",
+        "google_maps_url": "",
+        "status": "ok",
+        "geometry": {"type": "Point", "coordinates": [0, 0]},
+    }
+    no_candidate = {
+        "tile_index": 3,
+        "tile_row": 8,
+        "tile_col": 0,
+        "candidate": False,
+        "confidence": 0.0,
+        "candidate_type": "none",
+        "google_maps_url": "",
+        "status": "ok",
+    }
+    below_threshold = {
+        "tile_index": 4,
+        "tile_row": 8,
+        "tile_col": 8,
+        "candidate": True,
+        "confidence": 0.31,
+        "candidate_type": "unknown",
+        "google_maps_url": "",
+        "status": "ok",
+        "geometry": {"type": "Point", "coordinates": [2, 2]},
+    }
+
+    vlm._write_candidate_xlsx(
+        xlsx_path,
+        [low_confidence, high_confidence],
+        all_records=[low_confidence, high_confidence, no_candidate, below_threshold],
+        confidence_threshold=0.5,
+        logger=vlm.LOGGER,
+    )
+
+    wb = load_workbook(xlsx_path)
+    found_ws = wb["vlm_candidates"]
+    missing_ws = wb["bulunmayan_tilelar"]
+    tile_col = vlm.CSV_COLUMNS.index("tile_index") + 1
+    reason_col = vlm.NOT_FOUND_COLUMNS.index("not_found_reason") + 1
+
+    assert [found_ws.cell(row=2, column=tile_col).value, found_ws.cell(row=3, column=tile_col).value] == [1, 2]
+    assert [missing_ws.cell(row=2, column=tile_col).value, missing_ws.cell(row=3, column=tile_col).value] == [3, 4]
+    assert [
+        missing_ws.cell(row=2, column=reason_col).value,
+        missing_ws.cell(row=3, column=reason_col).value,
+    ] == ["no_candidate", "below_threshold"]
+
+
 def test_rgb_alpha_raster_is_not_treated_as_dsm(tmp_path: Path):
     tif_path = tmp_path / "rgba.tif"
     data = np.ones((4, 8, 8), dtype=np.uint8) * 255
