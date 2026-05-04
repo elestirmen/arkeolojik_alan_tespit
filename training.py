@@ -165,7 +165,7 @@ CONFIG: dict[str, object] = {
 
     # patience:
     # Erken durdurma sabri (iyilesme olmayan epoch sayisi).
-    "patience": 20,
+    "patience": 15,
 
     # metric_threshold:
     # Egitim/dogrulama metriklerini (IoU/F1/Precision/Recall) hesaplamak icin

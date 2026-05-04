@@ -151,6 +151,7 @@ vlm_tile: 512
 vlm_overlap: 128
 vlm_views: "auto"
 
+
 # VLM prompt icin GSD (metre/piksel). 0.30 => 30 cm nadir ortofoto.
 # 0 veya null verilirse raster transform'dan otomatik tahmin edilmeye calisilir.
 vlm_gsd_m: 0.30
