@@ -69,13 +69,40 @@ def test_prompt_includes_configured_gsd_scale():
     assert "0.30 m ground sampling distance" in prompt
     assert "307 m x 307 m" in prompt
     assert "nadir imagery" in prompt
-    assert "at least two supporting cues" in prompt
-    assert "subtle circular or oval archaeological traces" in prompt
-    assert "a single strong morphology cue can be enough for candidate=true" in prompt
-    assert "Do not reject solely because the feature is faint" in prompt
-    assert "multiple stones, tones, shadows, or soil marks form a coherent circular or oval boundary" in prompt
+    assert "Cappadocia cultural and volcanic landscape" in prompt
+    assert "human-made spatial organization" in prompt
+    assert "old ruin remains" in prompt
+    assert "low wall traces, collapsed wall lines, stone alignments" in prompt
+    assert "rock-cut cultural features" in prompt
+    assert "A single isolated bush, tree, shadow, pit, rock, color patch, or dark spot is never enough" in prompt
+    assert "Vegetation veto" in prompt
+    assert "Cappadocia geology veto" in prompt
+    assert "fairy-chimney or hoodoo bases" in prompt
     assert "the anomaly lacks coherent archaeology-like geometry" in prompt
     assert "below 0.75 means not strong enough for export" in prompt
+
+
+def test_review_prompt_has_cappadocia_false_positive_gate():
+    prompt = vlm._build_review_prompt(
+        {
+            "tile_index": 1,
+            "candidate_type": "mound",
+            "confidence": 0.82,
+            "bbox_xyxy": [1, 1, 6, 6],
+            "visual_evidence": "faint oval mark",
+            "possible_false_positive": "tree shadow",
+            "recommended_check": "rgb",
+        },
+        analysis_mode="rgb_only",
+        selected_views=["rgb"],
+        gsd_m=0.30,
+    )
+
+    assert "For Cappadocia, aggressively reject trees, bushes" in prompt
+    assert "fairy-chimney or hoodoo bases" in prompt
+    assert "human-made spatial logic" in prompt
+    assert "organized ruin lines/corners/rooms" in prompt
+    assert "Paired or clustered circular/oval features increase confidence only if" in prompt
 
 
 def test_vlm_default_confidence_threshold_is_conservative():
