@@ -618,14 +618,14 @@ def _output_base_path(path: Path) -> Path:
 
 def _build_output_paths(out_prefix: Path) -> VlmOutputPaths:
     base = _output_base_path(out_prefix)
-    gpkg_stage2 = base.parent / f"{base.name}_vlm_stage2_verified.gpkg"
+    gpkg_stage2 = base.parent / f"vlm_stage2_verified_{base.name}.gpkg"
     return VlmOutputPaths(
         jsonl=base.parent / f"{base.name}_vlm_candidates.jsonl",
         csv=base.parent / f"{base.name}_vlm_candidates.csv",
         xlsx=base.parent / f"{base.name}_vlm_candidates.xlsx",
         geojson=base.parent / f"{base.name}_vlm_candidates.geojson",
         gpkg=gpkg_stage2,
-        gpkg_stage1=base.parent / f"{base.name}_vlm_stage1_positives.gpkg",
+        gpkg_stage1=base.parent / f"vlm_stage1_positives_{base.name}.gpkg",
         gpkg_stage2=gpkg_stage2,
         raw_errors_jsonl=base.parent / f"{base.name}_vlm_raw_errors.jsonl",
     )

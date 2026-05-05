@@ -112,8 +112,8 @@ def test_vlm_default_confidence_threshold_is_conservative():
 def test_vlm_output_paths_include_separate_stage_gpkgs(tmp_path: Path):
     paths = vlm._build_output_paths(tmp_path / "out" / "rgb")
 
-    assert paths.gpkg_stage1.name == "rgb_vlm_stage1_positives.gpkg"
-    assert paths.gpkg_stage2.name == "rgb_vlm_stage2_verified.gpkg"
+    assert paths.gpkg_stage1.name == "vlm_stage1_positives_rgb.gpkg"
+    assert paths.gpkg_stage2.name == "vlm_stage2_verified_rgb.gpkg"
     assert paths.gpkg == paths.gpkg_stage2
 
 
@@ -372,8 +372,8 @@ def test_candidate_outputs_write_separate_stage_gpkgs(tmp_path: Path, monkeypatc
     )
 
     assert [call["path"].name for call in gpkg_calls] == [
-        "rgb_vlm_stage1_positives.gpkg",
-        "rgb_vlm_stage2_verified.gpkg",
+        "vlm_stage1_positives_rgb.gpkg",
+        "vlm_stage2_verified_rgb.gpkg",
     ]
     assert [call["count"] for call in gpkg_calls] == [1, 1]
     assert [call["main_layer_name"] for call in gpkg_calls] == [
