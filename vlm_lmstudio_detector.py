@@ -134,7 +134,10 @@ class VlmOutputPaths:
     csv: Path
     xlsx: Path
     geojson: Path
+    # Backwards-compatible alias for the final, second-stage verified GPKG.
     gpkg: Path
+    gpkg_stage1: Path
+    gpkg_stage2: Path
     raw_errors_jsonl: Path
 
 
@@ -225,6 +228,11 @@ def run_vlm_lmstudio_detection(
             "on" if config.resume else "off",
             config.export_every,
         )
+        log.info(
+            "VLM asama plani: A1 ilk tarama/esik ustu pozitifler -> %s; A2 ikinci asama dogrulama -> %s",
+            paths.gpkg_stage1,
+            paths.gpkg_stage2,
+        )
         next_tile_index = _first_unprocessed_tile_index(processed_tile_indexes, total_tiles)
         if resumed_tiles and next_tile_index is not None:
             log.info("VLM resume devam noktasi: tile %d/%d", next_tile_index, total_tiles)
@@ -310,7 +318,7 @@ def run_vlm_lmstudio_detection(
             with tqdm(
                 total=total_tiles,
                 initial=min(len(processed_tile_indexes), total_tiles),
-                desc="VLM tiles",
+                desc="VLM A1 tarama",
                 unit="tile",
                 leave=False,
             ) as pbar:
@@ -375,6 +383,7 @@ def run_vlm_lmstudio_detection(
                                 raster_height=src.height,
                             )
                             if _is_exportable_candidate(record, config.confidence_threshold):
+                                pbar.set_description("VLM A2 dogrulama")
                                 use_response_format, raw_review_record = _review_candidate_record(
                                     record,
                                     client=client,
@@ -393,7 +402,9 @@ def run_vlm_lmstudio_detection(
                                         tile_index,
                                         raw_review_record.get("review_error_message") or "",
                                     )
+                                pbar.set_description("VLM A1 tarama")
                     except Exception as exc:
+                        pbar.set_description("VLM A1 tarama")
                         error_type = _classify_exception(exc)
                         message = _friendly_exception_message(exc, config)
                         record = dict(tile_record_base)
@@ -489,6 +500,7 @@ def run_vlm_lmstudio_detection(
                         )
 
                 if resume_records_needing_review:
+                    pbar.set_description("VLM A2 resume dogrulama")
                     log.info(
                         "VLM resume icinde ikinci asama inceleme eksik %d ilk asama aday bulundu; yeni tile'lardan sonra incelenecek.",
                         len(resume_records_needing_review),
@@ -535,6 +547,7 @@ def run_vlm_lmstudio_detection(
                             )
                         _write_jsonl_line(jsonl_fh, record)
                     first_stage_records, candidate_records = _candidate_record_lists(records, config.confidence_threshold)
+                    pbar.set_description("VLM A1 tarama")
 
         paths = _write_candidate_outputs(
             paths,
@@ -605,12 +618,15 @@ def _output_base_path(path: Path) -> Path:
 
 def _build_output_paths(out_prefix: Path) -> VlmOutputPaths:
     base = _output_base_path(out_prefix)
+    gpkg_stage2 = base.parent / f"{base.name}_vlm_stage2_verified.gpkg"
     return VlmOutputPaths(
         jsonl=base.parent / f"{base.name}_vlm_candidates.jsonl",
         csv=base.parent / f"{base.name}_vlm_candidates.csv",
         xlsx=base.parent / f"{base.name}_vlm_candidates.xlsx",
         geojson=base.parent / f"{base.name}_vlm_candidates.geojson",
-        gpkg=base.parent / f"{base.name}_vlm_candidates.gpkg",
+        gpkg=gpkg_stage2,
+        gpkg_stage1=base.parent / f"{base.name}_vlm_stage1_positives.gpkg",
+        gpkg_stage2=gpkg_stage2,
         raw_errors_jsonl=base.parent / f"{base.name}_vlm_raw_errors.jsonl",
     )
 
@@ -1232,8 +1248,10 @@ def _request_vlm_json(
                 "content": (
                     "You are a conservative archaeological remote-sensing analyst reviewing aerial and terrain-derived imagery. "
                     "Your job is to flag only clear, review-worthy archaeological candidates. "
-                    "Prefer candidate=false over speculative candidates whenever the evidence is weak, single-cue, modern-looking, "
-                    "natural-looking, or explainable as agriculture, infrastructure, vegetation, shadow, or imagery artifact. "
+                    "Prefer candidate=false over speculative candidates whenever the evidence is weak, lacks coherent morphology, "
+                    "is modern-looking, natural-looking, or explainable as agriculture, infrastructure, vegetation, shadow, or imagery artifact. "
+                    "Do not dismiss coherent low-contrast circular or oval ring-like traces solely because they are subtle, incomplete, "
+                    "or visible mainly as a faint halo, rim, central depression, or small rim shadow. "
                     "Return only strict JSON. Do not include markdown or commentary."
                 ),
             },
@@ -1306,18 +1324,28 @@ def _build_prompt(
             "Decision gate: set candidate=true only when the anomaly shows clear archaeological morphology and at least two supporting cues, "
             "such as coherent circular/oval/rectilinear geometry, plausible archaeological scale, contrast with the surrounding terrain, "
             "spatial organization, and support from more than one relevant view or visual cue. ",
+            "First-stage screening should be sensitive to subtle circular or oval archaeological traces: small stone rings, robbed or eroded tumuli, "
+            "cairn-like mounds, circular soil discolorations, partial rings, faint raised rims, central depressions, and small dark pits or shadows "
+            "on the rim. These may be small, low-contrast, broken, or only weakly visible in RGB imagery. ",
+            "For first-stage screening, a single strong morphology cue can be enough for candidate=true when it forms a coherent circular/oval ring, "
+            "rim, mound edge, or central-depression pattern with plausible archaeological scale. Do not reject solely because the feature is faint, "
+            "partly eroded, incomplete, or visible as a pale/dark halo. ",
             "Before marking candidate=true, actively test alternative explanations: agriculture, field parcel edges, ploughing, irrigation, "
             "drainage, roads or tracks, modern buildings or walls, vehicle marks, vegetation rows or individual tree crowns, natural gullies, "
             "erosion, geology, shadows, seams, compression artifacts, and tile-edge artifacts. ",
-            "If any non-archaeological explanation is as plausible as archaeology, set candidate=false. ",
+            "If a non-archaeological explanation is as plausible as archaeology and the anomaly lacks coherent archaeology-like geometry, set candidate=false. ",
             "Do not mark isolated color changes, vague texture, random stone/soil patterns, single shadows, single vegetation differences, "
             "straight modern boundaries, road curves, or regular agricultural traces as archaeological candidates. ",
+            "However, if multiple stones, tones, shadows, or soil marks form a coherent circular or oval boundary around a center, treat it as "
+            "review-worthy rather than random texture. ",
             "Look for repeated or regular geometry, circular or oval forms, rectilinear traces, banks, ditches, terraces, mounds, tumuli, "
             "old route alignments, enclosures, foundation traces, and anomalies that are spatially organized rather than random. ",
             "Candidate-type rules: mound/tumulus requires a coherent raised or soil/vegetation signature with plausible size; "
-            "ring_ditch requires a continuous or strongly implied circular/oval ditch pattern; wall_trace/foundation/enclosure requires "
+            "use mound or tumulus for circular/oval mound-like features, including robbed or eroded examples with a central depression; "
+            "ring_ditch requires a continuous or strongly implied circular/oval ditch pattern; enclosure can be used when the ring boundary is dominant; "
+            "wall_trace/foundation/enclosure requires "
             "intentional rectilinear or enclosed geometry; road_trace requires an old alignment that is not a modern road, track, or field edge. ",
-            "If the evidence is weak, ambiguous, modern-looking, only natural texture, or only one cue, set candidate=false. ",
+            "If the evidence is weak, ambiguous, modern-looking, only natural texture, or only one non-morphological cue, set candidate=false. ",
             "If there is a candidate, return bbox_xyxy in tile pixel coordinates [x1,y1,x2,y2], not normalized coordinates. ",
             "The bbox should tightly cover the visible anomaly but is approximate and must not be treated as a final archaeological boundary. ",
             "Confidence calibration: below 0.75 means not strong enough for export, 0.75 means clear multi-cue evidence, "
@@ -1846,6 +1874,9 @@ def _write_candidate_outputs(
     logger: logging.Logger,
 ) -> VlmOutputPaths:
     sorted_records = _sort_candidate_records(records)
+    first_stage_sorted_records = _sort_candidate_records(
+        list(first_stage_records) if first_stage_records is not None else list(records)
+    )
     _write_candidate_csv(paths.csv, sorted_records)
     xlsx_path = _write_candidate_xlsx(
         paths.xlsx,
@@ -1856,8 +1887,29 @@ def _write_candidate_outputs(
         logger=logger,
     )
     _write_candidate_geojson(paths.geojson, sorted_records, crs)
-    gpkg_path = _write_candidate_gpkg(paths.gpkg, sorted_records, crs, logger=logger)
-    return replace(paths, xlsx=xlsx_path, gpkg=gpkg_path)
+    gpkg_stage1_path = _write_candidate_gpkg(
+        paths.gpkg_stage1,
+        first_stage_sorted_records,
+        crs,
+        logger=logger,
+        main_layer_name="vlm_stage1_positives",
+        type_layer_prefix="vlm_stage1",
+    )
+    gpkg_stage2_path = _write_candidate_gpkg(
+        paths.gpkg_stage2,
+        sorted_records,
+        crs,
+        logger=logger,
+        main_layer_name="vlm_stage2_verified",
+        type_layer_prefix="vlm_stage2",
+    )
+    return replace(
+        paths,
+        xlsx=xlsx_path,
+        gpkg=gpkg_stage2_path,
+        gpkg_stage1=gpkg_stage1_path,
+        gpkg_stage2=gpkg_stage2_path,
+    )
 
 
 def _set_progress_postfix(
@@ -2210,6 +2262,8 @@ def _write_candidate_gpkg(
     crs: Optional[RasterioCRS],
     *,
     logger: logging.Logger,
+    main_layer_name: str = "vlm_candidates",
+    type_layer_prefix: str = "vlm",
 ) -> Path:
     try:
         import fiona
@@ -2218,7 +2272,13 @@ def _write_candidate_gpkg(
         return path
 
     def write_once(target_path: Path) -> None:
-        _write_candidate_gpkg_to_path(target_path, records, crs)
+        _write_candidate_gpkg_to_path(
+            target_path,
+            records,
+            crs,
+            main_layer_name=main_layer_name,
+            type_layer_prefix=type_layer_prefix,
+        )
 
     return _write_gpkg_with_lock_fallback(path, write_once, logger=logger)
 
@@ -2227,11 +2287,14 @@ def _write_candidate_gpkg_to_path(
     path: Path,
     records: Sequence[Dict[str, Any]],
     crs: Optional[RasterioCRS],
+    *,
+    main_layer_name: str = "vlm_candidates",
+    type_layer_prefix: str = "vlm",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         path.unlink()
-    _write_candidate_gpkg_layer(path, records, crs, layer_name="vlm_candidates")
+    _write_candidate_gpkg_layer(path, records, crs, layer_name=main_layer_name)
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for record in records:
@@ -2244,7 +2307,7 @@ def _write_candidate_gpkg_to_path(
             path,
             group_records,
             crs,
-            layer_name=f"vlm_{_safe_layer_token(candidate_type)}",
+            layer_name=f"{type_layer_prefix}_{_safe_layer_token(candidate_type)}",
         )
 
 

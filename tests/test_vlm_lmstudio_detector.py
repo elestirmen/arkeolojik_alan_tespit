@@ -70,12 +70,24 @@ def test_prompt_includes_configured_gsd_scale():
     assert "307 m x 307 m" in prompt
     assert "nadir imagery" in prompt
     assert "at least two supporting cues" in prompt
-    assert "If any non-archaeological explanation is as plausible as archaeology" in prompt
+    assert "subtle circular or oval archaeological traces" in prompt
+    assert "a single strong morphology cue can be enough for candidate=true" in prompt
+    assert "Do not reject solely because the feature is faint" in prompt
+    assert "multiple stones, tones, shadows, or soil marks form a coherent circular or oval boundary" in prompt
+    assert "the anomaly lacks coherent archaeology-like geometry" in prompt
     assert "below 0.75 means not strong enough for export" in prompt
 
 
 def test_vlm_default_confidence_threshold_is_conservative():
     assert vlm.VlmLmStudioConfig().confidence_threshold == 0.75
+
+
+def test_vlm_output_paths_include_separate_stage_gpkgs(tmp_path: Path):
+    paths = vlm._build_output_paths(tmp_path / "out" / "rgb")
+
+    assert paths.gpkg_stage1.name == "rgb_vlm_stage1_positives.gpkg"
+    assert paths.gpkg_stage2.name == "rgb_vlm_stage2_verified.gpkg"
+    assert paths.gpkg == paths.gpkg_stage2
 
 
 def test_wgs84_google_maps_fields_are_added_to_candidate_record():
@@ -289,6 +301,59 @@ def test_gpkg_write_uses_alternative_name_when_file_is_locked(tmp_path: Path):
         "vlm_candidates_alternatif.gpkg",
         "vlm_candidates_alternatif_2.gpkg",
     ]
+
+
+def test_candidate_outputs_write_separate_stage_gpkgs(tmp_path: Path, monkeypatch):
+    paths = vlm._build_output_paths(tmp_path / "out" / "rgb")
+    first_stage_record = {
+        "tile_index": 1,
+        "candidate": True,
+        "confidence": 0.91,
+        "candidate_type": "mound",
+        "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+    }
+    second_stage_record = {
+        **first_stage_record,
+        "review_confirmed": True,
+        "review_confidence": 0.88,
+    }
+    gpkg_calls = []
+
+    def fake_write_candidate_gpkg(path, records, crs, *, logger, main_layer_name="vlm_candidates", type_layer_prefix="vlm"):
+        gpkg_calls.append(
+            {
+                "path": Path(path),
+                "count": len(records),
+                "main_layer_name": main_layer_name,
+                "type_layer_prefix": type_layer_prefix,
+            }
+        )
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text("fake gpkg", encoding="utf-8")
+        return Path(path)
+
+    monkeypatch.setattr(vlm, "_write_candidate_gpkg", fake_write_candidate_gpkg)
+
+    updated_paths = vlm._write_candidate_outputs(
+        paths,
+        [second_stage_record],
+        None,
+        first_stage_records=[first_stage_record],
+        all_records=[first_stage_record],
+        confidence_threshold=0.75,
+        logger=vlm.LOGGER,
+    )
+
+    assert [call["path"].name for call in gpkg_calls] == [
+        "rgb_vlm_stage1_positives.gpkg",
+        "rgb_vlm_stage2_verified.gpkg",
+    ]
+    assert [call["count"] for call in gpkg_calls] == [1, 1]
+    assert [call["main_layer_name"] for call in gpkg_calls] == [
+        "vlm_stage1_positives",
+        "vlm_stage2_verified",
+    ]
+    assert updated_paths.gpkg == updated_paths.gpkg_stage2
 
 
 def test_rgb_alpha_raster_is_not_treated_as_dsm(tmp_path: Path):

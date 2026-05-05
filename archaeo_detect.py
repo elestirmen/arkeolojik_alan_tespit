@@ -10681,7 +10681,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             LOGGER.info("VLM CSV: %s", vlm_summary.paths.csv)
             LOGGER.info("VLM Excel: %s", vlm_summary.paths.xlsx)
             LOGGER.info("VLM GeoJSON: %s", vlm_summary.paths.geojson)
-            LOGGER.info("VLM GPKG: %s", vlm_summary.paths.gpkg)
+            LOGGER.info("VLM GPKG ilk asama pozitifler: %s", vlm_summary.paths.gpkg_stage1)
+            LOGGER.info("VLM GPKG ikinci asama dogrulanan: %s", vlm_summary.paths.gpkg_stage2)
         except ImportError as e:
             LOGGER.error(
                 "VLM taramasi icin gerekli paketler yuklu degil: %s. "
