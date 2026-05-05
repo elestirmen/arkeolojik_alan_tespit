@@ -618,14 +618,14 @@ def _output_base_path(path: Path) -> Path:
 
 def _build_output_paths(out_prefix: Path) -> VlmOutputPaths:
     base = _output_base_path(out_prefix)
-    gpkg_stage2 = base.parent / f"vlm_stage2_verified_{base.name}.gpkg"
+    gpkg_stage2 = base.parent / f"{base.name}_vlm_stage2_verified.gpkg"
     return VlmOutputPaths(
         jsonl=base.parent / f"{base.name}_vlm_candidates.jsonl",
         csv=base.parent / f"{base.name}_vlm_candidates.csv",
         xlsx=base.parent / f"{base.name}_vlm_candidates.xlsx",
         geojson=base.parent / f"{base.name}_vlm_candidates.geojson",
         gpkg=gpkg_stage2,
-        gpkg_stage1=base.parent / f"vlm_stage1_positives_{base.name}.gpkg",
+        gpkg_stage1=base.parent / f"{base.name}_vlm_stage1_positives.gpkg",
         gpkg_stage2=gpkg_stage2,
         raw_errors_jsonl=base.parent / f"{base.name}_vlm_raw_errors.jsonl",
     )
@@ -1908,7 +1908,7 @@ def _write_candidate_outputs(
         first_stage_sorted_records,
         crs,
         logger=logger,
-        main_layer_name="vlm_stage1_positives",
+        main_layer_name="all_vlm_stage1_positives",
         type_layer_prefix="vlm_stage1",
     )
     gpkg_stage2_path = _write_candidate_gpkg(
@@ -1916,7 +1916,7 @@ def _write_candidate_outputs(
         sorted_records,
         crs,
         logger=logger,
-        main_layer_name="vlm_stage2_verified",
+        main_layer_name="all_vlm_stage2_verified",
         type_layer_prefix="vlm_stage2",
     )
     return replace(
@@ -2323,7 +2323,7 @@ def _write_candidate_gpkg_to_path(
             path,
             group_records,
             crs,
-            layer_name=f"{type_layer_prefix}_{_safe_layer_token(candidate_type)}",
+            layer_name=f"{_safe_layer_token(candidate_type)}_{type_layer_prefix}",
         )
 
 

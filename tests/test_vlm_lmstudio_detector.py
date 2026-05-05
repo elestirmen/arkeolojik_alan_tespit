@@ -112,8 +112,8 @@ def test_vlm_default_confidence_threshold_is_conservative():
 def test_vlm_output_paths_include_separate_stage_gpkgs(tmp_path: Path):
     paths = vlm._build_output_paths(tmp_path / "out" / "rgb")
 
-    assert paths.gpkg_stage1.name == "vlm_stage1_positives_rgb.gpkg"
-    assert paths.gpkg_stage2.name == "vlm_stage2_verified_rgb.gpkg"
+    assert paths.gpkg_stage1.name == "rgb_vlm_stage1_positives.gpkg"
+    assert paths.gpkg_stage2.name == "rgb_vlm_stage2_verified.gpkg"
     assert paths.gpkg == paths.gpkg_stage2
 
 
@@ -372,15 +372,47 @@ def test_candidate_outputs_write_separate_stage_gpkgs(tmp_path: Path, monkeypatc
     )
 
     assert [call["path"].name for call in gpkg_calls] == [
-        "vlm_stage1_positives_rgb.gpkg",
-        "vlm_stage2_verified_rgb.gpkg",
+        "rgb_vlm_stage1_positives.gpkg",
+        "rgb_vlm_stage2_verified.gpkg",
     ]
     assert [call["count"] for call in gpkg_calls] == [1, 1]
     assert [call["main_layer_name"] for call in gpkg_calls] == [
-        "vlm_stage1_positives",
-        "vlm_stage2_verified",
+        "all_vlm_stage1_positives",
+        "all_vlm_stage2_verified",
     ]
     assert updated_paths.gpkg == updated_paths.gpkg_stage2
+
+
+def test_candidate_type_layers_start_with_type_name(tmp_path: Path, monkeypatch):
+    layer_calls = []
+
+    def fake_write_layer(path, records, crs, *, layer_name):
+        layer_calls.append(layer_name)
+
+    monkeypatch.setattr(vlm, "_write_candidate_gpkg_layer", fake_write_layer)
+
+    vlm._write_candidate_gpkg_to_path(
+        tmp_path / "candidates.gpkg",
+        [
+            {
+                "candidate_type": "mound",
+                "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+            },
+            {
+                "candidate_type": "ring_ditch",
+                "geometry": {"type": "Polygon", "coordinates": [[[2, 2], [3, 2], [3, 3], [2, 2]]]},
+            },
+        ],
+        None,
+        main_layer_name="all_vlm_stage1_positives",
+        type_layer_prefix="vlm_stage1",
+    )
+
+    assert layer_calls == [
+        "all_vlm_stage1_positives",
+        "mound_vlm_stage1",
+        "ring_ditch_vlm_stage1",
+    ]
 
 
 def test_rgb_alpha_raster_is_not_treated_as_dsm(tmp_path: Path):
