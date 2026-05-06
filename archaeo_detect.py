@@ -947,6 +947,14 @@ class PipelineDefaults:
         default=True,
         metadata={"help": "VLM onceki JSONL kaydindan islenmis tile'lari atlayarak devam etsin."},
     )
+    vlm_reload_every_tiles: int = field(
+        default=0,
+        metadata={"help": "LM Studio modelini kac yeni VLM tile'da bir unload/load yapacagi; 0 kapali."},
+    )
+    vlm_reload_pause_seconds: float = field(
+        default=5.0,
+        metadata={"help": "LM Studio unload sonrasi yeniden load etmeden once beklenecek sure (saniye)."},
+    )
     vlm_timeout: int = field(
         default=120,
         metadata={"help": "LM Studio API istek zaman asimi (saniye)"},
@@ -1191,6 +1199,12 @@ class PipelineDefaults:
 
         if self.vlm_export_every < 0:
             errors.append(f"vlm_export_every negatif olamaz, verilen: {self.vlm_export_every}")
+
+        if self.vlm_reload_every_tiles < 0:
+            errors.append(f"vlm_reload_every_tiles negatif olamaz, verilen: {self.vlm_reload_every_tiles}")
+
+        if self.vlm_reload_pause_seconds < 0:
+            errors.append(f"vlm_reload_pause_seconds negatif olamaz, verilen: {self.vlm_reload_pause_seconds}")
 
         if self.vlm_timeout <= 0:
             errors.append(f"vlm_timeout pozitif olmali, verilen: {self.vlm_timeout}")
@@ -9221,6 +9235,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help=cli_help("vlm_resume"),
     )
     parser.add_argument(
+        "--vlm-reload-every-tiles",
+        type=int,
+        default=default_for("vlm_reload_every_tiles"),
+        dest="vlm_reload_every_tiles",
+        help=cli_help("vlm_reload_every_tiles"),
+    )
+    parser.add_argument(
+        "--vlm-reload-pause-seconds",
+        type=float,
+        default=default_for("vlm_reload_pause_seconds"),
+        dest="vlm_reload_pause_seconds",
+        help=cli_help("vlm_reload_pause_seconds"),
+    )
+    parser.add_argument(
         "--vlm-timeout",
         type=int,
         default=default_for("vlm_timeout"),
@@ -10663,6 +10691,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     export_every=config.vlm_export_every,
                     resume=config.vlm_resume,
                     resume_jsonl_path=vlm_resume_jsonl_path,
+                    reload_every_tiles=config.vlm_reload_every_tiles,
+                    reload_pause_seconds=config.vlm_reload_pause_seconds,
                 ),
                 logger=LOGGER,
             )

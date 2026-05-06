@@ -57,6 +57,38 @@ def test_base_url_without_v1_is_normalized():
     assert vlm._normalize_openai_base_url("http://127.0.0.1:8081/v1") == "http://127.0.0.1:8081/v1"
 
 
+def test_lmstudio_native_api_base_url_is_derived_from_openai_base_url():
+    assert vlm._lmstudio_native_api_base_url("http://127.0.0.1:8081") == "http://127.0.0.1:8081/api/v1"
+    assert vlm._lmstudio_native_api_base_url("http://127.0.0.1:8081/v1") == "http://127.0.0.1:8081/api/v1"
+    assert vlm._lmstudio_native_api_base_url("http://127.0.0.1:8081/api/v1") == "http://127.0.0.1:8081/api/v1"
+
+
+def test_lmstudio_reload_unloads_then_loads_model(monkeypatch):
+    calls = []
+
+    def fake_post(config, endpoint, payload):
+        calls.append((endpoint, payload))
+        if endpoint == "models/load":
+            return {"instance_id": "vision-model"}
+        return {"instance_id": payload.get("instance_id")}
+
+    monkeypatch.setattr(vlm, "_post_lmstudio_native_json", fake_post)
+    monkeypatch.setattr(vlm.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+
+    config = vlm.VlmLmStudioConfig(
+        base_url="http://127.0.0.1:8081/v1",
+        model="vision-model",
+        reload_pause_seconds=2,
+    )
+
+    assert vlm._reload_lmstudio_model(config, logger=vlm.LOGGER) == "vision-model"
+    assert calls == [
+        ("models/unload", {"instance_id": "vision-model"}),
+        ("sleep", 2.0),
+        ("models/load", {"model": "vision-model"}),
+    ]
+
+
 def test_prompt_includes_configured_gsd_scale():
     prompt = vlm._build_prompt(
         "rgb_only",
@@ -98,11 +130,10 @@ def test_review_prompt_has_cappadocia_false_positive_gate():
         gsd_m=0.30,
     )
 
-    assert "For Cappadocia, aggressively reject trees, bushes" in prompt
-    assert "fairy-chimney or hoodoo bases" in prompt
-    assert "human-made spatial logic" in prompt
-    assert "organized ruin lines/corners/rooms" in prompt
-    assert "Paired or clustered circular/oval features increase confidence only if" in prompt
+    assert "Be more skeptical than the first pass" in prompt
+    assert "common false positives" in prompt
+    assert "vegetation, tree crown" in prompt
+    assert "Require coherent morphology, plausible archaeological scale, and at least two supporting cues" in prompt
 
 
 def test_vlm_default_confidence_threshold_is_conservative():
@@ -479,6 +510,59 @@ def test_bad_json_response_is_recorded_with_raw_response(tmp_path: Path, monkeyp
     assert summary.paths.xlsx.exists()
     assert summary.paths.geojson.exists()
     assert "raw_response" in summary.paths.raw_errors_jsonl.read_text(encoding="utf-8")
+
+
+def test_vlm_reload_runs_between_tiles(tmp_path: Path, monkeypatch):
+    tif_path = tmp_path / "rgb_two_tiles_reload.tif"
+    data = np.ones((3, 8, 16), dtype=np.uint8) * 120
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=16,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    reload_calls = []
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(
+        vlm,
+        "_request_vlm_json",
+        lambda **kwargs: (
+            '{"candidate":false,"confidence":0,"candidate_type":"none","bbox_xyxy":null,'
+            '"visual_evidence":"","possible_false_positive":"","recommended_check":"rgb"}',
+            True,
+        ),
+    )
+
+    def fake_reload(config, *, logger):
+        reload_calls.append(config.model)
+        return config.model
+
+    monkeypatch.setattr(vlm, "_reload_lmstudio_model", fake_reload)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tif_path,
+        out_prefix=tmp_path / "out" / "rgb",
+        config=vlm.VlmLmStudioConfig(
+            tile=8,
+            overlap=0,
+            max_tiles=2,
+            export_every=0,
+            resume=False,
+            reload_every_tiles=1,
+            reload_pause_seconds=0,
+        ),
+    )
+
+    assert summary.processed_tiles == 2
+    assert reload_calls == ["loaded-vision-model"]
 
 
 def test_exportable_vlm_candidate_is_reviewed_before_final_export(tmp_path: Path, monkeypatch):

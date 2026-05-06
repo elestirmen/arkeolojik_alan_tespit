@@ -38,8 +38,8 @@
 # Örnek: "kesif_alani.tif" veya "veriler/bolge1.tif"
 #input: "workspace/gizem_hocanin_veriler_5band_rgb_dsm_dtm_0p5m_bilinear.tif"
 #input: "workspace/karlik_vadi.tif"
-#input: "workspace/on_veri/karlik_dag_rgb.tif"
-input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya_bing_map_3-2.tif"
+input: "workspace/on_veri/karlik_dag_rgb.tif"
+#input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya_bing_map_3-2.tif"
 
 # out_prefix: Çıktı dosyalarının isim ön eki
 # - null ise: Girdi dosya adından otomatik üretilir
@@ -172,6 +172,12 @@ vlm_export_every: 150
 # true: onceki session'lardaki ayni cikti taban adina sahip *_vlm_candidates.jsonl dosyasini
 # okuyup islenmis tile'lari atlar. Tile/overlap/view uyusmazsa eski kayitlar kullanilmaz.
 vlm_resume: true
+
+# Uzun VLM calismalarinda LM Studio VRAM sisiyorsa, her N yeni tile'da ara cikti yazip
+# modeli native LM Studio API ile unload/load yapar. 0 kapatir.
+# Not: LM Studio 0.4+ /api/v1/models/unload ve /api/v1/models/load endpointleri gerekir.
+vlm_reload_every_tiles: 250
+vlm_reload_pause_seconds: 10
 
 vlm_timeout: 120
 vlm_temperature: 0.0

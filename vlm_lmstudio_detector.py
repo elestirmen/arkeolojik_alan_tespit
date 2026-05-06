@@ -13,9 +13,11 @@ import io
 import json
 import logging
 import math
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlparse
+import urllib.request
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -97,6 +99,8 @@ class VlmLmStudioConfig:
     export_every: int = 50
     resume: bool = True
     resume_jsonl_path: Optional[Path | str] = None
+    reload_every_tiles: int = 0
+    reload_pause_seconds: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -287,6 +291,12 @@ def run_vlm_lmstudio_detection(
             raise
 
         log.info("VLM modeli: %s", config.model)
+        if config.reload_every_tiles > 0:
+            log.info(
+                "VLM LM Studio model reload aktif: her %d yeni tile, pause=%.1fs",
+                config.reload_every_tiles,
+                float(config.reload_pause_seconds or 0.0),
+            )
 
         with paths.jsonl.open("w", encoding="utf-8") as jsonl_fh, paths.raw_errors_jsonl.open(
             "w", encoding="utf-8"
@@ -331,6 +341,7 @@ def run_vlm_lmstudio_detection(
                     candidate_records=candidate_records,
                 )
                 tiles_since_export = 0
+                tiles_since_reload = 0
                 for tile_index, (window, row, col) in enumerate(progress_iter, start=1):
                     if config.max_tiles > 0 and tile_index > config.max_tiles:
                         break
@@ -460,6 +471,7 @@ def run_vlm_lmstudio_detection(
 
                     pbar.update(1)
                     tiles_since_export += 1
+                    tiles_since_reload += 1
                     _set_progress_postfix(
                         pbar,
                         records=records,
@@ -487,6 +499,34 @@ def run_vlm_lmstudio_detection(
                             len(candidate_records),
                             paths.xlsx,
                         )
+                    if (
+                        config.reload_every_tiles > 0
+                        and tiles_since_reload >= int(config.reload_every_tiles)
+                        and len(processed_tile_indexes) < total_tiles
+                    ):
+                        paths = _write_candidate_outputs(
+                            paths,
+                            candidate_records,
+                            src.crs,
+                            first_stage_records=first_stage_records,
+                            all_records=records,
+                            confidence_threshold=config.confidence_threshold,
+                            logger=log,
+                        )
+                        log.info(
+                            "VLM LM Studio model reload baslatiliyor: son reload'dan beri %d yeni tile islendi (%d/%d).",
+                            tiles_since_reload,
+                            len(processed_tile_indexes),
+                            total_tiles,
+                        )
+                        pbar.set_description("VLM model reload")
+                        reloaded_model = _reload_lmstudio_model(config, logger=log)
+                        if reloaded_model:
+                            if reloaded_model != config.model:
+                                config = replace(config, model=reloaded_model)
+                            client = _make_openai_client(config)
+                        tiles_since_reload = 0
+                        pbar.set_description("VLM A1 tarama")
                     if len(records) == 1 or len(records) % 25 == 0 or len(records) == total_tiles:
                         log.info(
                             "VLM ilerleme: %d/%d tile, model_aday=%d, ilk_asama=%d, ikinci_asama=%d, skipped=%d, hata=%d",
@@ -583,6 +623,10 @@ def _validate_config(config: VlmLmStudioConfig) -> None:
         raise ValueError("vlm_max_tiles negatif olamaz.")
     if config.export_every < 0:
         raise ValueError("vlm_export_every negatif olamaz.")
+    if config.reload_every_tiles < 0:
+        raise ValueError("vlm_reload_every_tiles negatif olamaz.")
+    if config.reload_pause_seconds < 0:
+        raise ValueError("vlm_reload_pause_seconds negatif olamaz.")
     if not 0.0 <= config.confidence_threshold <= 1.0:
         raise ValueError("vlm_confidence_threshold 0-1 arasinda olmali.")
     if config.timeout <= 0:
@@ -1178,6 +1222,72 @@ def _normalize_openai_base_url(base_url: str) -> str:
     return text
 
 
+def _lmstudio_native_api_base_url(base_url: str) -> str:
+    """Map OpenAI-compatible base URLs to LM Studio's native /api/v1 root."""
+    text = str(base_url or "").strip().rstrip("/")
+    if not text:
+        return text
+    if text.endswith("/api/v1"):
+        return text
+    if text.endswith("/v1"):
+        return f"{text[:-3]}/api/v1"
+    parsed = urlparse(text)
+    if parsed.scheme and parsed.netloc and parsed.path in ("", "/"):
+        return f"{text}/api/v1"
+    return f"{text}/api/v1"
+
+
+def _post_lmstudio_native_json(
+    config: VlmLmStudioConfig,
+    endpoint: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    base_url = _lmstudio_native_api_base_url(config.base_url)
+    url = f"{base_url}/{endpoint.lstrip('/')}"
+    headers = {"Content-Type": "application/json"}
+    api_key = str(config.api_key or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=float(config.timeout)) as response:
+        body = response.read().decode("utf-8")
+    if not body.strip():
+        return {}
+    parsed = json.loads(body)
+    return parsed if isinstance(parsed, dict) else {"response": parsed}
+
+
+def _reload_lmstudio_model(config: VlmLmStudioConfig, *, logger: logging.Logger) -> Optional[str]:
+    """Best-effort LM Studio native unload/load cycle. Returns the active instance id if successful."""
+    model_id = str(config.model or "").strip()
+    if not model_id or model_id.lower() in AUTO_MODEL_TOKENS:
+        logger.warning("LM Studio model reload atlandi; cozulmus model adi yok: %r", config.model)
+        return None
+
+    native_base = _lmstudio_native_api_base_url(config.base_url)
+    try:
+        _post_lmstudio_native_json(config, "models/unload", {"instance_id": model_id})
+        logger.info("LM Studio modeli bellekten kaldirildi: %s (%s)", model_id, native_base)
+    except Exception as exc:
+        logger.warning("LM Studio model unload basarisiz; reload atlandi (%s): %s", model_id, exc)
+        return None
+
+    pause_seconds = float(config.reload_pause_seconds or 0.0)
+    if pause_seconds > 0:
+        time.sleep(pause_seconds)
+
+    try:
+        response = _post_lmstudio_native_json(config, "models/load", {"model": model_id})
+    except Exception as exc:
+        logger.warning("LM Studio model load basarisiz; sonraki istek JIT load'a kalabilir (%s): %s", model_id, exc)
+        return None
+
+    instance_id = str(response.get("instance_id") or model_id).strip() or model_id
+    logger.info("LM Studio modeli yeniden yuklendi: %s", instance_id)
+    return instance_id
+
+
 def _resolve_lmstudio_model(client: Any, config: VlmLmStudioConfig, *, logger: logging.Logger) -> str:
     requested_model = str(config.model or "").strip()
     auto_model = requested_model.lower() in AUTO_MODEL_TOKENS
@@ -1360,7 +1470,6 @@ def _build_prompt(
             "The bbox should tightly cover the visible anomaly but is approximate and must not be treated as a final archaeological boundary. ",
             "Confidence calibration: below 0.75 means not strong enough for export, 0.75 means clear multi-cue evidence, "
             "0.90 means very strong evidence with archaeology more likely than common false positives. ",
-            "Use candidate_type=\"unknown\" when the pattern looks archaeological but the type is unclear. ",
             "If there is no candidate, return candidate=false, confidence=0, candidate_type=\"none\", bbox_xyxy=null. ",
             "Keep visual_evidence short and concrete; mention the specific views that support the decision. ",
             "In possible_false_positive, name the strongest non-archaeological explanation considered, even for candidate=true. ",
@@ -1422,13 +1531,7 @@ def _build_review_prompt(
             "Be more skeptical than the first pass. Confirm only if archaeology is clearly more likely than common false positives. ",
             "Reject if the feature can plausibly be a road/track, field boundary, ploughing, irrigation/drainage, vegetation, tree crown, "
             "building/modern wall, shadow, erosion, geology, image seam, compression artifact, or tile-edge artifact. ",
-            "For Cappadocia, aggressively reject trees, bushes, vegetation clumps, tree shadows, isolated dark spots, rock shadows, caprock shadows, "
-            "fairy-chimney or hoodoo bases, tuff erosion pits, natural gullies, drainage scars, collapse scars, random stone scatter, modern tracks, "
-            "field parcel edges, vineyards, and tourist/agricultural disturbance. ",
-            "Confirm only when the feature shows human-made spatial logic: coherent boundary, repeated arranged elements, plausible archaeological "
-            "scale, organized ruin lines/corners/rooms, rock-cut openings, old paths/terraces, or association with other Cappadocian cultural "
-            "landscape features. Paired or clustered circular/oval features increase confidence only if they share coherent archaeological "
-            "morphology rather than vegetation, shadow, or natural tuff erosion. ",
+            "Require coherent morphology, plausible archaeological scale, and at least two supporting cues. ",
             scale_text,
             f"Analysis mode: {analysis_mode}. Provided views: {', '.join(selected_views)}. ",
             "First-stage proposal:\n",
