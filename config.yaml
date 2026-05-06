@@ -130,58 +130,6 @@ enable_classic: false
 #      acmaniz gerekmez.
 enable_yolo: false
 
-# enable_vlm: LM Studio uzerinden OpenAI uyumlu vision-language model taramasi
-# - false: Varsayilan; VLM kod yolu hic cagrilmaz.
-# - true : VLM ayri aday uretici olarak calisir; DL/fusion maskelerine karistirilmaz.
-enable_vlm: true
-
-# VLM / LM Studio ayarlari
-# LM Studio'da vision destekli modeli yukleyip Local Server'i baslatin.
-# LM Studio Developer ekraninda "Reachable at" olarak gorunen adresi yazabilirsiniz.
-# Adres /v1 ile bitmiyorsa kod otomatik /v1 ekler.
-vlm_base_url: "http://127.0.0.1:8081"
-vlm_api_key: "lm-studio"
-
-# "auto": LM Studio'da o an yuklu/aktif modeli /v1/models listesinden otomatik secer.
-# Belirli bir modele sabitlemek isterseniz model adini acik yazin.
-# Ornek: vlm_model: "qwen2.5-vl-7b-instruct"
-vlm_model: "auto"
-
-vlm_tile: 1024
-vlm_overlap: 256
-vlm_views: "auto"
-
-
-# VLM prompt icin GSD (metre/piksel). 0.30 => 30 cm nadir ortofoto.
-# 0 veya null verilirse raster transform'dan otomatik tahmin edilmeye calisilir.
-vlm_gsd_m: 0
-
-# Excel/CSV/GPKG/GeoJSON'a yazilacak minimum VLM guven esigi.
-# Dusurmek daha cok aday, yukseltmek daha az ama daha secici aday uretir.
-# Tum model cevaplari yine *_vlm_candidates.jsonl icinde saklanir.
-# Esik ustu ilk asama adaylar ikinci bir "hakem" prompt ile tekrar kontrol edilir;
-# nihai CSV/GIS ciktilari ikinci asama onaylilardan, Excel ise iki asama sayfalarindan olusur.
-vlm_confidence_threshold: 0.75
-
-vlm_max_tiles: 0
-
-# VLM uzun calismalarda her N yeni tile'da Excel/CSV/GeoJSON/GPKG ara ciktilarini gunceller.
-# 0 verilirse ara cikti yazmaz, yalnizca tarama sonunda yazar.
-vlm_export_every: 150
-
-# true: onceki session'lardaki ayni cikti taban adina sahip *_vlm_candidates.jsonl dosyasini
-# okuyup islenmis tile'lari atlar. Tile/overlap/view uyusmazsa eski kayitlar kullanilmaz.
-vlm_resume: true
-
-# Uzun VLM calismalarinda LM Studio VRAM sisiyorsa, her N yeni tile'da ara cikti yazip
-# modeli native LM Studio API ile unload/load yapar. 0 kapatir.
-# Not: LM Studio 0.4+ /api/v1/models/unload ve /api/v1/models/load endpointleri gerekir.
-vlm_reload_every_tiles: 250
-vlm_reload_pause_seconds: 5
-
-vlm_timeout: 120
-vlm_temperature: 0.0
-
 # enable_fusion: Derin öğrenme ve klasik yöntemlerin birleştirilmesi
 # - true: Her iki yöntemin olasılık haritaları birleştirilir (alpha ile)
 # - false: Yöntemler ayrı ayrı sonuç üretir
@@ -308,7 +256,6 @@ zero_shot_imagenet: false
 #         * classic ve fusion istersen acik kalabilir
 #         * weights zorunlu olur
 # - false: Mevcut normal davranis (multi/zero-shot fallback mumkun)
-# VLM-only calismada enable_deep_learning=false ise bu deger false kalmalidir.
 # trained_model_only icin:
 # - weights ve training_metadata zorunludur
 # - tile/overlap/bands training metadata'dan otomatik alinip kilitlenir

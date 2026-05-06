@@ -47,6 +47,32 @@ VIEW_ALIASES = {
 }
 
 RECOMMENDED_CHECKS = {"rgb", "hillshade", "ndsm", "dsm", "dtm", "slope", "field_check"}
+SOURCE_KIND_ALIASES = {
+    "auto": "auto",
+    "rgb": "rgb",
+    "ortho": "rgb",
+    "orthophoto": "rgb",
+    "satellite": "rgb",
+    "imagery": "rgb",
+    "hillshade": "hillshade",
+    "shaded_relief": "hillshade",
+    "shaded-relief": "hillshade",
+    "shade": "hillshade",
+    "single_band": "single_band",
+    "single-band": "single_band",
+    "grayscale": "single_band",
+    "grey": "single_band",
+    "dsm": "dsm",
+    "surface": "dsm",
+    "dtm": "dtm",
+    "dem": "dtm",
+    "terrain": "dtm",
+    "elevation": "dtm",
+    "topo": "mixed_topo",
+    "topographic": "mixed_topo",
+    "mixed": "mixed_topo",
+    "mixed_topo": "mixed_topo",
+}
 ALLOWED_CANDIDATE_TYPES = {
     "none",
     "mound",
@@ -91,6 +117,7 @@ class VlmLmStudioConfig:
     tile: int = 1024
     overlap: int = 256
     views: str | Sequence[str] = "auto"
+    source_kind: str = "auto"
     gsd_m: Optional[float] = 0.30
     confidence_threshold: float = 0.75
     max_tiles: int = 0
@@ -99,6 +126,8 @@ class VlmLmStudioConfig:
     export_every: int = 50
     resume: bool = True
     resume_jsonl_path: Optional[Path | str] = None
+    prompt_stage1_path: Optional[Path | str] = None
+    prompt_stage2_path: Optional[Path | str] = None
     reload_every_tiles: int = 0
     reload_pause_seconds: float = 5.0
 
@@ -176,6 +205,8 @@ def run_vlm_lmstudio_detection(
 
     _validate_config(config)
     _ensure_pillow_available()
+    stage1_guidance_text = _load_prompt_text(config.prompt_stage1_path, label="VLM A1", logger=log)
+    stage2_guidance_text = _load_prompt_text(config.prompt_stage2_path, label="VLM A2", logger=log)
 
     with rasterio.open(input_path) as src:
         layout = _detect_band_layout(src, band_indexes=band_indexes, logger=log)
@@ -183,6 +214,14 @@ def run_vlm_lmstudio_detection(
             raise ValueError("VLM taramasi icin en az uc RGB bandi gerekir; girdi raster RGB icermiyor.")
 
         selected_views = _resolve_views(config.views, layout, logger=log)
+        source_kind = _resolve_source_kind(
+            config.source_kind,
+            input_path=input_path,
+            src=src,
+            layout=layout,
+            selected_views=selected_views,
+            logger=log,
+        )
         pixel_size = _pixel_size(src.transform)
         prompt_gsd_m = _resolve_gsd_m(config.gsd_m, src.transform, src.crs, logger=log)
         total_tiles = _count_windows(src.width, src.height, config.tile, config.overlap)
@@ -199,6 +238,7 @@ def run_vlm_lmstudio_detection(
             overlap=config.overlap,
             selected_views=selected_views,
             analysis_mode=layout.analysis_mode,
+            source_kind=source_kind,
             logger=log,
         )
         error_records: List[Dict[str, Any]] = []
@@ -219,12 +259,13 @@ def run_vlm_lmstudio_detection(
             )
         use_response_format = True
         log.info(
-            "VLM tile planı: toplam=%d, tile=%d, overlap=%d, views=%s, analysis_mode=%s, gsd=%s",
+            "VLM tile plani: toplam=%d, tile=%d, overlap=%d, views=%s, analysis_mode=%s, source_kind=%s, gsd=%s",
             total_tiles,
             config.tile,
             config.overlap,
             ",".join(selected_views),
             layout.analysis_mode,
+            source_kind,
             f"{prompt_gsd_m:.3f} m/px" if prompt_gsd_m is not None else "unknown",
         )
         log.info(
@@ -276,6 +317,7 @@ def run_vlm_lmstudio_detection(
                 message=str(exc),
                 layout=layout,
                 selected_views=selected_views,
+                source_kind=source_kind,
             )
             _write_jsonl_records(paths.jsonl, [*records, run_record])
             _write_jsonl_records(paths.raw_errors_jsonl, [*error_records, run_record])
@@ -355,6 +397,7 @@ def run_vlm_lmstudio_detection(
                         window=window,
                         layout=layout,
                         selected_views=selected_views,
+                        source_kind=source_kind,
                     )
 
                     response_text: Optional[str] = None
@@ -374,6 +417,8 @@ def run_vlm_lmstudio_detection(
                                 int(window.width),
                                 int(window.height),
                                 gsd_m=prompt_gsd_m,
+                                source_kind=source_kind,
+                                guidance_text=stage1_guidance_text,
                             )
                             response_text, use_response_format = _request_vlm_json(
                                 client=client,
@@ -403,6 +448,8 @@ def run_vlm_lmstudio_detection(
                                     analysis_mode=layout.analysis_mode,
                                     selected_views=selected_views,
                                     gsd_m=prompt_gsd_m,
+                                    source_kind=source_kind,
+                                    review_guidance_text=stage2_guidance_text,
                                     use_response_format=use_response_format,
                                     logger=log,
                                 )
@@ -563,6 +610,8 @@ def run_vlm_lmstudio_detection(
                                 analysis_mode=layout.analysis_mode,
                                 selected_views=selected_views,
                                 gsd_m=prompt_gsd_m,
+                                source_kind=source_kind,
+                                review_guidance_text=stage2_guidance_text,
                                 use_response_format=use_response_format,
                                 logger=log,
                             )
@@ -637,6 +686,8 @@ def _validate_config(config: VlmLmStudioConfig) -> None:
         raise ValueError("vlm_base_url bos olamaz.")
     if not str(config.model or "").strip():
         raise ValueError("vlm_model bos olamaz.")
+    if SOURCE_KIND_ALIASES.get(str(config.source_kind or "").strip().lower()) is None:
+        raise ValueError("source_kind gecersiz. Gecerli degerler: auto, rgb, hillshade, single_band, dsm, dtm, mixed_topo.")
 
 
 def _ensure_pillow_available() -> None:
@@ -685,6 +736,23 @@ def _resolve_resume_source(config: VlmLmStudioConfig, paths: VlmOutputPaths) -> 
     return None
 
 
+def _load_prompt_text(path: Optional[Path | str], *, label: str, logger: logging.Logger) -> Optional[str]:
+    if path is None:
+        return None
+    raw_path = str(path).strip()
+    if not raw_path:
+        return None
+    text_path = Path(raw_path)
+    try:
+        text = text_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise FileNotFoundError(f"{label} prompt dosyasi okunamadi: {text_path}: {exc}") from exc
+    if not text:
+        raise ValueError(f"{label} prompt dosyasi bos: {text_path}")
+    logger.info("%s prompt dosyasi yuklendi: %s", label, text_path)
+    return text
+
+
 def _load_resume_records(
     path: Optional[Path],
     *,
@@ -695,6 +763,7 @@ def _load_resume_records(
     overlap: int,
     selected_views: Sequence[str],
     analysis_mode: str,
+    source_kind: str,
     logger: logging.Logger,
 ) -> Tuple[List[Dict[str, Any]], set[int]]:
     if path is None or not path.exists() or not path.is_file():
@@ -732,6 +801,7 @@ def _load_resume_records(
                     expected=expected,
                     selected_views=expected_views,
                     analysis_mode=analysis_mode,
+                    source_kind=source_kind,
                 ):
                     mismatch_count += 1
                     continue
@@ -762,6 +832,7 @@ def _resume_record_matches_plan(
     expected: Tuple[int, int, int, int],
     selected_views: Sequence[str],
     analysis_mode: str,
+    source_kind: str,
 ) -> bool:
     expected_row, expected_col, expected_width, expected_height = expected
     actual = (
@@ -779,6 +850,9 @@ def _resume_record_matches_plan(
 
     record_views = _normalise_resume_views(record.get("used_views"))
     if record_views and record_views != list(selected_views):
+        return False
+    record_source_kind = str(record.get("source_kind") or "").strip().lower()
+    if record_source_kind and record_source_kind != str(source_kind or "").strip().lower():
         return False
     return True
 
@@ -836,6 +910,8 @@ def _parse_band_indexes(band_indexes: Optional[Sequence[int] | str]) -> Optional
     if band_indexes is None:
         return None
     if isinstance(band_indexes, str):
+        if band_indexes.strip().lower() == "auto":
+            return None
         parts = [part.strip() for part in band_indexes.split(",") if part.strip()]
         if not parts:
             return None
@@ -850,12 +926,11 @@ def _detect_band_layout(
     logger: logging.Logger,
 ) -> RasterBandLayout:
     parsed = _parse_band_indexes(band_indexes)
-    if src.count < 3:
-        raise ValueError(f"VLM RGB gerektirir; raster yalnizca {src.count} band iceriyor.")
-
     if parsed is not None and len(parsed) >= 3:
         rgb = tuple(parsed[:3])
     else:
+        if src.count < 3:
+            raise ValueError(f"VLM RGB gerektirir; raster yalnizca {src.count} band iceriyor.")
         rgb = (1, 2, 3)
 
     if any(idx <= 0 or idx > src.count for idx in rgb):
@@ -1007,6 +1082,46 @@ def _resolve_views(
     return selected
 
 
+def _resolve_source_kind(
+    requested: str,
+    *,
+    input_path: Path,
+    src: rasterio.io.DatasetReader,
+    layout: RasterBandLayout,
+    selected_views: Sequence[str],
+    logger: logging.Logger,
+) -> str:
+    """Resolve source imagery kind for prompt specialization."""
+    requested_text = str(requested or "auto").strip().lower()
+    source_kind = SOURCE_KIND_ALIASES.get(requested_text)
+    if source_kind is None:
+        raise ValueError(
+            "source_kind gecersiz. Gecerli degerler: auto, rgb, hillshade, single_band, dsm, dtm, mixed_topo."
+        )
+    if source_kind != "auto":
+        return source_kind
+
+    text_parts = [input_path.stem.lower()]
+    for band_index in range(1, int(src.count) + 1):
+        text_parts.append(_band_text(src, band_index))
+    source_text = " ".join(text_parts)
+
+    if any(token in source_text for token in ("hillshade", "hill_shade", "shaded relief", "shaded_relief", "relief")):
+        return "hillshade"
+    if any(token in source_text for token in ("dsm", "surface", "canopy")):
+        return "dsm"
+    if any(token in source_text for token in ("dtm", "dem", "terrain", "bare earth", "bare_earth", "elevation")):
+        return "dtm"
+    if any(token in source_text for token in ("rgb", "ortho", "orthophoto", "satellite", "imagery")):
+        return "rgb"
+    if any(view in set(selected_views) for view in ("hillshade", "slope", "ndsm", "dsm", "dtm")):
+        return "mixed_topo"
+    if src.count == 1 or len(set(layout.rgb)) == 1:
+        logger.info("VLM source_kind=auto tek bant/grayscale girdi icin single_band olarak cozuldu.")
+        return "single_band"
+    return "rgb"
+
+
 def _missing_view_reason(view: str, layout: RasterBandLayout) -> Optional[str]:
     if view == "rgb" and not layout.has_rgb:
         return "RGB bandlari yok"
@@ -1084,9 +1199,8 @@ def _is_empty_rgb_tile(channels: Sequence[np.ndarray]) -> bool:
     values = stacked[:, valid]
     if values.size == 0:
         return True
-    finite_min = float(np.nanmin(values))
     finite_max = float(np.nanmax(values))
-    if finite_max <= 1.0 and (finite_max - finite_min) <= 1.0:
+    if finite_max <= 0.01:
         return True
     return False
 
@@ -1403,34 +1517,64 @@ def _message_content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _build_prompt(
-    analysis_mode: str,
-    selected_views: Sequence[str],
-    width: int,
-    height: int,
-    *,
-    gsd_m: Optional[float],
-) -> str:
-    if gsd_m is not None and gsd_m > 0:
-        tile_width_m = width * float(gsd_m)
-        tile_height_m = height * float(gsd_m)
-        scale_text = (
-            f"Spatial scale: this is nadir imagery with approximately {float(gsd_m):.2f} m ground sampling distance (GSD), "
-            f"so one pixel is about {float(gsd_m):.2f} m on the ground and this tile covers about "
-            f"{tile_width_m:.0f} m x {tile_height_m:.0f} m. "
-            "Use this scale when deciding whether an anomaly has a plausible archaeological size. "
-            "Do not flag tiny isolated objects or modern-scale clutter as archaeological features. "
+def _source_kind_prompt_context(source_kind: str, selected_views: Sequence[str]) -> str:
+    kind = str(source_kind or "auto").strip().lower()
+    has_rgb_label = "rgb" in {str(view).strip().lower() for view in selected_views}
+    if kind == "hillshade":
+        rgb_note = (
+            "If a provided view is named rgb, treat it as a replicated grayscale hillshade source, not optical RGB. "
+            if has_rgb_label
+            else ""
         )
-    else:
-        scale_text = (
-            "Spatial scale: exact GSD is unknown. Avoid strong size-based claims and rely on visible pattern coherence. "
+        return (
+            "Source interpretation: hillshade / shaded-relief visualization. "
+            "Gray tone represents illumination of terrain relief from a synthetic light direction; it is not real surface color, "
+            "vegetation color, soil moisture, or a photographic cast shadow. "
+            f"{rgb_note}"
+            "For this source, prioritize micro-topographic morphology: raised rims, mound shoulders, depressions, banks, terrace edges, "
+            "wall lines, enclosure boundaries, and old route or channel alignments. "
         )
-    common = "".join(
+    if kind == "single_band":
+        return (
+            "Source interpretation: single-band grayscale raster. "
+            "Treat brightness as an analytical raster value, not optical color. It may be hillshade or another terrain-derived view, so avoid "
+            "claims about vegetation color or soil color unless the pattern geometry itself supports archaeology. "
+        )
+    if kind == "dsm":
+        return (
+            "Source interpretation: DSM or surface-height source. "
+            "Height may include vegetation, buildings, walls, and other modern surface objects. Use elevation-like cues cautiously and reject "
+            "tree crowns, roofs, modern walls, and other surface clutter unless there is organized archaeological geometry. "
+        )
+    if kind == "dtm":
+        return (
+            "Source interpretation: DTM/DEM bare-earth terrain source. "
+            "Focus on landform morphology and micro-relief; do not infer optical color or vegetation. Be strict with natural gullies, erosion, "
+            "volcanic tuff forms, and drainage patterns. "
+        )
+    if kind == "mixed_topo":
+        return (
+            "Source interpretation: mixed optical and terrain-derived views. "
+            "Use cross-view consistency: RGB may show crop/soil/surface traces while hillshade, nDSM, DSM, DTM, or slope views may show relief. "
+            "Give more weight to anomalies that persist across the relevant views and reject one-view artifacts. "
+        )
+    return (
+        "Source interpretation: optical RGB / orthophoto-like imagery. "
+        "Use color, crop marks, soil marks, vegetation differences, shadows, and surface texture cautiously, and do not claim topographic relief "
+        "unless terrain-derived views also support it. "
+    )
+
+
+def _prompt_guidance_or_default(guidance_text: Optional[str], default_text: str) -> str:
+    if guidance_text is None:
+        return default_text.strip()
+    cleaned = str(guidance_text).strip()
+    return cleaned if cleaned else default_text.strip()
+
+
+def _default_stage1_guidance() -> str:
+    return "".join(
         [
-            "Task: analyze this GeoTIFF tile for possible archaeological features. ",
-            f"The tile size is {width}x{height} pixels. ",
-            scale_text,
-            f"Provided views: {', '.join(selected_views)}. ",
             "Regional context: this tile is from the Cappadocia cultural and volcanic landscape. Archaeological traces may be subtle and embedded "
             "in tuff terrain, but natural erosion can strongly mimic archaeology. ",
             "Primary decision rule: look for human-made spatial organization, not isolated visual anomalies. Set candidate=true only when the feature "
@@ -1466,19 +1610,78 @@ def _build_prompt(
             "modern road, track, or field edge; use unknown when the pattern looks archaeological but the exact type is unclear. ",
             "If the evidence is weak, ambiguous, modern-looking, only natural texture, only vegetation/shadow, or only one non-morphological cue, "
             "set candidate=false. ",
-            "If there is a candidate, return bbox_xyxy in tile pixel coordinates [x1,y1,x2,y2], not normalized coordinates. ",
-            "The bbox should tightly cover the visible anomaly but is approximate and must not be treated as a final archaeological boundary. ",
             "Confidence calibration: below 0.75 means not strong enough for export, 0.75 means clear multi-cue evidence, "
             "0.90 means very strong evidence with archaeology more likely than common false positives. ",
-            "If there is no candidate, return candidate=false, confidence=0, candidate_type=\"none\", bbox_xyxy=null. ",
             "Keep visual_evidence short and concrete; mention the specific views that support the decision. ",
             "In possible_false_positive, name the strongest non-archaeological explanation considered, even for candidate=true. ",
             "In recommended_check, choose the single most useful next check from the allowed values. ",
+        ]
+    )
+
+
+def _default_stage2_guidance() -> str:
+    return "".join(
+        [
+            "Be more skeptical than the first pass. Confirm only if archaeology is clearly more likely than common false positives. ",
+            "Reject if the feature can plausibly be a road/track, field boundary, ploughing, irrigation/drainage, vegetation, tree crown, "
+            "building/modern wall, shadow, erosion, geology, image seam, compression artifact, or tile-edge artifact. ",
+            "Require coherent morphology, plausible archaeological scale, and at least two supporting cues. ",
+        ]
+    )
+
+
+def _build_prompt(
+    analysis_mode: str,
+    selected_views: Sequence[str],
+    width: int,
+    height: int,
+    *,
+    gsd_m: Optional[float],
+    source_kind: str = "auto",
+    guidance_text: Optional[str] = None,
+) -> str:
+    if gsd_m is not None and gsd_m > 0:
+        tile_width_m = width * float(gsd_m)
+        tile_height_m = height * float(gsd_m)
+        scale_text = (
+            f"Spatial scale: this is nadir imagery with approximately {float(gsd_m):.2f} m ground sampling distance (GSD), "
+            f"so one pixel is about {float(gsd_m):.2f} m on the ground and this tile covers about "
+            f"{tile_width_m:.0f} m x {tile_height_m:.0f} m. "
+            "Use this scale when deciding whether an anomaly has a plausible archaeological size. "
+            "Do not flag tiny isolated objects or modern-scale clutter as archaeological features. "
+        )
+    else:
+        scale_text = (
+            "Spatial scale: exact GSD is unknown. Avoid strong size-based claims and rely on visible pattern coherence. "
+        )
+    source_context = _source_kind_prompt_context(source_kind, selected_views)
+    decision_guidance = _prompt_guidance_or_default(guidance_text, _default_stage1_guidance())
+    common = "".join(
+        [
+            "Task: analyze this GeoTIFF tile for possible archaeological features. ",
+            f"The tile size is {width}x{height} pixels. ",
+            scale_text,
+            f"Provided views: {', '.join(selected_views)}. ",
+            source_context,
+            "Decision guidance:\n",
+            decision_guidance,
+            "\n\n",
+            "If there is a candidate, return bbox_xyxy in tile pixel coordinates [x1,y1,x2,y2], not normalized coordinates. ",
+            "The bbox should tightly cover the visible anomaly but is approximate and must not be treated as a final archaeological boundary. ",
+            "If there is no candidate, return candidate=false, confidence=0, candidate_type=\"none\", bbox_xyxy=null. ",
             "Return exactly one JSON object with this schema and no markdown:\n",
             JSON_SCHEMA_TEXT,
         ]
     )
-    if analysis_mode == "rgb_only":
+    if analysis_mode == "rgb_only" and str(source_kind).strip().lower() in {"hillshade", "single_band", "dsm", "dtm"}:
+        mode_text = (
+            "Data mode: single-source grayscale/terrain-derived input only. "
+            "Do not interpret gray tone as optical color, vegetation greenness, soil color, or photographic shadow unless another view supports it. "
+            "Base the decision on coherent relief/texture geometry, plausible scale, organized boundaries, rims, depressions, banks, walls, terraces, "
+            "or route-like alignments visible in the source image. "
+            "Be strict with natural drainage, volcanic tuff erosion, badland texture, illumination artifacts, and isolated dark or bright spots."
+        )
+    elif analysis_mode == "rgb_only":
         mode_text = (
             "Data mode: RGB orthophoto only. No DSM, DTM, hillshade, nDSM, or slope information is available. "
             "Base your judgment on crop marks, soil marks, color/vegetation differences, surface texture, regular geometry, "
@@ -1510,6 +1713,8 @@ def _build_review_prompt(
     analysis_mode: str,
     selected_views: Sequence[str],
     gsd_m: Optional[float],
+    source_kind: str = "auto",
+    guidance_text: Optional[str] = None,
 ) -> str:
     scale_text = (
         f"Approximate GSD is {float(gsd_m):.2f} m/pixel. "
@@ -1525,15 +1730,16 @@ def _build_review_prompt(
         "possible_false_positive": record.get("possible_false_positive"),
         "recommended_check": record.get("recommended_check"),
     }
+    review_guidance = _prompt_guidance_or_default(guidance_text, _default_stage2_guidance())
     return "".join(
         [
             "Second-pass review: a first-stage model proposed this tile as an archaeological candidate. ",
-            "Be more skeptical than the first pass. Confirm only if archaeology is clearly more likely than common false positives. ",
-            "Reject if the feature can plausibly be a road/track, field boundary, ploughing, irrigation/drainage, vegetation, tree crown, "
-            "building/modern wall, shadow, erosion, geology, image seam, compression artifact, or tile-edge artifact. ",
-            "Require coherent morphology, plausible archaeological scale, and at least two supporting cues. ",
             scale_text,
-            f"Analysis mode: {analysis_mode}. Provided views: {', '.join(selected_views)}. ",
+            f"Analysis mode: {analysis_mode}. Source kind: {source_kind}. Provided views: {', '.join(selected_views)}. ",
+            _source_kind_prompt_context(source_kind, selected_views),
+            "Review guidance:\n",
+            review_guidance,
+            "\n\n",
             "First-stage proposal:\n",
             json.dumps(first_pass, ensure_ascii=False),
             "\nReturn confirmed=true only for candidates worth exporting after this skeptical review. ",
@@ -1584,6 +1790,8 @@ def _review_candidate_record(
     analysis_mode: str,
     selected_views: Sequence[str],
     gsd_m: Optional[float],
+    source_kind: str,
+    review_guidance_text: Optional[str],
     use_response_format: bool,
     logger: logging.Logger,
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
@@ -1594,6 +1802,8 @@ def _review_candidate_record(
             analysis_mode=analysis_mode,
             selected_views=selected_views,
             gsd_m=gsd_m,
+            source_kind=source_kind,
+            guidance_text=review_guidance_text,
         )
         review_response_text, use_response_format = _request_vlm_json(
             client=client,
@@ -1830,6 +2040,7 @@ def _base_tile_record(
     window: Window,
     layout: RasterBandLayout,
     selected_views: Sequence[str],
+    source_kind: str,
 ) -> Dict[str, Any]:
     return {
         "tile_index": int(tile_index),
@@ -1838,6 +2049,7 @@ def _base_tile_record(
         "tile_width": int(window.width),
         "tile_height": int(window.height),
         "used_views": list(selected_views),
+        "source_kind": source_kind,
         "has_rgb": layout.has_rgb,
         "has_dsm": layout.has_dsm,
         "has_dtm": layout.has_dtm,
@@ -1851,6 +2063,7 @@ def _run_error_record(
     message: str,
     layout: RasterBandLayout,
     selected_views: Sequence[str],
+    source_kind: str,
 ) -> Dict[str, Any]:
     record = _base_tile_record(
         tile_index=0,
@@ -1859,6 +2072,7 @@ def _run_error_record(
         window=Window(0, 0, 0, 0),
         layout=layout,
         selected_views=selected_views,
+        source_kind=source_kind,
     )
     record.update(
         {

@@ -744,10 +744,6 @@ class PipelineDefaults:
         default=False,
         metadata={"help": "YOLO11 nesne tespit/segmentasyon modelini çalıştır"},
     )
-    enable_vlm: bool = field(
-        default=False,
-        metadata={"help": "LM Studio uzerinden OpenAI uyumlu vision-language model taramasini calistir"},
-    )
     enable_fusion: bool = field(
         default=True,
         metadata={"help": "Derin öğrenme ve klasik yöntem sonuçlarını birleştir (fusion)"},
@@ -902,68 +898,6 @@ class PipelineDefaults:
         metadata={"help": "YOLO11 için cihaz ('0', 'cpu', vb.); None ise otomatik seçilir"},
     )
 
-    # ===== VLM / LM STUDIO AYARLARI =====
-    vlm_base_url: str = field(
-        default="http://localhost:1234/v1",
-        metadata={"help": "LM Studio OpenAI uyumlu API base URL"},
-    )
-    vlm_api_key: str = field(
-        default="lm-studio",
-        metadata={"help": "LM Studio API anahtari; yerel sunucuda genelde herhangi bir deger yeterlidir"},
-    )
-    vlm_model: str = field(
-        default="auto",
-        metadata={"help": "LM Studio'da yuklu vision-language model adi; auto/active/current o an yuklu modeli secer"},
-    )
-    vlm_tile: int = field(
-        default=1024,
-        metadata={"help": "VLM taramasi icin karo boyutu (piksel)"},
-    )
-    vlm_overlap: int = field(
-        default=256,
-        metadata={"help": "VLM karolari arasindaki bindirme (piksel)"},
-    )
-    vlm_views: str = field(
-        default="auto",
-        metadata={"help": "VLM gorsel temsilleri: auto veya CSV (rgb,hillshade,ndsm,dsm,dtm,slope)"},
-    )
-    vlm_gsd_m: Optional[float] = field(
-        default=0.30,
-        metadata={"help": "VLM prompt icin metre/piksel GSD. 0 veya null ise raster transform'dan otomatik tahmin edilir."},
-    )
-    vlm_confidence_threshold: float = field(
-        default=0.75,
-        metadata={"help": "VLM aday dis aktarimi icin minimum guven esigi"},
-    )
-    vlm_max_tiles: int = field(
-        default=0,
-        metadata={"help": "VLM icin islenecek maksimum karo sayisi; 0 sinirsiz"},
-    )
-    vlm_export_every: int = field(
-        default=50,
-        metadata={"help": "VLM ara CSV/Excel/GeoJSON/GPKG ciktilarini kac tile'da bir guncelleyecegi. 0 ise sadece sonda yazar."},
-    )
-    vlm_resume: bool = field(
-        default=True,
-        metadata={"help": "VLM onceki JSONL kaydindan islenmis tile'lari atlayarak devam etsin."},
-    )
-    vlm_reload_every_tiles: int = field(
-        default=0,
-        metadata={"help": "LM Studio modelini kac yeni VLM tile'da bir unload/load yapacagi; 0 kapali."},
-    )
-    vlm_reload_pause_seconds: float = field(
-        default=5.0,
-        metadata={"help": "LM Studio unload sonrasi yeniden load etmeden once beklenecek sure (saniye)."},
-    )
-    vlm_timeout: int = field(
-        default=120,
-        metadata={"help": "LM Studio API istek zaman asimi (saniye)"},
-    )
-    vlm_temperature: float = field(
-        default=0.0,
-        metadata={"help": "VLM chat completions sicaklik degeri"},
-    )
-    
     # ===== BİRLEŞTİRME (FUSION) AYARLARI =====
     alpha: float = field(
         default=0.5,
@@ -1164,11 +1098,6 @@ class PipelineDefaults:
         if not 0.0 <= self.yolo_iou <= 1.0:
             errors.append(f"yolo_iou değeri 0-1 arasında olmalı, verilen: {self.yolo_iou}")
 
-        if not 0.0 <= self.vlm_confidence_threshold <= 1.0:
-            errors.append(
-                f"vlm_confidence_threshold 0-1 arasinda olmali, verilen: {self.vlm_confidence_threshold}"
-            )
-        
         # Pozitif değer kontrolleri
         if self.tile <= 0:
             errors.append(f"tile pozitif olmalı, verilen: {self.tile}")
@@ -1185,44 +1114,6 @@ class PipelineDefaults:
         if self.yolo_tile is not None and self.yolo_tile <= 0:
             errors.append(f"yolo_tile pozitif olmalı, verilen: {self.yolo_tile}")
 
-        if self.vlm_tile <= 0:
-            errors.append(f"vlm_tile pozitif olmali, verilen: {self.vlm_tile}")
-
-        if self.vlm_overlap < 0:
-            errors.append(f"vlm_overlap negatif olamaz, verilen: {self.vlm_overlap}")
-
-        if self.vlm_overlap >= self.vlm_tile:
-            errors.append(f"vlm_overlap ({self.vlm_overlap}) vlm_tile'dan ({self.vlm_tile}) kucuk olmali")
-
-        if self.vlm_max_tiles < 0:
-            errors.append(f"vlm_max_tiles negatif olamaz, verilen: {self.vlm_max_tiles}")
-
-        if self.vlm_export_every < 0:
-            errors.append(f"vlm_export_every negatif olamaz, verilen: {self.vlm_export_every}")
-
-        if self.vlm_reload_every_tiles < 0:
-            errors.append(f"vlm_reload_every_tiles negatif olamaz, verilen: {self.vlm_reload_every_tiles}")
-
-        if self.vlm_reload_pause_seconds < 0:
-            errors.append(f"vlm_reload_pause_seconds negatif olamaz, verilen: {self.vlm_reload_pause_seconds}")
-
-        if self.vlm_timeout <= 0:
-            errors.append(f"vlm_timeout pozitif olmali, verilen: {self.vlm_timeout}")
-
-        if self.vlm_temperature < 0:
-            errors.append(f"vlm_temperature negatif olamaz, verilen: {self.vlm_temperature}")
-
-        if self.vlm_gsd_m is not None and self.vlm_gsd_m < 0:
-            errors.append(f"vlm_gsd_m negatif olamaz, verilen: {self.vlm_gsd_m}")
-
-        if self.enable_vlm:
-            if not str(self.vlm_base_url or "").strip():
-                errors.append("enable_vlm=true iken vlm_base_url bos olamaz")
-            if not str(self.vlm_model or "").strip():
-                errors.append("enable_vlm=true iken vlm_model bos olamaz")
-            if not str(self.vlm_views or "").strip():
-                errors.append("enable_vlm=true iken vlm_views bos olamaz")
-        
         if self.band_importance_max_tiles < 0:
             errors.append(
                 f"band_importance_max_tiles negatif olamaz, verilen: {self.band_importance_max_tiles}"
@@ -1454,6 +1345,15 @@ def build_config_from_args(
             base_config[field_name] = tuple(base_config[field_name])
     
     values = {f.name: default_for(f.name) for f in fields(PipelineDefaults)}
+    unknown_config_keys = sorted(str(key) for key in base_config if str(key) not in values)
+    if unknown_config_keys:
+        LOGGER.warning(
+            "Config dosyasindaki desteklenmeyen anahtarlar yok sayiliyor: %s",
+            ", ".join(unknown_config_keys),
+        )
+        for key in unknown_config_keys:
+            base_config.pop(key, None)
+            yaml_supplied_fields.discard(key)
     values.update(base_config)
 
     # Komut satırı argümanlarıyla override et (sadece açıkça belirtilenler).
@@ -7164,6 +7064,8 @@ def vectorize_predictions(
 
 def parse_band_indexes(band_string: str) -> Tuple[int, ...]:
     """Parse CSV band specification to a 3-band RGB or 5-band RGB+DSM+DTM tuple."""
+    if str(band_string or "").strip().lower() == "auto":
+        raise argparse.ArgumentTypeError("bands='auto' once input raster'a gore cozulmelidir.")
     parts = [int(val.strip()) for val in band_string.split(",")]
     if len(parts) not in (3, 5):
         raise argparse.ArgumentTypeError("--bands must specify either 3 or 5 entries.")
@@ -7172,6 +7074,37 @@ def parse_band_indexes(band_string: str) -> Tuple[int, ...]:
     if len(parts) == 5 and parts[4] <= 0:
         raise argparse.ArgumentTypeError("DTM band index must be provided (>=1).")
     return tuple(parts)
+
+
+def _bands_auto_requested(band_string: object) -> bool:
+    return str(band_string or "").strip().lower() == "auto"
+
+
+def infer_auto_band_indexes(input_path: Path) -> Tuple[int, ...]:
+    """Infer conventional band indexes from raster band count for bands='auto'."""
+    try:
+        with rasterio.open(input_path) as src:
+            band_count = int(src.count)
+    except Exception as exc:
+        raise argparse.ArgumentTypeError(f"bands='auto' icin raster bant sayisi okunamadi: {exc}") from exc
+
+    if band_count == 1:
+        raise argparse.ArgumentTypeError(
+            "bands='auto' tek bant raster icin desteklenmez; classic/DL/YOLO akislarinda RGB veya RGB+DSM+DTM gerekir. "
+            "Tek bant raster icin bu pipeline yerine uygun ayri araci kullanin."
+        )
+    if band_count >= 5:
+        return (1, 2, 3, 4, 5)
+    if band_count >= 3:
+        return (1, 2, 3)
+    raise argparse.ArgumentTypeError(f"bands='auto' icin desteklenmeyen bant sayisi: {band_count}")
+
+
+def resolve_band_indexes_for_config(input_path: Path, config: PipelineDefaults) -> Tuple[int, ...]:
+    """Resolve configured band indexes, including bands='auto'."""
+    if not _bands_auto_requested(config.bands):
+        return parse_band_indexes(config.bands)
+    return infer_auto_band_indexes(input_path)
 
 
 def create_raster_metadata(
@@ -7362,14 +7295,12 @@ def build_session_folder_name(input_path: Path, config: PipelineDefaults) -> str
         method_flags.append("cl")
     if config.enable_yolo:
         method_flags.append("yo")
-    if config.enable_vlm:
-        method_flags.append("vlm")
     if config.enable_fusion:
         method_flags.append("fu")
     method_summary = "+".join(method_flags) if method_flags else "run"
 
-    folder_tile = config.vlm_tile if config.enable_vlm else config.tile
-    folder_overlap = config.vlm_overlap if config.enable_vlm else config.overlap
+    folder_tile = config.tile
+    folder_overlap = config.overlap
     tile_part = f"t{int(folder_tile)}" if folder_tile else ""
     overlap_part = f"o{int(folder_overlap)}" if folder_overlap else ""
     tile_overlap = f"{tile_part}{overlap_part}" if (tile_part or overlap_part) else ""
@@ -7405,28 +7336,6 @@ def resolve_out_prefix(input_path: Path, prefix: Optional[str], config: Pipeline
     # Route all outputs under repo-local 'workspace/ciktilar/<session>/' regardless of input location.
     session_folder = build_session_folder_name(input_path, config)
     return WORKSPACE_OUTPUTS_DIR / session_folder / out_name
-
-
-def find_latest_vlm_resume_jsonl(out_prefix: Path) -> Optional[Path]:
-    """Find the newest previous VLM JSONL for the same output base name."""
-    try:
-        base = _output_base_path(out_prefix)
-        current = base.parent / f"{base.name}_vlm_candidates.jsonl"
-        current_resolved = current.resolve(strict=False)
-        pattern = f"*/{base.name}_vlm_candidates.jsonl"
-        candidates: List[Path] = []
-        for path in WORKSPACE_OUTPUTS_DIR.glob(pattern):
-            resolved = path.resolve(strict=False)
-            if resolved == current_resolved:
-                continue
-            if path.is_file() and path.stat().st_size > 0:
-                candidates.append(path)
-        if not candidates:
-            return None
-        return max(candidates, key=lambda p: p.stat().st_mtime)
-    except Exception as exc:
-        LOGGER.warning("VLM resume JSONL aranirken hata olustu: %s", exc)
-        return None
 
 
 def _normalize_param_value(value: Any) -> Any:
@@ -9152,119 +9061,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         dest="yolo_device",
         help=cli_help("yolo_device"),
     )
-    parser.add_argument(
-        "--enable-vlm",
-        action=argparse.BooleanOptionalAction,
-        default=default_for("enable_vlm"),
-        dest="enable_vlm",
-        help=cli_help("enable_vlm", "(LM Studio VLM taramasini etkinlestirir)."),
-    )
-    parser.add_argument(
-        "--vlm-base-url",
-        type=str,
-        default=default_for("vlm_base_url"),
-        dest="vlm_base_url",
-        help=cli_help("vlm_base_url"),
-    )
-    parser.add_argument(
-        "--vlm-api-key",
-        type=str,
-        default=default_for("vlm_api_key"),
-        dest="vlm_api_key",
-        help=cli_help("vlm_api_key"),
-    )
-    parser.add_argument(
-        "--vlm-model",
-        type=str,
-        default=default_for("vlm_model"),
-        dest="vlm_model",
-        help=cli_help("vlm_model"),
-    )
-    parser.add_argument(
-        "--vlm-tile",
-        type=int,
-        default=default_for("vlm_tile"),
-        dest="vlm_tile",
-        help=cli_help("vlm_tile"),
-    )
-    parser.add_argument(
-        "--vlm-overlap",
-        type=int,
-        default=default_for("vlm_overlap"),
-        dest="vlm_overlap",
-        help=cli_help("vlm_overlap"),
-    )
-    parser.add_argument(
-        "--vlm-views",
-        type=str,
-        default=default_for("vlm_views"),
-        dest="vlm_views",
-        help=cli_help("vlm_views"),
-    )
-    parser.add_argument(
-        "--vlm-gsd-m",
-        type=float,
-        default=default_for("vlm_gsd_m"),
-        dest="vlm_gsd_m",
-        help=cli_help("vlm_gsd_m"),
-    )
-    parser.add_argument(
-        "--vlm-confidence-threshold",
-        type=float,
-        default=default_for("vlm_confidence_threshold"),
-        dest="vlm_confidence_threshold",
-        help=cli_help("vlm_confidence_threshold"),
-    )
-    parser.add_argument(
-        "--vlm-max-tiles",
-        type=int,
-        default=default_for("vlm_max_tiles"),
-        dest="vlm_max_tiles",
-        help=cli_help("vlm_max_tiles"),
-    )
-    parser.add_argument(
-        "--vlm-export-every",
-        type=int,
-        default=default_for("vlm_export_every"),
-        dest="vlm_export_every",
-        help=cli_help("vlm_export_every"),
-    )
-    parser.add_argument(
-        "--vlm-resume",
-        action=argparse.BooleanOptionalAction,
-        default=default_for("vlm_resume"),
-        dest="vlm_resume",
-        help=cli_help("vlm_resume"),
-    )
-    parser.add_argument(
-        "--vlm-reload-every-tiles",
-        type=int,
-        default=default_for("vlm_reload_every_tiles"),
-        dest="vlm_reload_every_tiles",
-        help=cli_help("vlm_reload_every_tiles"),
-    )
-    parser.add_argument(
-        "--vlm-reload-pause-seconds",
-        type=float,
-        default=default_for("vlm_reload_pause_seconds"),
-        dest="vlm_reload_pause_seconds",
-        help=cli_help("vlm_reload_pause_seconds"),
-    )
-    parser.add_argument(
-        "--vlm-timeout",
-        type=int,
-        default=default_for("vlm_timeout"),
-        dest="vlm_timeout",
-        help=cli_help("vlm_timeout"),
-    )
-    parser.add_argument(
-        "--vlm-temperature",
-        type=float,
-        default=default_for("vlm_temperature"),
-        dest="vlm_temperature",
-        help=cli_help("vlm_temperature"),
-    )
-
     argv_list = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(argv)
     cli_overrides = collect_cli_overrides(parser, argv_list)
@@ -9478,7 +9274,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     dl_task = str(config.dl_task).strip().lower()
 
-    bands = parse_band_indexes(config.bands)
+    try:
+        bands = resolve_band_indexes_for_config(input_path, config)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
     has_dsm = band_indexes_support_dsm(bands)
     has_topography = band_indexes_support_topography(bands)
     try:
@@ -9559,9 +9358,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         not config.enable_deep_learning
         and not config.enable_classic
         and not config.enable_yolo
-        and not config.enable_vlm
     ):
-        parser.error("En az bir yöntem etkin olmalı (deep learning, classic, YOLO11 veya VLM).")
+        parser.error("En az bir yöntem etkin olmalı (deep learning, classic veya YOLO11).")
     
     classic_outputs: Optional[ClassicOutputs] = None
     yolo_outputs: Optional[YoloOutputs] = None
@@ -10145,7 +9943,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         
         # Multi-encoder loop tamamlandı
         # Klasik yöntemler kapalıysa burada çık, açıksa devam et
-        if not config.enable_classic and not config.enable_yolo and not config.enable_vlm:
+        if not config.enable_classic and not config.enable_yolo:
             if config.export_candidate_excel:
                 table_rows = _use_fallback_rows_if_no_candidates(
                     rows=combined_candidate_rows,
@@ -10657,75 +10455,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                                 LOGGER.info("  - %s: %d adet", class_name, count)
                 except Exception as e:
                     LOGGER.error("YOLO11 etiketli tespitler kaydedilirken hata: %s", e)
-
-    # VLM / LM Studio taramasi ayri aday uretici olarak calisir; DL/fusion maskelerine karistirilmaz.
-    if config.enable_vlm:
-        LOGGER.info("")
-        LOGGER.info("=" * 70)
-        LOGGER.info("VLM / LM STUDIO TARAMASI BASLATILIYOR")
-        LOGGER.info("=" * 70)
-        try:
-            from vlm_lmstudio_detector import (
-                VlmLmStudioConfig,
-                run_vlm_lmstudio_detection,
-            )
-
-            vlm_resume_jsonl_path = find_latest_vlm_resume_jsonl(out_prefix) if config.vlm_resume else None
-            if vlm_resume_jsonl_path is not None:
-                LOGGER.info("VLM resume JSONL bulundu: %s", vlm_resume_jsonl_path)
-
-            vlm_summary = run_vlm_lmstudio_detection(
-                input_path=input_path,
-                out_prefix=out_prefix,
-                band_indexes=bands,
-                config=VlmLmStudioConfig(
-                    base_url=config.vlm_base_url,
-                    api_key=config.vlm_api_key,
-                    model=config.vlm_model,
-                    tile=config.vlm_tile,
-                    overlap=config.vlm_overlap,
-                    views=config.vlm_views,
-                    gsd_m=config.vlm_gsd_m,
-                    confidence_threshold=config.vlm_confidence_threshold,
-                    max_tiles=config.vlm_max_tiles,
-                    timeout=config.vlm_timeout,
-                    temperature=config.vlm_temperature,
-                    export_every=config.vlm_export_every,
-                    resume=config.vlm_resume,
-                    resume_jsonl_path=vlm_resume_jsonl_path,
-                    reload_every_tiles=config.vlm_reload_every_tiles,
-                    reload_pause_seconds=config.vlm_reload_pause_seconds,
-                ),
-                logger=LOGGER,
-            )
-            LOGGER.info(
-                "VLM taramasi tamamlandi: %d/%d tile, resume=%d, model_aday=%d, esik_ustu=%d, hata=%d. Mod=%s, view=%s",
-                vlm_summary.processed_tiles,
-                vlm_summary.total_tiles,
-                vlm_summary.resumed_tiles,
-                vlm_summary.raw_candidate_count,
-                vlm_summary.candidate_count,
-                vlm_summary.error_count,
-                vlm_summary.analysis_mode,
-                ",".join(vlm_summary.used_views),
-            )
-            LOGGER.info("VLM JSONL: %s", vlm_summary.paths.jsonl)
-            LOGGER.info("VLM CSV: %s", vlm_summary.paths.csv)
-            LOGGER.info("VLM Excel: %s", vlm_summary.paths.xlsx)
-            LOGGER.info("VLM GeoJSON: %s", vlm_summary.paths.geojson)
-            LOGGER.info("VLM GPKG ilk asama pozitifler: %s", vlm_summary.paths.gpkg_stage1)
-            LOGGER.info("VLM GPKG ikinci asama dogrulanan: %s", vlm_summary.paths.gpkg_stage2)
-        except ImportError as e:
-            LOGGER.error(
-                "VLM taramasi icin gerekli paketler yuklu degil: %s. "
-                "requirements.txt icindeki openai ve pillow paketlerini kurun.",
-                e,
-            )
-        except Exception as e:
-            if e.__class__.__name__ == "VlmConnectionError":
-                LOGGER.error("VLM taramasi baslatilamadi: %s", e)
-            else:
-                LOGGER.error("VLM taramasi tamamlanamadi; mevcut pipeline devam ediyor: %s", e)
 
     # Fusion (birleştirme) çalıştır (etkinse ve her iki yöntem de çalıştıysa)
     if fuse_enabled and classic_outputs is not None:

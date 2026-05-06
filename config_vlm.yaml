@@ -1,0 +1,50 @@
+# VLM-only config.
+# Calistirma:
+#   python vlm_detect.py --config config_vlm.yaml
+#
+# Bu dosya sadece LM Studio / VLM taramasi icindir. Eski DL/classic/YOLO
+# pipeline icin config.yaml ve archaeo_detect.py kullanilmaya devam eder.
+
+input: "C:/d_surucusu/arkeoloji/arkeolojik_alan_tespit/workspace/on_veri/karlik_dag_set/karlik_dag_dsm_hillshade.tif"
+out_prefix: null
+output_root: "workspace/ciktilar"
+
+# "auto":
+# - 1 bant hillshade: ayni bandi 1,1,1 olarak RGB gibi verir.
+# - 3 bant raster: VLM otomatik RGB kullanir.
+# - 5+ bant raster: VLM otomatik RGB + DSM/DTM varsayimini kullanir.
+bands: "auto"
+
+base_url: "http://127.0.0.1:8081"
+api_key: "lm-studio"
+model: "auto"
+
+tile: 1024
+overlap: 256
+views: "auto"
+
+# auto: dosya adi/bant sayisi/view durumuna gore promptu uyarlar.
+# Tek bant hillshade icin "hillshade" sabitlemek en net secimdir.
+# Secenekler: auto, rgb, hillshade, single_band, dsm, dtm, mixed_topo
+source_kind: "auto"
+
+# Karar rehberi promptlari. Kod; goruntu tipi, olcek, JSON semasi ve
+# bbox zorunluluklarini bu metinlerin etrafina otomatik ekler.
+prompt_stage1_path: "prompts/cappadocia_stage1.txt"
+prompt_stage2_path: "prompts/cappadocia_stage2_review.txt"
+
+gsd_m: 0
+
+confidence_threshold: 0.75
+max_tiles: 0
+export_every: 150
+resume: true
+
+# Uzun calismalarda LM Studio VRAM sisiyorsa modeli periyodik reload eder.
+# 0 kapatir.
+reload_every_tiles: 250
+reload_pause_seconds: 5
+
+timeout: 120
+temperature: 0.0
+log_level: "INFO"

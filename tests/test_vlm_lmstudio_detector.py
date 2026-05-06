@@ -96,6 +96,7 @@ def test_prompt_includes_configured_gsd_scale():
         1024,
         1024,
         gsd_m=0.30,
+        source_kind="rgb",
     )
 
     assert "0.30 m ground sampling distance" in prompt
@@ -128,12 +129,70 @@ def test_review_prompt_has_cappadocia_false_positive_gate():
         analysis_mode="rgb_only",
         selected_views=["rgb"],
         gsd_m=0.30,
+        source_kind="rgb",
     )
 
     assert "Be more skeptical than the first pass" in prompt
     assert "common false positives" in prompt
     assert "vegetation, tree crown" in prompt
     assert "Require coherent morphology, plausible archaeological scale, and at least two supporting cues" in prompt
+
+
+def test_prompt_uses_external_stage1_guidance():
+    prompt = vlm._build_prompt(
+        "rgb_only",
+        ["rgb"],
+        256,
+        256,
+        gsd_m=0.30,
+        source_kind="rgb",
+        guidance_text="CUSTOM STAGE1 GUIDANCE",
+    )
+
+    assert "CUSTOM STAGE1 GUIDANCE" in prompt
+    assert "Cappadocia cultural and volcanic landscape" not in prompt
+    assert "Return exactly one JSON object with this schema and no markdown" in prompt
+    assert vlm.JSON_SCHEMA_TEXT in prompt
+
+
+def test_review_prompt_uses_external_stage2_guidance():
+    prompt = vlm._build_review_prompt(
+        {
+            "tile_index": 1,
+            "candidate_type": "mound",
+            "confidence": 0.82,
+            "bbox_xyxy": [1, 1, 6, 6],
+            "visual_evidence": "faint oval mark",
+            "possible_false_positive": "tree shadow",
+            "recommended_check": "rgb",
+        },
+        analysis_mode="rgb_only",
+        selected_views=["rgb"],
+        gsd_m=0.30,
+        source_kind="rgb",
+        guidance_text="CUSTOM STAGE2 REVIEW",
+    )
+
+    assert "CUSTOM STAGE2 REVIEW" in prompt
+    assert "Be more skeptical than the first pass" not in prompt
+    assert "First-stage proposal" in prompt
+    assert vlm.REVIEW_SCHEMA_TEXT in prompt
+
+
+def test_hillshade_prompt_explains_grayscale_relief_source():
+    prompt = vlm._build_prompt(
+        "rgb_only",
+        ["rgb"],
+        512,
+        512,
+        gsd_m=0.50,
+        source_kind="hillshade",
+    )
+
+    assert "hillshade / shaded-relief visualization" in prompt
+    assert "replicated grayscale hillshade source, not optical RGB" in prompt
+    assert "Gray tone represents illumination of terrain relief" in prompt
+    assert "Do not interpret gray tone as optical color" in prompt
 
 
 def test_vlm_default_confidence_threshold_is_conservative():
@@ -471,10 +530,72 @@ def test_rgb_alpha_raster_is_not_treated_as_dsm(tmp_path: Path):
     assert layout.analysis_mode == "rgb_only"
 
 
+def test_single_band_raster_can_be_reused_as_vlm_rgb(tmp_path: Path):
+    tif_path = tmp_path / "hillshade_single_band.tif"
+    data = np.arange(64, dtype=np.uint8).reshape(1, 8, 8)
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=1,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    with rasterio.open(tif_path) as src:
+        layout = vlm._detect_band_layout(src, band_indexes=(1, 1, 1), logger=vlm.LOGGER)
+        arrays = vlm._read_tile_arrays(src, layout, rasterio.windows.Window(0, 0, 8, 8))
+
+    assert layout.rgb == (1, 1, 1)
+    assert layout.analysis_mode == "rgb_only"
+    assert len(arrays["rgb"]) == 3
+    assert np.array_equal(arrays["rgb"][0], arrays["rgb"][1])
+    assert np.array_equal(arrays["rgb"][1], arrays["rgb"][2])
+
+
+def test_source_kind_auto_detects_hillshade_name_for_single_band(tmp_path: Path):
+    tif_path = tmp_path / "karlik_dag_dsm_hillshade.tif"
+    data = np.arange(64, dtype=np.uint8).reshape(1, 8, 8)
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=1,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    with rasterio.open(tif_path) as src:
+        layout = vlm._detect_band_layout(src, band_indexes=(1, 1, 1), logger=vlm.LOGGER)
+        source_kind = vlm._resolve_source_kind(
+            "auto",
+            input_path=tif_path,
+            src=src,
+            layout=layout,
+            selected_views=["rgb"],
+            logger=vlm.LOGGER,
+        )
+
+    assert source_kind == "hillshade"
+
+
 def test_empty_rgb_tile_is_skipped_before_model_call():
     rgb = [np.full((8, 8), np.nan, dtype=np.float32) for _ in range(3)]
 
     assert vlm._is_empty_rgb_tile(rgb) is True
+
+
+def test_normalized_single_band_rgb_is_not_treated_as_empty():
+    gradient = np.linspace(0.1, 0.9, 64, dtype=np.float32).reshape(8, 8)
+    rgb = [gradient, gradient, gradient]
+
+    assert vlm._is_empty_rgb_tile(rgb) is False
 
 
 def test_bad_json_response_is_recorded_with_raw_response(tmp_path: Path, monkeypatch):

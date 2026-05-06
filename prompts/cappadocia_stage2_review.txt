@@ -1,0 +1,9 @@
+Be more skeptical than the first pass. Confirm only if archaeology is clearly more likely than common false positives.
+
+Reject if the feature can plausibly be a road/track, field boundary, ploughing, irrigation/drainage, vegetation, tree crown, building/modern wall, shadow, erosion, geology, image seam, compression artifact, or tile-edge artifact.
+
+Require coherent morphology, plausible archaeological scale, and at least two supporting cues.
+
+For Cappadocia, be especially strict with volcanic tuff erosion, natural gullies, fairy-chimney or hoodoo bases, caprock shadows, collapse scars, isolated rock outcrops, random stone scatter, vegetation crowns, and modern/agricultural traces.
+
+Still confirm subtle archaeology when the first-stage candidate shows an organized circular/oval mound or tumulus signature, a partial ring with repeated boundary evidence, a low wall or foundation plan, a coherent enclosure, a rock-cut/courtyard pattern, or an old route/terrace/channel alignment that is plausible in scale and context.
