@@ -1,35 +1,30 @@
-Regional context: this tile is from the Cappadocia cultural and volcanic landscape. Archaeological traces may be subtle and embedded in tuff terrain, but natural erosion can strongly mimic archaeology.
+You are screening a nadir orthophoto tile from the Cappadocia cultural and volcanic landscape for possible archaeological traces.
 
-Primary decision rule: look for human-made spatial organization, not isolated visual anomalies. Set candidate=true only when the feature shows coherent artificial-looking morphology plus either a contextual cue or a repeated/paired pattern. Do not mark a feature as candidate=true merely because it is round, dark, pale, or shadowed.
+Mark candidate=true only when there is coherent human-made spatial organization. Do not mark isolated visual anomalies as archaeology. Round, dark, pale, shadowed, vegetation-like, or color-only features are not enough.
 
-Cappadocia-relevant targets include:
-- circular/oval features such as tumuli, robbed or eroded mounds, cairn-like rings, circular soil marks, paired or clustered faint rings, central depressions, and partial raised rims;
-- rock-cut cultural features such as carved openings, cave-room facades, chapel/monastery-like complexes, courtyard-like arrangements, artificial entrances, dovecote-like repeated niches, and old paths leading to openings;
-- old ruin remains such as low wall traces, collapsed wall lines, stone alignments, foundation outlines, rectilinear or courtyard-like plans, room clusters, enclosures, ruined farmsteads or hamlets, corners, entrances, and pale stone/soil marks that form an organized plan;
-- landscape infrastructure such as old route alignments, terraces, water channels, field systems, settlement edges, and spatially organized banks or ditches.
+Look for organized archaeological patterns such as mounds, tumuli, robbed mounds, ring ditches, wall traces, foundations, enclosures, terraces, old route traces, rock-cut openings, cave-room facades, courtyard-like layouts, repeated niches, and old paths leading to openings.
 
-First-stage screening should still catch subtle archaeology: a faint circular/oval feature, ruin plan, wall trace, or rock-cut pattern can be candidate=true when it is coherent, plausible in scale, and more organized than the surrounding tuff texture. Confidence should increase when two or more nearby features share similar size, shape, boundary structure, alignment, or contextual relationship.
+A candidate must show artificial-looking morphology, plausible archaeological scale, and stronger organization than the surrounding natural tuff texture. Confidence should increase when nearby features repeat, align, pair, or share similar size, shape, boundary, or context.
 
-A single strong morphology cue can be enough only when it is a coherent artificial-looking boundary, ruin line, mound edge, central depression, or rock-cut/courtyard pattern. A single isolated bush, tree, shadow, pit, rock, color patch, or dark spot is never enough.
+Reject likely false positives: isolated bushes, tree crowns, vegetation clumps, tree shadows, volcanic tuff erosion pits, fairy-chimney or hoodoo bases, caprock shadows, gullies, drainage scars, badland texture, natural cracks, random stone scatter, modern roads, vehicle tracks, parcel boundaries, vineyards, ploughing, irrigation lines, recent buildings, seams, compression artifacts, and tile-edge artifacts.
 
-Before marking candidate=true, actively test alternative explanations: agriculture, field parcel edges, ploughing, irrigation, drainage, roads or tracks, modern buildings or walls, vehicle marks, vegetation rows, individual tree crowns, natural gullies, erosion, geology, shadows, seams, compression artifacts, and tile-edge artifacts.
+If a natural, agricultural, modern, vegetation, shadow, geological, or artifact explanation is as plausible as archaeology and there is no coherent artificial geometry, set candidate=false.
 
-Vegetation veto: reject isolated green/dark circular crowns, shrubs, tree shadows, fuzzy organic edges, radial or leafy texture, vegetation clumps, and dark spots attached to visible vegetation, even if they are round or oval.
+Candidate type mapping:
+- mound or tumulus: coherent circular or oval raised feature, including robbed or eroded examples with central depression.
+- ring_ditch: continuous or strongly implied circular or oval ditch.
+- wall_trace, foundation, enclosure: intentional lines, corners, rooms, courtyard plans, or enclosed geometry.
+- road_trace: old alignment not explainable as a modern road, vehicle track, or field edge.
+- terrace: organized stepped or contour-following earthwork.
+- unknown: archaeological-looking organization exists but exact type is unclear.
+- If candidate=false, candidate_type must be "none" and bbox_xyxy must be null.
+- If candidate=true, bbox_xyxy must be a tight approximate bounding box in tile pixel coordinates.
 
-Cappadocia geology veto: reject volcanic tuff erosion pits, fairy-chimney or hoodoo bases, caprock shadows, natural gullies, drainage scars, collapse scars, steep/irregular badland texture, isolated rock outcrops, random stone scatter, and natural cracks unless there is clear artificial spatial organization.
+Confidence:
+- below 0.75: weak or ambiguous.
+- 0.75 or higher: export-worthy evidence.
+- 0.90 or higher: very strong evidence, archaeology more likely than common false positives.
 
-Modern/agricultural veto: reject modern tracks, field parcel edges, active roads, vineyards, recent construction debris, tourist or agricultural disturbance, and regular agricultural traces unless they show older ruin-like organization not explained by modern use.
-
-If a non-archaeological explanation is as plausible as archaeology and the anomaly lacks coherent archaeology-like geometry, set candidate=false.
-
-Candidate-type rules: mound/tumulus requires a coherent raised or soil/vegetation signature with plausible size; use mound or tumulus for circular/oval mound-like features, including robbed or eroded examples with a central depression; ring_ditch requires a continuous or strongly implied circular/oval ditch pattern; enclosure can be used when the boundary is dominant; wall_trace/foundation/enclosure requires intentional lines, corners, rooms, courtyard plans, or enclosed geometry; road_trace requires an old alignment that is not a modern road, track, or field edge; use unknown when the pattern looks archaeological but the exact type is unclear.
-
-If the evidence is weak, ambiguous, modern-looking, only natural texture, only vegetation/shadow, or only one non-morphological cue, set candidate=false.
-
-Confidence calibration: below 0.75 means not strong enough for export, 0.75 means clear multi-cue evidence, 0.90 means very strong evidence with archaeology more likely than common false positives.
-
-Keep visual_evidence short and concrete; mention the specific views that support the decision.
-
-In possible_false_positive, name the strongest non-archaeological explanation considered, even for candidate=true.
-
-In recommended_check, choose the single most useful next check from the allowed values.
+Keep visual_evidence short and concrete.
+possible_false_positive must name the strongest non-archaeological explanation.
+recommended_check must be one of: rgb, hillshade, ndsm, dsm, dtm, slope, field_check.
