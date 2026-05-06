@@ -147,14 +147,14 @@ vlm_api_key: "lm-studio"
 # Ornek: vlm_model: "qwen2.5-vl-7b-instruct"
 vlm_model: "auto"
 
-vlm_tile: 512
-vlm_overlap: 128
+vlm_tile: 1024
+vlm_overlap: 256
 vlm_views: "auto"
 
 
 # VLM prompt icin GSD (metre/piksel). 0.30 => 30 cm nadir ortofoto.
 # 0 veya null verilirse raster transform'dan otomatik tahmin edilmeye calisilir.
-vlm_gsd_m: 0.30
+vlm_gsd_m: 0
 
 # Excel/CSV/GPKG/GeoJSON'a yazilacak minimum VLM guven esigi.
 # Dusurmek daha cok aday, yukseltmek daha az ama daha secici aday uretir.
@@ -177,7 +177,7 @@ vlm_resume: true
 # modeli native LM Studio API ile unload/load yapar. 0 kapatir.
 # Not: LM Studio 0.4+ /api/v1/models/unload ve /api/v1/models/load endpointleri gerekir.
 vlm_reload_every_tiles: 250
-vlm_reload_pause_seconds: 10
+vlm_reload_pause_seconds: 5
 
 vlm_timeout: 120
 vlm_temperature: 0.0

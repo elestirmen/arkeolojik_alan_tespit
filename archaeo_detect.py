@@ -7368,8 +7368,10 @@ def build_session_folder_name(input_path: Path, config: PipelineDefaults) -> str
         method_flags.append("fu")
     method_summary = "+".join(method_flags) if method_flags else "run"
 
-    tile_part = f"t{int(config.tile)}" if config.tile else ""
-    overlap_part = f"o{int(config.overlap)}" if config.overlap else ""
+    folder_tile = config.vlm_tile if config.enable_vlm else config.tile
+    folder_overlap = config.vlm_overlap if config.enable_vlm else config.overlap
+    tile_part = f"t{int(folder_tile)}" if folder_tile else ""
+    overlap_part = f"o{int(folder_overlap)}" if folder_overlap else ""
     tile_overlap = f"{tile_part}{overlap_part}" if (tile_part or overlap_part) else ""
 
     model_part = ""

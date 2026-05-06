@@ -26,6 +26,7 @@ from archaeo_detect import (
     apply_yolo_output_defaults,
     apply_trained_only_metadata_locks,
     build_config_from_args,
+    build_session_folder_name,
     compute_derivatives_with_rvt,
     default_config_path,
     export_candidate_locations_table,
@@ -132,6 +133,39 @@ class TestPipelineDefaultsValidation:
         """'cuda:0' geçerli bir device olmalı."""
         config = PipelineDefaults(device="cuda:0")
         assert config.device == "cuda:0"
+
+    def test_vlm_session_folder_uses_vlm_tile_overlap(self):
+        config = PipelineDefaults(
+            enable_vlm=True,
+            enable_deep_learning=False,
+            enable_classic=False,
+            enable_yolo=False,
+            tile=512,
+            overlap=128,
+            vlm_tile=1024,
+            vlm_overlap=256,
+        )
+
+        folder_name = build_session_folder_name(Path("karlik_dag_rgb.tif"), config)
+
+        assert "_vlm_t1024o256" in folder_name
+        assert "_vlm_t512o128" not in folder_name
+
+    def test_non_vlm_session_folder_uses_pipeline_tile_overlap(self):
+        config = PipelineDefaults(
+            enable_vlm=False,
+            enable_deep_learning=True,
+            enable_classic=False,
+            enable_yolo=False,
+            tile=512,
+            overlap=128,
+            vlm_tile=1024,
+            vlm_overlap=256,
+        )
+
+        folder_name = build_session_folder_name(Path("karlik_dag_rgb.tif"), config)
+
+        assert "_dl_t512o128" in folder_name
 
     def test_single_mode_rejects_weights_template(self):
         """Tek-model modunda weights_template hata vermeli."""
