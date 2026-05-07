@@ -1,30 +1,40 @@
-You are screening a nadir orthophoto tile from the Cappadocia cultural and volcanic landscape for possible archaeological traces.
+You are analyzing a nadir orthophoto tile from the Cappadocia cultural and volcanic landscape. The tile may contain archaeological traces such as tumuli, mounds, ring ditches, wall traces, foundations, enclosures, terraces, old routes, rock-cut openings, cave-room facades, courtyard-like layouts, repeated niches, or old paths leading to openings.
 
-Mark candidate=true only when there is coherent human-made spatial organization. Do not mark isolated visual anomalies as archaeology. Round, dark, pale, shadowed, vegetation-like, or color-only features are not enough.
+Important note: most tiles will likely contain no archaeological feature at all. Therefore avoid detections unless there is clear visual evidence of coherent human-made spatial organization.
 
-Look for organized archaeological patterns such as mounds, tumuli, robbed mounds, ring ditches, wall traces, foundations, enclosures, terraces, old route traces, rock-cut openings, cave-room facades, courtyard-like layouts, repeated niches, and old paths leading to openings.
+Set candidate=true only if a distinct archaeological-looking feature is confidently detected. A feature should show organized artificial morphology, plausible archaeological scale, and stronger spatial order than the surrounding natural tuff terrain.
 
-A candidate must show artificial-looking morphology, plausible archaeological scale, and stronger organization than the surrounding natural tuff texture. Confidence should increase when nearby features repeat, align, pair, or share similar size, shape, boundary, or context.
+Do not mark isolated anomalies as archaeology. Round shapes, dark spots, pale patches, shadows, vegetation-like forms, isolated stones, erosion marks, or color-only differences are not enough by themselves.
 
-Reject likely false positives: isolated bushes, tree crowns, vegetation clumps, tree shadows, volcanic tuff erosion pits, fairy-chimney or hoodoo bases, caprock shadows, gullies, drainage scars, badland texture, natural cracks, random stone scatter, modern roads, vehicle tracks, parcel boundaries, vineyards, ploughing, irrigation lines, recent buildings, seams, compression artifacts, and tile-edge artifacts.
+Reject likely false positives such as isolated bushes, tree crowns, vegetation clumps, tree shadows, volcanic tuff erosion pits, fairy-chimney or hoodoo bases, caprock shadows, gullies, drainage scars, badland texture, natural cracks, modern roads, vehicle tracks, field parcel edges, vineyards, ploughing, irrigation lines, recent buildings, seams, compression artifacts, and tile-edge artifacts.
 
-If a natural, agricultural, modern, vegetation, shadow, geological, or artifact explanation is as plausible as archaeology and there is no coherent artificial geometry, set candidate=false.
+If a natural, agricultural, modern, vegetation, shadow, geological, or artifact explanation is as plausible as archaeology, set candidate=false.
 
-Candidate type mapping:
-- mound or tumulus: coherent circular or oval raised feature, including robbed or eroded examples with central depression.
-- ring_ditch: continuous or strongly implied circular or oval ditch.
-- wall_trace, foundation, enclosure: intentional lines, corners, rooms, courtyard plans, or enclosed geometry.
-- road_trace: old alignment not explainable as a modern road, vehicle track, or field edge.
-- terrace: organized stepped or contour-following earthwork.
-- unknown: archaeological-looking organization exists but exact type is unclear.
-- If candidate=false, candidate_type must be "none" and bbox_xyxy must be null.
-- If candidate=true, bbox_xyxy must be a tight approximate bounding box in tile pixel coordinates.
+Candidate type rules:
+Use "mound" or "tumulus" for coherent circular or oval raised features.
+Use "ring_ditch" for circular or oval ditch-like patterns.
+Use "wall_trace", "foundation", or "enclosure" for intentional lines, corners, rooms, courtyard plans, or enclosed geometry.
+Use "road_trace" for old alignments not explainable as modern roads, tracks, or field edges.
+Use "terrace" for organized stepped or contour-following earthworks.
+Use "unknown" when the feature looks archaeological but the exact type is unclear.
+If candidate=false, candidate_type must be "none" and bbox_xyxy must be null.
 
-Confidence:
-- below 0.75: weak or ambiguous.
-- 0.75 or higher: export-worthy evidence.
-- 0.90 or higher: very strong evidence, archaeology more likely than common false positives.
+Confidence calibration:
+Below 0.75 means weak or ambiguous.
+Use 0.75 or higher only when the evidence is strong enough for export.
+Use 0.90 or higher only when archaeology is more likely than common false positives.
 
-Keep visual_evidence short and concrete.
-possible_false_positive must name the strongest non-archaeological explanation.
-recommended_check must be one of: rgb, hillshade, ndsm, dsm, dtm, slope, field_check.
+Return exactly one valid JSON object using the existing schema:
+{
+  "candidate": true or false,
+  "confidence": number between 0 and 1,
+  "candidate_type": "none | mound | tumulus | ring_ditch | wall_trace | road_trace | foundation | enclosure | terrace | unknown",
+  "bbox_xyxy": [x1, y1, x2, y2] or null,
+  "visual_evidence": "short concrete reason",
+  "possible_false_positive": "strongest non-archaeological explanation considered",
+  "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
+}
+
+If candidate=true, bbox_xyxy must tightly enclose the detected feature in tile pixel coordinates.
+If candidate=false, return confidence 0.0, candidate_type "none", bbox_xyxy null, and a concise possible_false_positive.
+Do not return markdown. Do not return a list. Do not write any text outside the JSON object.

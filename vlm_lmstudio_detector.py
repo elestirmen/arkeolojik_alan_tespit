@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -207,6 +208,8 @@ def run_vlm_lmstudio_detection(
     _ensure_pillow_available()
     stage1_guidance_text = _load_prompt_text(config.prompt_stage1_path, label="VLM A1", logger=log)
     stage2_guidance_text = _load_prompt_text(config.prompt_stage2_path, label="VLM A2", logger=log)
+    prompt_fingerprint = _prompt_fingerprint(stage1_guidance_text, stage2_guidance_text)
+    log.info("VLM prompt fingerprint: %s", prompt_fingerprint[:12])
 
     with rasterio.open(input_path) as src:
         layout = _detect_band_layout(src, band_indexes=band_indexes, logger=log)
@@ -239,6 +242,7 @@ def run_vlm_lmstudio_detection(
             selected_views=selected_views,
             analysis_mode=layout.analysis_mode,
             source_kind=source_kind,
+            prompt_fingerprint=prompt_fingerprint,
             logger=log,
         )
         error_records: List[Dict[str, Any]] = []
@@ -318,6 +322,7 @@ def run_vlm_lmstudio_detection(
                 layout=layout,
                 selected_views=selected_views,
                 source_kind=source_kind,
+                prompt_fingerprint=prompt_fingerprint,
             )
             _write_jsonl_records(paths.jsonl, [*records, run_record])
             _write_jsonl_records(paths.raw_errors_jsonl, [*error_records, run_record])
@@ -398,6 +403,7 @@ def run_vlm_lmstudio_detection(
                         layout=layout,
                         selected_views=selected_views,
                         source_kind=source_kind,
+                        prompt_fingerprint=prompt_fingerprint,
                     )
 
                     response_text: Optional[str] = None
@@ -753,6 +759,18 @@ def _load_prompt_text(path: Optional[Path | str], *, label: str, logger: logging
     return text
 
 
+def _prompt_fingerprint(stage1_guidance_text: Optional[str], stage2_guidance_text: Optional[str]) -> str:
+    payload = {
+        "version": 1,
+        "stage1_guidance": _prompt_guidance_or_default(stage1_guidance_text, _default_stage1_guidance()),
+        "stage2_guidance": _prompt_guidance_or_default(stage2_guidance_text, _default_stage2_guidance()),
+        "stage1_schema": JSON_SCHEMA_TEXT,
+        "stage2_schema": REVIEW_SCHEMA_TEXT,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _load_resume_records(
     path: Optional[Path],
     *,
@@ -764,6 +782,7 @@ def _load_resume_records(
     selected_views: Sequence[str],
     analysis_mode: str,
     source_kind: str,
+    prompt_fingerprint: str,
     logger: logging.Logger,
 ) -> Tuple[List[Dict[str, Any]], set[int]]:
     if path is None or not path.exists() or not path.is_file():
@@ -802,6 +821,7 @@ def _load_resume_records(
                     selected_views=expected_views,
                     analysis_mode=analysis_mode,
                     source_kind=source_kind,
+                    prompt_fingerprint=prompt_fingerprint,
                 ):
                     mismatch_count += 1
                     continue
@@ -816,7 +836,7 @@ def _load_resume_records(
         logger.warning("VLM resume JSONL icinde %d bozuk satir atlandi: %s", bad_json_count, path)
     if mismatch_count:
         logger.warning(
-            "VLM resume JSONL icinde %d kayit mevcut tile/view ayarlariyla uyusmadigi icin atlandi.",
+            "VLM resume JSONL icinde %d kayit mevcut tile/view/prompt ayarlariyla uyusmadigi icin atlandi.",
             mismatch_count,
         )
     if duplicate_count:
@@ -833,6 +853,7 @@ def _resume_record_matches_plan(
     selected_views: Sequence[str],
     analysis_mode: str,
     source_kind: str,
+    prompt_fingerprint: str,
 ) -> bool:
     expected_row, expected_col, expected_width, expected_height = expected
     actual = (
@@ -853,6 +874,9 @@ def _resume_record_matches_plan(
         return False
     record_source_kind = str(record.get("source_kind") or "").strip().lower()
     if record_source_kind and record_source_kind != str(source_kind or "").strip().lower():
+        return False
+    record_prompt_fingerprint = str(record.get("prompt_fingerprint") or "").strip().lower()
+    if record_prompt_fingerprint != str(prompt_fingerprint or "").strip().lower():
         return False
     return True
 
@@ -2041,6 +2065,7 @@ def _base_tile_record(
     layout: RasterBandLayout,
     selected_views: Sequence[str],
     source_kind: str,
+    prompt_fingerprint: str,
 ) -> Dict[str, Any]:
     return {
         "tile_index": int(tile_index),
@@ -2050,6 +2075,7 @@ def _base_tile_record(
         "tile_height": int(window.height),
         "used_views": list(selected_views),
         "source_kind": source_kind,
+        "prompt_fingerprint": prompt_fingerprint,
         "has_rgb": layout.has_rgb,
         "has_dsm": layout.has_dsm,
         "has_dtm": layout.has_dtm,
@@ -2064,6 +2090,7 @@ def _run_error_record(
     layout: RasterBandLayout,
     selected_views: Sequence[str],
     source_kind: str,
+    prompt_fingerprint: str,
 ) -> Dict[str, Any]:
     record = _base_tile_record(
         tile_index=0,
@@ -2073,6 +2100,7 @@ def _run_error_record(
         layout=layout,
         selected_views=selected_views,
         source_kind=source_kind,
+        prompt_fingerprint=prompt_fingerprint,
     )
     record.update(
         {
