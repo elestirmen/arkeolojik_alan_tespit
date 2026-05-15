@@ -66,6 +66,7 @@ VLM_KEY_ALIASES = {
     "vlm_resume_jsonl_path": "resume_jsonl_path",
     "vlm_prompt_stage1_path": "prompt_stage1_path",
     "vlm_prompt_stage2_path": "prompt_stage2_path",
+    "vlm_max_candidates_per_tile": "max_candidates_per_tile",
     "vlm_reload_every_tiles": "reload_every_tiles",
     "vlm_reload_pause_seconds": "reload_pause_seconds",
     "vlm_timeout": "timeout",
@@ -94,6 +95,7 @@ class StandaloneVlmConfig:
     resume_jsonl_path: Optional[str] = None
     prompt_stage1_path: Optional[str] = None
     prompt_stage2_path: Optional[str] = None
+    max_candidates_per_tile: int = 3
     reload_every_tiles: int = 250
     reload_pause_seconds: float = 5.0
     timeout: int = 120
@@ -198,6 +200,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--vlm-prompt-stage2-path",
         dest="prompt_stage2_path",
         help="Stage 2 review guidance prompt text file.",
+    )
+    parser.add_argument(
+        "--max-candidates-per-tile",
+        "--vlm-max-candidates-per-tile",
+        dest="max_candidates_per_tile",
+        type=int,
+        help="Maximum distinct first-stage candidates to keep from one tile.",
     )
     parser.add_argument(
         "--reload-every-tiles",
@@ -409,6 +418,7 @@ def run(config: StandaloneVlmConfig) -> int:
             resume_jsonl_path=resume_jsonl_path,
             prompt_stage1_path=config.prompt_stage1_path,
             prompt_stage2_path=config.prompt_stage2_path,
+            max_candidates_per_tile=config.max_candidates_per_tile,
             reload_every_tiles=config.reload_every_tiles,
             reload_pause_seconds=config.reload_pause_seconds,
         ),

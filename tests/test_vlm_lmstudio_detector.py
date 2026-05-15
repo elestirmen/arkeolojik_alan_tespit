@@ -197,6 +197,24 @@ def test_hillshade_prompt_explains_grayscale_relief_source():
 
 def test_vlm_default_confidence_threshold_is_conservative():
     assert vlm.VlmLmStudioConfig().confidence_threshold == 0.75
+    assert vlm.VlmLmStudioConfig().max_candidates_per_tile == 3
+
+
+def test_prompt_requests_bounded_candidate_list():
+    prompt = vlm._build_prompt(
+        "rgb_only",
+        ["rgb"],
+        512,
+        512,
+        gsd_m=0.30,
+        source_kind="rgb",
+        max_candidates_per_tile=3,
+        confidence_threshold=0.75,
+    )
+
+    assert "Return at most 3 separate candidates" in prompt
+    assert "Only include candidates with confidence >= 0.75" in prompt
+    assert '"candidates"' in prompt
 
 
 def test_vlm_output_paths_include_separate_stage_gpkgs(tmp_path: Path):
@@ -243,6 +261,106 @@ def test_wgs84_google_maps_fields_are_added_to_candidate_record():
     assert record["gps_lon"] is not None
     assert record["gps_lat"] is not None
     assert record["google_maps_url"].startswith("https://www.google.com/maps?q=")
+
+
+def test_multi_candidate_model_result_returns_distinct_candidate_records():
+    parsed = {
+        "candidates": [
+            {
+                "confidence": 0.91,
+                "candidate_type": "mound",
+                "bbox_xyxy": [1, 1, 4, 4],
+                "visual_evidence": "first oval mark",
+                "possible_false_positive": "soil variation",
+                "recommended_check": "rgb",
+            },
+            {
+                "confidence": 0.86,
+                "candidate_type": "ring_ditch",
+                "bbox_xyxy": [5, 5, 7, 7],
+                "visual_evidence": "second ring mark",
+                "possible_false_positive": "field mark",
+                "recommended_check": "rgb",
+            },
+        ]
+    }
+    base = {
+        "tile_index": 1,
+        "tile_row": 0,
+        "tile_col": 0,
+        "tile_width": 8,
+        "tile_height": 8,
+        "used_views": ["rgb"],
+        "has_rgb": True,
+        "has_dsm": False,
+        "has_dtm": False,
+        "analysis_mode": "rgb_only",
+    }
+
+    records = vlm._model_result_to_records(
+        parsed=parsed,
+        raw_response="{}",
+        base_record=base,
+        transform=from_origin(0, 8, 1, 1),
+        crs=CRS.from_epsg(3857),
+        raster_width=8,
+        raster_height=8,
+        max_candidates_per_tile=3,
+    )
+
+    assert [record["candidate_index"] for record in records] == [1, 2]
+    assert [record["candidate_count"] for record in records] == [2, 2]
+    assert [record["candidate_type"] for record in records] == ["mound", "ring_ditch"]
+
+
+def test_multi_candidate_model_result_dedupes_overlapping_boxes():
+    parsed = {
+        "candidates": [
+            {
+                "confidence": 0.92,
+                "candidate_type": "mound",
+                "bbox_xyxy": [1, 1, 6, 6],
+                "visual_evidence": "strong oval mark",
+                "possible_false_positive": "soil variation",
+                "recommended_check": "rgb",
+            },
+            {
+                "confidence": 0.82,
+                "candidate_type": "mound",
+                "bbox_xyxy": [1.2, 1.2, 6.1, 6.1],
+                "visual_evidence": "same oval mark",
+                "possible_false_positive": "soil variation",
+                "recommended_check": "rgb",
+            },
+        ]
+    }
+    base = {
+        "tile_index": 1,
+        "tile_row": 0,
+        "tile_col": 0,
+        "tile_width": 8,
+        "tile_height": 8,
+        "used_views": ["rgb"],
+        "has_rgb": True,
+        "has_dsm": False,
+        "has_dtm": False,
+        "analysis_mode": "rgb_only",
+    }
+
+    records = vlm._model_result_to_records(
+        parsed=parsed,
+        raw_response="{}",
+        base_record=base,
+        transform=from_origin(0, 8, 1, 1),
+        crs=CRS.from_epsg(3857),
+        raster_width=8,
+        raster_height=8,
+        max_candidates_per_tile=3,
+    )
+
+    assert len(records) == 1
+    assert records[0]["confidence"] == 0.92
+    assert records[0]["candidate_count"] == 1
 
 
 def test_candidate_xlsx_google_maps_url_is_clickable(tmp_path: Path):
@@ -746,6 +864,64 @@ def test_exportable_vlm_candidate_is_reviewed_before_final_export(tmp_path: Path
     assert wb["ikinci_asama_pozitifler"].max_row == 2
 
 
+def test_multi_candidate_tile_reviews_and_exports_each_candidate(tmp_path: Path, monkeypatch):
+    tif_path = tmp_path / "rgb_multi_candidate.tif"
+    data = np.ones((3, 8, 8), dtype=np.uint8) * 120
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    prompts: list[str] = []
+
+    def fake_request(**kwargs):
+        prompt = kwargs["prompt"]
+        prompts.append(prompt)
+        if "Second-pass review" in prompt:
+            return (
+                '{"confirmed":true,"review_confidence":0.84,'
+                '"review_reason":"confirmed distinct candidate","review_false_positive":"field mark",'
+                '"recommended_check":"field_check"}',
+                True,
+            )
+        return (
+            '{"candidates":['
+            '{"confidence":0.91,"candidate_type":"mound","bbox_xyxy":[1,1,3,3],'
+            '"visual_evidence":"first oval mark","possible_false_positive":"soil mark","recommended_check":"rgb"},'
+            '{"confidence":0.88,"candidate_type":"ring_ditch","bbox_xyxy":[5,5,7,7],'
+            '"visual_evidence":"second ring mark","possible_false_positive":"field mark","recommended_check":"rgb"}'
+            '],"visual_evidence":"","possible_false_positive":"","recommended_check":"rgb"}',
+            True,
+        )
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(vlm, "_request_vlm_json", fake_request)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tif_path,
+        out_prefix=tmp_path / "out" / "rgb",
+        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1, confidence_threshold=0.75),
+    )
+
+    assert len(prompts) == 3
+    assert summary.processed_tiles == 1
+    assert summary.raw_candidate_count == 2
+    assert summary.candidate_count == 2
+
+    records = [json.loads(line) for line in summary.paths.jsonl.read_text(encoding="utf-8").splitlines()]
+    assert [record["candidate_index"] for record in records] == [1, 2]
+    assert [record["candidate_count"] for record in records] == [2, 2]
+    assert all(record["review_confirmed"] is True for record in records)
+
+
 def test_resume_reviews_unreviewed_first_stage_candidates(tmp_path: Path, monkeypatch):
     tif_path = tmp_path / "rgb_resume_candidate.tif"
     data = np.ones((3, 8, 8), dtype=np.uint8) * 120
@@ -762,6 +938,7 @@ def test_resume_reviews_unreviewed_first_stage_candidates(tmp_path: Path, monkey
         dst.write(data)
 
     resume_path = tmp_path / "previous_vlm_candidates.jsonl"
+    prompt_fingerprint = vlm._prompt_fingerprint(None, None)
     resume_record = {
         "tile_index": 1,
         "tile_row": 0,
@@ -773,6 +950,7 @@ def test_resume_reviews_unreviewed_first_stage_candidates(tmp_path: Path, monkey
         "has_dsm": False,
         "has_dtm": False,
         "analysis_mode": "rgb_only",
+        "prompt_fingerprint": prompt_fingerprint,
         "candidate": True,
         "confidence": 0.91,
         "candidate_type": "mound",
@@ -849,6 +1027,7 @@ def test_partial_resume_continues_new_tiles_before_reviewing_old_candidates(tmp_
         dst.write(data)
 
     resume_path = tmp_path / "previous_vlm_candidates.jsonl"
+    prompt_fingerprint = vlm._prompt_fingerprint(None, None)
     resume_record = {
         "tile_index": 1,
         "tile_row": 0,
@@ -860,6 +1039,7 @@ def test_partial_resume_continues_new_tiles_before_reviewing_old_candidates(tmp_
         "has_dsm": False,
         "has_dtm": False,
         "analysis_mode": "rgb_only",
+        "prompt_fingerprint": prompt_fingerprint,
         "candidate": True,
         "confidence": 0.91,
         "candidate_type": "mound",
@@ -941,19 +1121,39 @@ def test_resume_skips_tiles_already_present_in_jsonl(tmp_path: Path, monkeypatch
         dst.write(data)
 
     resume_path = tmp_path / "previous_vlm_candidates.jsonl"
-    resume_path.write_text(
-        (
-            '{"tile_index":1,"tile_row":0,"tile_col":0,"tile_width":8,"tile_height":8,'
-            '"used_views":["rgb"],"has_rgb":true,"has_dsm":false,"has_dtm":false,'
-            '"analysis_mode":"rgb_only","candidate":false,"confidence":0.0,'
-            '"candidate_type":"none","bbox_xyxy":null,"bbox_global_xyxy":null,'
-            '"bbox_crs_xyxy":null,"center_x":null,"center_y":null,"gps_lon":null,'
-            '"gps_lat":null,"google_maps_url":"","visual_evidence":"",'
-            '"possible_false_positive":"","recommended_check":"rgb","status":"ok",'
-            '"error_type":null,"error_message":null,"geometry":null}\n'
-        ),
-        encoding="utf-8",
-    )
+    prompt_fingerprint = vlm._prompt_fingerprint(None, None)
+    resume_tile1 = {
+        "tile_index": 1,
+        "tile_row": 0,
+        "tile_col": 0,
+        "tile_width": 8,
+        "tile_height": 8,
+        "used_views": ["rgb"],
+        "has_rgb": True,
+        "has_dsm": False,
+        "has_dtm": False,
+        "analysis_mode": "rgb_only",
+        "prompt_fingerprint": prompt_fingerprint,
+        "candidate": False,
+        "confidence": 0.0,
+        "candidate_type": "none",
+        "bbox_xyxy": None,
+        "bbox_global_xyxy": None,
+        "bbox_crs_xyxy": None,
+        "center_x": None,
+        "center_y": None,
+        "gps_lon": None,
+        "gps_lat": None,
+        "google_maps_url": "",
+        "visual_evidence": "",
+        "possible_false_positive": "",
+        "recommended_check": "rgb",
+        "status": "ok",
+        "error_type": None,
+        "error_message": None,
+        "geometry": None,
+    }
+    resume_path.write_text(json.dumps(resume_tile1) + "\n", encoding="utf-8")
 
     calls = {"count": 0}
 

@@ -50,6 +50,7 @@ def test_legacy_vlm_prefixed_config_keys_are_accepted(tmp_path: Path):
                 'vlm_source_kind: "hillshade"',
                 'vlm_prompt_stage1_path: "prompts/stage1.txt"',
                 'vlm_prompt_stage2_path: "prompts/stage2.txt"',
+                "vlm_max_candidates_per_tile: 5",
                 'vlm_resume: false',
                 'enable_vlm: true',
                 'enable_deep_learning: false',
@@ -68,6 +69,7 @@ def test_legacy_vlm_prefixed_config_keys_are_accepted(tmp_path: Path):
     assert config.source_kind == "hillshade"
     assert config.prompt_stage1_path == str((tmp_path / "prompts" / "stage1.txt").resolve(strict=False))
     assert config.prompt_stage2_path == str((tmp_path / "prompts" / "stage2.txt").resolve(strict=False))
+    assert config.max_candidates_per_tile == 5
     assert config.resume is False
 
 
@@ -82,6 +84,7 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
                 'source_kind: "rgb"',
                 'prompt_stage1_path: "prompts/from_yaml_stage1.txt"',
                 'prompt_stage2_path: "prompts/from_yaml_stage2.txt"',
+                "max_candidates_per_tile: 2",
             ]
         ),
         encoding="utf-8",
@@ -101,6 +104,8 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
             "cli_stage1.txt",
             "--prompt-stage2-path",
             "cli_stage2.txt",
+            "--max-candidates-per-tile",
+            "4",
         ]
     )
     config = vlm_detect.build_config_from_args(args)
@@ -108,6 +113,7 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
     assert config.tile == 1024
     assert config.overlap == 256
     assert config.source_kind == "hillshade"
+    assert config.max_candidates_per_tile == 4
     assert config.prompt_stage1_path == str((Path.cwd() / "cli_stage1.txt").resolve(strict=False))
     assert config.prompt_stage2_path == str((Path.cwd() / "cli_stage2.txt").resolve(strict=False))
 

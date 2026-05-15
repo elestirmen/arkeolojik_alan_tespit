@@ -32,6 +32,8 @@ from tqdm import tqdm
 
 LOGGER = logging.getLogger("vlm_lmstudio_detector")
 AUTO_MODEL_TOKENS = {"auto", "active", "current", "loaded"}
+DEFAULT_MAX_CANDIDATES_PER_TILE = 3
+SAME_TILE_DEDUPE_IOU_THRESHOLD = 0.75
 
 VIEW_ALIASES = {
     "rgb": "rgb",
@@ -88,12 +90,18 @@ ALLOWED_CANDIDATE_TYPES = {
 }
 
 JSON_SCHEMA_TEXT = """{
-  "candidate": true,
-  "confidence": 0.0,
-  "candidate_type": "none | mound | tumulus | ring_ditch | wall_trace | road_trace | foundation | enclosure | terrace | unknown",
-  "bbox_xyxy": [x1, y1, x2, y2],
-  "visual_evidence": "...",
-  "possible_false_positive": "...",
+  "candidates": [
+    {
+      "confidence": 0.0,
+      "candidate_type": "mound | tumulus | ring_ditch | wall_trace | road_trace | foundation | enclosure | terrace | unknown",
+      "bbox_xyxy": [x1, y1, x2, y2],
+      "visual_evidence": "...",
+      "possible_false_positive": "...",
+      "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
+    }
+  ],
+  "visual_evidence": "short reason when candidates is empty",
+  "possible_false_positive": "strongest non-archaeological explanation when candidates is empty",
   "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
 }"""
 
@@ -129,6 +137,7 @@ class VlmLmStudioConfig:
     resume_jsonl_path: Optional[Path | str] = None
     prompt_stage1_path: Optional[Path | str] = None
     prompt_stage2_path: Optional[Path | str] = None
+    max_candidates_per_tile: int = DEFAULT_MAX_CANDIDATES_PER_TILE
     reload_every_tiles: int = 0
     reload_pause_seconds: float = 5.0
 
@@ -208,7 +217,12 @@ def run_vlm_lmstudio_detection(
     _ensure_pillow_available()
     stage1_guidance_text = _load_prompt_text(config.prompt_stage1_path, label="VLM A1", logger=log)
     stage2_guidance_text = _load_prompt_text(config.prompt_stage2_path, label="VLM A2", logger=log)
-    prompt_fingerprint = _prompt_fingerprint(stage1_guidance_text, stage2_guidance_text)
+    prompt_fingerprint = _prompt_fingerprint(
+        stage1_guidance_text,
+        stage2_guidance_text,
+        max_candidates_per_tile=config.max_candidates_per_tile,
+        confidence_threshold=config.confidence_threshold,
+    )
     log.info("VLM prompt fingerprint: %s", prompt_fingerprint[:12])
 
     with rasterio.open(input_path) as src:
@@ -253,7 +267,7 @@ def run_vlm_lmstudio_detection(
         resume_records_needing_review = _records_needing_review(records, config.confidence_threshold)
         raw_candidate_count = sum(1 for record in records if bool(record.get("candidate")) and bool(record.get("geometry")))
         skipped_count = sum(1 for record in records if record.get("status") == "skipped")
-        resumed_tiles = len(records)
+        resumed_tiles = len(processed_tile_indexes)
         if resumed_tiles:
             log.info(
                 "VLM resume: %d/%d tile onceki JSONL'den yuklendi: %s",
@@ -302,7 +316,7 @@ def run_vlm_lmstudio_detection(
             return VlmDetectionSummary(
                 paths=paths,
                 total_tiles=total_tiles,
-                processed_tiles=len(records),
+                processed_tiles=len(processed_tile_indexes),
                 resumed_tiles=resumed_tiles,
                 raw_candidate_count=raw_candidate_count,
                 candidate_count=len(candidate_records),
@@ -364,7 +378,7 @@ def run_vlm_lmstudio_detection(
                 )
                 log.info(
                     "VLM resume ara ciktilari guncellendi: %d/%d tile, ilk_asama=%d, ikinci_asama=%d -> %s",
-                    len(records),
+                    len(processed_tile_indexes),
                     total_tiles,
                     len(first_stage_records),
                     len(candidate_records),
@@ -408,13 +422,17 @@ def run_vlm_lmstudio_detection(
 
                     response_text: Optional[str] = None
                     rendered: Optional[Sequence[Tuple[str, str]]] = None
+                    tile_records: List[Dict[str, Any]] = []
+                    break_after_tile = False
                     try:
                         tile_arrays = _read_tile_arrays(src, layout, window)
                         if _is_empty_rgb_tile(tile_arrays["rgb"]):
-                            record = _skipped_tile_record(
-                                tile_record_base,
-                                reason="RGB tile is empty, nodata, transparent, or effectively black.",
-                            )
+                            tile_records = [
+                                _skipped_tile_record(
+                                    tile_record_base,
+                                    reason="RGB tile is empty, nodata, transparent, or effectively black.",
+                                )
+                            ]
                         else:
                             rendered = _render_views(tile_arrays, selected_views, pixel_size=pixel_size)
                             prompt = _build_prompt(
@@ -425,6 +443,8 @@ def run_vlm_lmstudio_detection(
                                 gsd_m=prompt_gsd_m,
                                 source_kind=source_kind,
                                 guidance_text=stage1_guidance_text,
+                                max_candidates_per_tile=config.max_candidates_per_tile,
+                                confidence_threshold=config.confidence_threshold,
                             )
                             response_text, use_response_format = _request_vlm_json(
                                 client=client,
@@ -435,7 +455,7 @@ def run_vlm_lmstudio_detection(
                                 logger=log,
                             )
                             parsed = _parse_model_json(response_text)
-                            record = _model_result_to_record(
+                            tile_records = _model_result_to_records(
                                 parsed=parsed,
                                 raw_response=response_text,
                                 base_record=tile_record_base,
@@ -443,30 +463,33 @@ def run_vlm_lmstudio_detection(
                                 crs=src.crs,
                                 raster_width=src.width,
                                 raster_height=src.height,
+                                max_candidates_per_tile=config.max_candidates_per_tile,
                             )
-                            if _is_exportable_candidate(record, config.confidence_threshold):
-                                pbar.set_description("VLM A2 dogrulama")
-                                use_response_format, raw_review_record = _review_candidate_record(
-                                    record,
-                                    client=client,
-                                    config=config,
-                                    rendered_views=rendered,
-                                    analysis_mode=layout.analysis_mode,
-                                    selected_views=selected_views,
-                                    gsd_m=prompt_gsd_m,
-                                    source_kind=source_kind,
-                                    review_guidance_text=stage2_guidance_text,
-                                    use_response_format=use_response_format,
-                                    logger=log,
-                                )
-                                if raw_review_record is not None:
-                                    _write_jsonl_line(raw_fh, raw_review_record)
-                                    log.warning(
-                                        "VLM tile %s ikinci asama inceleme hatasi: %s",
-                                        tile_index,
-                                        raw_review_record.get("review_error_message") or "",
+                            for candidate_record in tile_records:
+                                if _is_exportable_candidate(candidate_record, config.confidence_threshold):
+                                    pbar.set_description("VLM A2 dogrulama")
+                                    use_response_format, raw_review_record = _review_candidate_record(
+                                        candidate_record,
+                                        client=client,
+                                        config=config,
+                                        rendered_views=rendered,
+                                        analysis_mode=layout.analysis_mode,
+                                        selected_views=selected_views,
+                                        gsd_m=prompt_gsd_m,
+                                        source_kind=source_kind,
+                                        review_guidance_text=stage2_guidance_text,
+                                        use_response_format=use_response_format,
+                                        logger=log,
                                     )
-                                pbar.set_description("VLM A1 tarama")
+                                    if raw_review_record is not None:
+                                        _write_jsonl_line(raw_fh, raw_review_record)
+                                        log.warning(
+                                            "VLM tile %s aday %s ikinci asama inceleme hatasi: %s",
+                                            tile_index,
+                                            candidate_record.get("candidate_index"),
+                                            raw_review_record.get("review_error_message") or "",
+                                        )
+                                    pbar.set_description("VLM A1 tarama")
                     except Exception as exc:
                         pbar.set_description("VLM A1 tarama")
                         error_type = _classify_exception(exc)
@@ -475,6 +498,8 @@ def run_vlm_lmstudio_detection(
                         record.update(
                             {
                                 "candidate": False,
+                                "candidate_index": 0,
+                                "candidate_count": 0,
                                 "confidence": 0.0,
                                 "candidate_type": "none",
                                 "bbox_xyxy": None,
@@ -498,29 +523,29 @@ def run_vlm_lmstudio_detection(
                             raw_record["raw_response"] = response_text
                         _write_jsonl_line(raw_fh, raw_record)
                         error_records.append(record)
+                        tile_records = [record]
                         if error_type == "vision_unsupported":
                             log.error(
                                 "VLM modeli goruntu girdisini desteklemiyor gibi gorunuyor: %s",
                                 message,
                             )
-                            _write_jsonl_line(jsonl_fh, record)
-                            records.append(record)
-                            processed_tile_indexes.add(tile_index)
-                            pbar.update(1)
-                            break
+                            break_after_tile = True
                         log.warning("VLM tile %s hata ile atlandi: %s", tile_index, message)
 
-                    _write_jsonl_line(jsonl_fh, record)
-                    records.append(record)
+                    for record in tile_records:
+                        _write_jsonl_line(jsonl_fh, record)
+                        records.append(record)
                     processed_tile_indexes.add(tile_index)
-                    if record.get("status") == "skipped":
-                        skipped_count += 1
-                    if bool(record.get("candidate")) and bool(record.get("geometry")):
-                        raw_candidate_count += 1
-                    if _is_exportable_candidate(record, config.confidence_threshold):
-                        first_stage_records.append(record)
-                    if _is_review_confirmed_candidate(record, config.confidence_threshold):
-                        candidate_records.append(record)
+                    skipped_count += sum(1 for record in tile_records if record.get("status") == "skipped")
+                    raw_candidate_count += sum(
+                        1 for record in tile_records if bool(record.get("candidate")) and bool(record.get("geometry"))
+                    )
+                    first_stage_records.extend(
+                        record for record in tile_records if _is_exportable_candidate(record, config.confidence_threshold)
+                    )
+                    candidate_records.extend(
+                        record for record in tile_records if _is_review_confirmed_candidate(record, config.confidence_threshold)
+                    )
 
                     pbar.update(1)
                     tiles_since_export += 1
@@ -546,7 +571,7 @@ def run_vlm_lmstudio_detection(
                         tiles_since_export = 0
                         log.info(
                             "VLM ara ciktilar guncellendi: %d/%d tile, ilk_asama=%d, ikinci_asama=%d -> %s",
-                            len(records),
+                            len(processed_tile_indexes),
                             total_tiles,
                             len(first_stage_records),
                             len(candidate_records),
@@ -580,10 +605,14 @@ def run_vlm_lmstudio_detection(
                             client = _make_openai_client(config)
                         tiles_since_reload = 0
                         pbar.set_description("VLM A1 tarama")
-                    if len(records) == 1 or len(records) % 25 == 0 or len(records) == total_tiles:
+                    if (
+                        len(processed_tile_indexes) == 1
+                        or len(processed_tile_indexes) % 25 == 0
+                        or len(processed_tile_indexes) == total_tiles
+                    ):
                         log.info(
                             "VLM ilerleme: %d/%d tile, model_aday=%d, ilk_asama=%d, ikinci_asama=%d, skipped=%d, hata=%d",
-                            len(records),
+                            len(processed_tile_indexes),
                             total_tiles,
                             raw_candidate_count,
                             len(first_stage_records),
@@ -591,6 +620,8 @@ def run_vlm_lmstudio_detection(
                             skipped_count,
                             len(error_records),
                         )
+                    if break_after_tile:
+                        break
 
                 if resume_records_needing_review:
                     pbar.set_description("VLM A2 resume dogrulama")
@@ -657,7 +688,7 @@ def run_vlm_lmstudio_detection(
         return VlmDetectionSummary(
             paths=paths,
             total_tiles=total_tiles,
-            processed_tiles=len(records),
+            processed_tiles=len(processed_tile_indexes),
             resumed_tiles=resumed_tiles,
             raw_candidate_count=raw_candidate_count,
             candidate_count=len(candidate_records),
@@ -676,6 +707,10 @@ def _validate_config(config: VlmLmStudioConfig) -> None:
         raise ValueError("vlm_overlap, vlm_tile degerinden kucuk olmali.")
     if config.max_tiles < 0:
         raise ValueError("vlm_max_tiles negatif olamaz.")
+    if config.max_candidates_per_tile <= 0:
+        raise ValueError("vlm_max_candidates_per_tile pozitif olmali.")
+    if config.max_candidates_per_tile > 20:
+        raise ValueError("vlm_max_candidates_per_tile 20 veya daha kucuk olmali.")
     if config.export_every < 0:
         raise ValueError("vlm_export_every negatif olamaz.")
     if config.reload_every_tiles < 0:
@@ -759,13 +794,21 @@ def _load_prompt_text(path: Optional[Path | str], *, label: str, logger: logging
     return text
 
 
-def _prompt_fingerprint(stage1_guidance_text: Optional[str], stage2_guidance_text: Optional[str]) -> str:
+def _prompt_fingerprint(
+    stage1_guidance_text: Optional[str],
+    stage2_guidance_text: Optional[str],
+    *,
+    max_candidates_per_tile: int = DEFAULT_MAX_CANDIDATES_PER_TILE,
+    confidence_threshold: float = 0.75,
+) -> str:
     payload = {
-        "version": 1,
+        "version": 2,
         "stage1_guidance": _prompt_guidance_or_default(stage1_guidance_text, _default_stage1_guidance()),
         "stage2_guidance": _prompt_guidance_or_default(stage2_guidance_text, _default_stage2_guidance()),
         "stage1_schema": JSON_SCHEMA_TEXT,
         "stage2_schema": REVIEW_SCHEMA_TEXT,
+        "max_candidates_per_tile": int(max_candidates_per_tile),
+        "confidence_threshold": float(confidence_threshold),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -795,7 +838,8 @@ def _load_resume_records(
         expected_windows[tile_index] = (int(row), int(col), int(window.width), int(window.height))
 
     expected_views = [str(view).strip().lower() for view in selected_views]
-    records_by_tile: Dict[int, Dict[str, Any]] = {}
+    records_by_tile: Dict[int, Dict[int, Dict[str, Any]]] = {}
+    legacy_records_by_tile: Dict[int, Tuple[int, Dict[str, Any]]] = {}
     bad_json_count = 0
     mismatch_count = 0
     duplicate_count = 0
@@ -825,12 +869,28 @@ def _load_resume_records(
                 ):
                     mismatch_count += 1
                     continue
-                if tile_index in records_by_tile:
+                candidate_index = _resume_candidate_index(record)
+                if candidate_index is None:
+                    if tile_index in legacy_records_by_tile:
+                        duplicate_count += 1
+                    legacy_records_by_tile[tile_index] = (line_no, record)
+                    continue
+                tile_records = records_by_tile.setdefault(tile_index, {})
+                if candidate_index in tile_records:
                     duplicate_count += 1
-                records_by_tile[tile_index] = record
+                tile_records[candidate_index] = record
     except OSError as exc:
         logger.warning("VLM resume JSONL okunamadi (%s): %s", path, exc)
         return [], set()
+
+    for tile_index, (_, record) in legacy_records_by_tile.items():
+        if tile_index in records_by_tile:
+            duplicate_count += 1
+            continue
+        index = 1 if bool(record.get("candidate")) else 0
+        record.setdefault("candidate_index", index)
+        record.setdefault("candidate_count", 1 if index > 0 else 0)
+        records_by_tile[tile_index] = {index: record}
 
     if bad_json_count:
         logger.warning("VLM resume JSONL icinde %d bozuk satir atlandi: %s", bad_json_count, path)
@@ -840,10 +900,21 @@ def _load_resume_records(
             mismatch_count,
         )
     if duplicate_count:
-        logger.info("VLM resume JSONL icinde %d tekrarli tile kaydi bulundu; son kayit kullanildi.", duplicate_count)
+        logger.info("VLM resume JSONL icinde %d tekrarli tile/aday kaydi bulundu; son kayit kullanildi.", duplicate_count)
 
     processed = set(records_by_tile)
-    return [records_by_tile[idx] for idx in sorted(records_by_tile)], processed
+    records: List[Dict[str, Any]] = []
+    for tile_index in sorted(records_by_tile):
+        for candidate_index in sorted(records_by_tile[tile_index]):
+            records.append(records_by_tile[tile_index][candidate_index])
+    return records, processed
+
+
+def _resume_candidate_index(record: Dict[str, Any]) -> Optional[int]:
+    candidate_index = _coerce_int(record.get("candidate_index"))
+    if candidate_index is not None and candidate_index >= 0:
+        return candidate_index
+    return None
 
 
 def _resume_record_matches_plan(
@@ -1663,6 +1734,8 @@ def _build_prompt(
     gsd_m: Optional[float],
     source_kind: str = "auto",
     guidance_text: Optional[str] = None,
+    max_candidates_per_tile: int = DEFAULT_MAX_CANDIDATES_PER_TILE,
+    confidence_threshold: float = 0.75,
 ) -> str:
     if gsd_m is not None and gsd_m > 0:
         tile_width_m = width * float(gsd_m)
@@ -1692,7 +1765,10 @@ def _build_prompt(
             "\n\n",
             "If there is a candidate, return bbox_xyxy in tile pixel coordinates [x1,y1,x2,y2], not normalized coordinates. ",
             "The bbox should tightly cover the visible anomaly but is approximate and must not be treated as a final archaeological boundary. ",
-            "If there is no candidate, return candidate=false, confidence=0, candidate_type=\"none\", bbox_xyxy=null. ",
+            f"Return at most {int(max_candidates_per_tile)} separate candidates. ",
+            f"Only include candidates with confidence >= {float(confidence_threshold):.2f}; do not add weak candidates to fill the list. ",
+            "Each candidates[] item must describe one distinct feature. Do not duplicate the same feature with overlapping boxes. ",
+            "If there is no candidate meeting the threshold, return candidates=[]. ",
             "Return exactly one JSON object with this schema and no markdown:\n",
             JSON_SCHEMA_TEXT,
         ]
@@ -1747,6 +1823,8 @@ def _build_review_prompt(
     )
     first_pass = {
         "tile_index": record.get("tile_index"),
+        "candidate_index": record.get("candidate_index"),
+        "candidate_count": record.get("candidate_count"),
         "candidate_type": record.get("candidate_type"),
         "confidence": record.get("confidence"),
         "bbox_xyxy": record.get("bbox_xyxy"),
@@ -2001,6 +2079,140 @@ def _model_result_to_record(
     return record
 
 
+def _model_result_to_records(
+    *,
+    parsed: Dict[str, Any],
+    raw_response: str,
+    base_record: Dict[str, Any],
+    transform: Affine,
+    crs: Optional[RasterioCRS],
+    raster_width: int,
+    raster_height: int,
+    max_candidates_per_tile: int = DEFAULT_MAX_CANDIDATES_PER_TILE,
+) -> List[Dict[str, Any]]:
+    payloads = _candidate_payloads_from_model_result(parsed)
+    if not payloads:
+        record = _model_result_to_record(
+            parsed=_empty_candidate_payload(parsed),
+            raw_response=raw_response,
+            base_record=base_record,
+            transform=transform,
+            crs=crs,
+            raster_width=raster_width,
+            raster_height=raster_height,
+        )
+        _set_candidate_sequence_fields([record], candidate_count=0)
+        return [record]
+
+    candidate_records: List[Dict[str, Any]] = []
+    warning_records: List[Dict[str, Any]] = []
+    for payload in payloads:
+        record = _model_result_to_record(
+            parsed=payload,
+            raw_response=raw_response,
+            base_record=base_record,
+            transform=transform,
+            crs=crs,
+            raster_width=raster_width,
+            raster_height=raster_height,
+        )
+        if bool(record.get("candidate")) and bool(record.get("geometry")):
+            candidate_records.append(record)
+        elif record.get("status") == "warning":
+            warning_records.append(record)
+
+    candidate_records = _dedupe_same_tile_candidate_records(candidate_records)
+    candidate_records = sorted(candidate_records, key=lambda record: -_record_confidence(record))[
+        : max(1, int(max_candidates_per_tile))
+    ]
+    if candidate_records:
+        _set_candidate_sequence_fields(candidate_records, candidate_count=len(candidate_records))
+        return candidate_records
+
+    if warning_records:
+        record = warning_records[0]
+    else:
+        record = _model_result_to_record(
+            parsed=_empty_candidate_payload(parsed),
+            raw_response=raw_response,
+            base_record=base_record,
+            transform=transform,
+            crs=crs,
+            raster_width=raster_width,
+            raster_height=raster_height,
+        )
+    _set_candidate_sequence_fields([record], candidate_count=0)
+    return [record]
+
+
+def _candidate_payloads_from_model_result(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if isinstance(parsed.get("candidates"), list):
+        payloads: List[Dict[str, Any]] = []
+        for item in parsed.get("candidates") or []:
+            if not isinstance(item, dict):
+                continue
+            payload = dict(item)
+            if payload.get("candidate") is False:
+                continue
+            payload["candidate"] = True
+            payloads.append(payload)
+        return payloads
+    return [dict(parsed)]
+
+
+def _empty_candidate_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "candidate": False,
+        "confidence": 0.0,
+        "candidate_type": "none",
+        "bbox_xyxy": None,
+        "visual_evidence": str(parsed.get("visual_evidence", "") or ""),
+        "possible_false_positive": str(parsed.get("possible_false_positive", "") or ""),
+        "recommended_check": str(parsed.get("recommended_check", "field_check") or "field_check"),
+    }
+
+
+def _set_candidate_sequence_fields(records: Sequence[Dict[str, Any]], *, candidate_count: int) -> None:
+    for index, record in enumerate(records, start=1):
+        record["candidate_index"] = index if candidate_count > 0 else 0
+        record["candidate_count"] = int(candidate_count)
+
+
+def _dedupe_same_tile_candidate_records(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    kept: List[Dict[str, Any]] = []
+    for record in sorted(records, key=lambda item: -_record_confidence(item)):
+        bbox = record.get("bbox_xyxy")
+        if any(_bbox_iou(bbox, kept_record.get("bbox_xyxy")) >= SAME_TILE_DEDUPE_IOU_THRESHOLD for kept_record in kept):
+            continue
+        kept.append(record)
+    return kept
+
+
+def _bbox_iou(first: Any, second: Any) -> float:
+    if not isinstance(first, (list, tuple)) or not isinstance(second, (list, tuple)):
+        return 0.0
+    if len(first) != 4 or len(second) != 4:
+        return 0.0
+    try:
+        ax1, ay1, ax2, ay2 = [float(value) for value in first]
+        bx1, by1, bx2, by2 = [float(value) for value in second]
+    except Exception:
+        return 0.0
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_area = max(0.0, inter_x2 - inter_x1) * max(0.0, inter_y2 - inter_y1)
+    if inter_area <= 0:
+        return 0.0
+    first_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    second_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union_area = first_area + second_area - inter_area
+    if union_area <= 0:
+        return 0.0
+    return inter_area / union_area
+
+
 def _coerce_float(value: Any, *, default: float) -> float:
     try:
         return float(value)
@@ -2105,6 +2317,8 @@ def _run_error_record(
     record.update(
         {
             "candidate": False,
+            "candidate_index": 0,
+            "candidate_count": 0,
             "confidence": 0.0,
             "candidate_type": "none",
             "bbox_xyxy": None,
@@ -2131,6 +2345,8 @@ def _skipped_tile_record(base_record: Dict[str, Any], *, reason: str) -> Dict[st
     record.update(
         {
             "candidate": False,
+            "candidate_index": 0,
+            "candidate_count": 0,
             "confidence": 0.0,
             "candidate_type": "none",
             "bbox_xyxy": None,
@@ -2299,6 +2515,8 @@ CSV_COLUMNS = [
     "tile_col",
     "tile_width",
     "tile_height",
+    "candidate_index",
+    "candidate_count",
     "candidate",
     "confidence",
     "candidate_type",
@@ -2724,6 +2942,8 @@ def _write_candidate_gpkg_layer(
             "tile_index": "int",
             "tile_row": "int",
             "tile_col": "int",
+            "cand_idx": "int",
+            "cand_count": "int",
             "confidence": "float",
             "review_conf": "float",
             "review_ok": "int",
@@ -2766,6 +2986,8 @@ def _write_candidate_gpkg_layer(
                         "tile_index": int(record.get("tile_index") or 0),
                         "tile_row": int(record.get("tile_row") or 0),
                         "tile_col": int(record.get("tile_col") or 0),
+                        "cand_idx": int(record.get("candidate_index") or 0),
+                        "cand_count": int(record.get("candidate_count") or 0),
                         "confidence": float(record.get("confidence") or 0.0),
                         "review_conf": float(record.get("review_confidence") or 0.0),
                         "review_ok": int(bool(record.get("review_confirmed"))),
