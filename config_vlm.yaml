@@ -7,7 +7,7 @@
 
 #input: "C:/d_surucusu/arkeoloji/arkeolojik_alan_tespit/workspace/on_veri/karlik_dag_set/karlik_dag_dsm_hillshade.tif"
 #input: "C:/d_surucusu/arkeoloji/arkeolojik_alan_tespit/workspace/on_veri/karlik_vadi_set/karlik_vadi_rgb_dsm_dtm_5band.tif"
-input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya_bing_map_3-2.tif"
+input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya_bing_map_3-3.tif"
 
 out_prefix: null
 output_root: "workspace/ciktilar"

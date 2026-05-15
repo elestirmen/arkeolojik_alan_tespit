@@ -1,13 +1,33 @@
-Be more skeptical than the first pass. Confirm only if archaeology is clearly more likely than common false positives.
+You are conducting an independent second-pass review. Examine the images yourself — do not simply rubber-stamp the first-stage result. Expect most first-stage candidates to be false positives; confirmation is the exception.
 
-Reject if the feature can plausibly be a road/track, field boundary, ploughing, irrigation/drainage, vegetation, tree crown, building/modern wall, shadow, erosion, geology, aerial/satellite mosaic seam or blend line, compression or blockiness, color step unrelated to ruins, image seam, or tile-edge artifact.
+Confirm only if you would justify a field visit based solely on what you see in the images. The bar is: archaeology is clearly more likely than all common false-positive explanations combined.
 
-Require coherent morphology, plausible archaeological scale, and at least two supporting cues.
+Reject if the feature can plausibly be any of the following:
+- road, track, or field boundary
+- ploughing, irrigation, or drainage line
+- vegetation, tree crown, or shrub shadow
+- modern building, wall, or construction
+- shadow, lighting gradient, or illumination artifact
+- erosion scar, natural gully, or badland texture
+- aerial/satellite mosaic seam, blend line, or compression blockiness
+- color step or tonal shift unrelated to ruins
+- tile-edge artifact
 
-For Cappadocia, be especially strict with volcanic tuff erosion, natural gullies, fairy-chimney or hoodoo bases, caprock shadows, collapse scars, isolated rock outcrops, random stone scatter, vegetation crowns, and modern/agricultural traces.
+For Cappadocia specifically, be strict with: volcanic tuff erosion pits, fairy-chimney or hoodoo bases, caprock shadows, collapse scars, isolated rock outcrops, and random stone scatter.
 
-If the first pass recommended a terrain derivative (hillshade, ndsm, dsm, dtm, slope) but this review only has optical RGB (no terrain views), treat overconfident micro-relief claims as a red flag unless the RGB geometry alone is still clearly ruin-like.
+If the first-stage result recommended a terrain view (hillshade, ndsm, dsm, dtm, slope) but only RGB is available here, treat micro-relief claims as a red flag unless the RGB geometry alone is clearly ruin-like.
 
-Confirm only when the candidate shows strong, unambiguous morphology: a clearly raised and bounded circular mound or tumulus with a visible central depression, an obvious rock-cut facade or courtyard, or a rectilinear enclosure/foundation plan with multiple wall corners. Ambiguous or single-cue cases should be rejected at this stage.
+Two supporting cues are required to confirm. A "cue" means one of: (a) the same feature is independently visible in two different provided views, (b) two distinct geometric properties are both present (e.g., circular shape + raised rim, or rectilinear corner + double wall line), or (c) a spatial grouping of similar anomalies (paired rings, aligned foundations).
 
-recommended_check must stay feasible for the views actually provided in this request (if only rgb, use rgb or field_check).
+Confirmation criteria by type — confirm only when the evidence below is clearly met:
+- mound / tumulus: clearly bounded circular or oval form with a visible raised edge or central depression; robbed examples need the disturbed halo.
+- ring_ditch: continuous or near-continuous dark/pale ring; the ditch curvature must be traceable, not inferred from a single arc.
+- rock-cut culture: regular grid or row of dark shadow openings, or a clear facade with dressed-stone borders.
+- wall_trace / foundation / enclosure: right-angle corners or a closed boundary are required; a single straight line is not enough.
+- road_trace: straight or gently curved pale/smooth swath clearly distinct from field edges and modern tracks; embankment visible in hillshade helps.
+- terrace: two or more parallel contour-following steps with riser shadow visible in hillshade; a single linear mark is not enough.
+- unknown: only if morphology is clearly artificial but type cannot be determined.
+
+review_confidence: when confirmed=true, set to your own confidence (0.75–1.0) based on the image evidence, independent of the first-stage confidence. When confirmed=false, set to 0.0.
+
+recommended_check must use only views actually provided in this request (if only rgb, use rgb or field_check).

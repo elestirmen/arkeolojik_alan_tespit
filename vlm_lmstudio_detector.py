@@ -1763,6 +1763,25 @@ def _default_stage2_guidance() -> str:
     )
 
 
+def _feature_size_hint(gsd_m: float) -> str:
+    def px(m_lo: float, m_hi: float) -> str:
+        lo = max(1, round(m_lo / gsd_m))
+        hi = round(m_hi / gsd_m)
+        return f"{lo}–{hi} px"
+
+    return (
+        f"Expected pixel sizes at {gsd_m:.2f} m/px GSD — use these to reject implausibly small or large detections: "
+        f"mound/tumulus diameter {px(15, 80)}; "
+        f"ring_ditch outer diameter {px(15, 60)}; "
+        f"wall_trace / foundation side {px(5, 60)} (wall width itself may be only {px(0.5, 2)}, look for tone contrast along a line); "
+        f"enclosure perimeter side {px(10, 80)}; "
+        f"road_trace width {px(2, 8)}, length {px(30, 500)}+; "
+        f"terrace step width {px(3, 30)}. "
+        "Features smaller than the lower bound are below resolution and should be rejected. "
+        "Features larger than the upper bound are more likely modern infrastructure or natural landforms. "
+    )
+
+
 def _build_prompt(
     analysis_mode: str,
     selected_views: Sequence[str],
@@ -1785,10 +1804,12 @@ def _build_prompt(
             "Use this scale when deciding whether an anomaly has a plausible archaeological size. "
             "Do not flag tiny isolated objects or modern-scale clutter as archaeological features. "
         )
+        size_hint = _feature_size_hint(float(gsd_m))
     else:
         scale_text = (
             "Spatial scale: exact GSD is unknown. Avoid strong size-based claims and rely on visible pattern coherence. "
         )
+        size_hint = ""
     source_context = _source_kind_prompt_context(source_kind, selected_views)
     decision_guidance = _prompt_guidance_or_default(guidance_text, _default_stage1_guidance())
     common = "".join(
@@ -1796,6 +1817,7 @@ def _build_prompt(
             "Task: analyze this GeoTIFF tile for possible archaeological features. ",
             f"The tile size is {width}x{height} pixels. ",
             scale_text,
+            size_hint,
             f"Provided views: {', '.join(selected_views)}. ",
             source_context,
             "Decision guidance:\n",
