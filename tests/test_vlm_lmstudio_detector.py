@@ -217,6 +217,32 @@ def test_prompt_requests_bounded_candidate_list():
     assert '"candidates"' in prompt
 
 
+def test_parse_model_json_repairs_common_unquoted_key_glitch():
+    parsed = vlm._parse_model_json(
+        '{'
+        '"candidates":['
+        '{"confidence":0.82,"candidate_type":"wall_trace","bbox_xyxy":[1,1,3,3]},'
+        '{_candidate_type:"enclosure","confidence":0.78,"candidate_type":"enclosure","bbox_xyxy":[4,4,7,7],}'
+        '],'
+        '"visual_evidence":"structured lines",'
+        '"possible_false_positive":"field edge",'
+        '"recommended_check":"rgb",'
+        '}'
+    )
+
+    assert parsed["candidates"][1]["candidate_type"] == "enclosure"
+
+
+def test_parse_model_json_prefers_last_valid_json_object():
+    parsed = vlm._parse_model_json(
+        '{"candidates":[{"confidence":0.82,"candidate_type":"wall_trace","bbox_xyxy":[1,1,3,3]}]}\n'
+        "Corrected final output:\n"
+        '{"candidates":[],"visual_evidence":"none","possible_false_positive":"modern houses","recommended_check":"rgb"}'
+    )
+
+    assert parsed["candidates"] == []
+
+
 def test_vlm_output_paths_include_separate_stage_gpkgs(tmp_path: Path):
     paths = vlm._build_output_paths(tmp_path / "out" / "rgb")
 
@@ -749,6 +775,46 @@ def test_bad_json_response_is_recorded_with_raw_response(tmp_path: Path, monkeyp
     assert summary.paths.xlsx.exists()
     assert summary.paths.geojson.exists()
     assert "raw_response" in summary.paths.raw_errors_jsonl.read_text(encoding="utf-8")
+
+
+def test_incomplete_a1_json_response_is_retried_once(tmp_path: Path, monkeypatch):
+    tif_path = tmp_path / "rgb_retry.tif"
+    data = np.ones((3, 8, 8), dtype=np.uint8) * 100
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    responses = [
+        '{"candidates":[{"confidence":0.85,"candidate_type":"terrace","bbox_xyxy":[0,0,3,3],'
+        '"visual_evidence":"linear terrace","possible_false_positive":"Natu',
+        '{"candidates":[],"visual_evidence":"none","possible_false_positive":"natural texture","recommended_check":"rgb"}',
+    ]
+
+    def fake_request(**kwargs):
+        return responses.pop(0), True
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(vlm, "_request_vlm_json", fake_request)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tif_path,
+        out_prefix=tmp_path / "out" / "rgb",
+        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1),
+    )
+
+    assert responses == []
+    assert summary.processed_tiles == 1
+    assert summary.error_count == 0
+    assert summary.candidate_count == 0
 
 
 def test_vlm_reload_runs_between_tiles(tmp_path: Path, monkeypatch):

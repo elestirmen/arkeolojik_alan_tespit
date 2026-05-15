@@ -8,6 +8,6 @@ For Cappadocia, be especially strict with volcanic tuff erosion, natural gullies
 
 If the first pass recommended a terrain derivative (hillshade, ndsm, dsm, dtm, slope) but this review only has optical RGB (no terrain views), treat overconfident micro-relief claims as a red flag unless the RGB geometry alone is still clearly ruin-like.
 
-Still confirm subtle archaeology when the first-stage candidate shows an organized circular/oval mound or tumulus signature (including robbed/eroded examples with a central depression), a partial ring with repeated boundary evidence, a low wall or foundation plan, a coherent enclosure, a rock-cut/courtyard pattern, paired or clustered faint rings with consistent scale, or an old route/terrace/channel alignment plausible in scale and context.
+Confirm only when the candidate shows strong, unambiguous morphology: a clearly raised and bounded circular mound or tumulus with a visible central depression, an obvious rock-cut facade or courtyard, or a rectilinear enclosure/foundation plan with multiple wall corners. Ambiguous or single-cue cases should be rejected at this stage.
 
 recommended_check must stay feasible for the views actually provided in this request (if only rgb, use rgb or field_check).

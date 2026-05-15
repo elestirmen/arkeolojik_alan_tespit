@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -454,7 +455,28 @@ def run_vlm_lmstudio_detection(
                                 use_response_format=use_response_format,
                                 logger=log,
                             )
-                            parsed = _parse_model_json(response_text)
+                            try:
+                                parsed = _parse_model_json(response_text)
+                            except Exception as parse_exc:
+                                log.warning(
+                                    "VLM tile %s A1 JSON bozuk; ayni tile icin tek retry deneniyor: %s",
+                                    tile_index,
+                                    str(parse_exc)[:240],
+                                )
+                                response_text, use_response_format = _request_vlm_json(
+                                    client=client,
+                                    config=config,
+                                    prompt=_build_json_retry_prompt(
+                                        original_prompt=prompt,
+                                        schema_text=JSON_SCHEMA_TEXT,
+                                        stage_label="A1",
+                                        parse_error=parse_exc,
+                                    ),
+                                    rendered_views=rendered,
+                                    use_response_format=use_response_format,
+                                    logger=log,
+                                )
+                                parsed = _parse_model_json(response_text)
                             tile_records = _model_result_to_records(
                                 parsed=parsed,
                                 raw_response=response_text,
@@ -843,6 +865,7 @@ def _load_resume_records(
     bad_json_count = 0
     mismatch_count = 0
     duplicate_count = 0
+    retryable_error_count = 0
 
     try:
         with path.open("r", encoding="utf-8") as fh:
@@ -854,6 +877,9 @@ def _load_resume_records(
                     record = json.loads(text)
                 except json.JSONDecodeError:
                     bad_json_count += 1
+                    continue
+                if _is_retryable_resume_error(record):
+                    retryable_error_count += 1
                     continue
                 tile_index = _coerce_int(record.get("tile_index"))
                 if tile_index is None or tile_index <= 0 or tile_index > total_tiles:
@@ -901,6 +927,11 @@ def _load_resume_records(
         )
     if duplicate_count:
         logger.info("VLM resume JSONL icinde %d tekrarli tile/aday kaydi bulundu; son kayit kullanildi.", duplicate_count)
+    if retryable_error_count:
+        logger.info(
+            "VLM resume JSONL icinde %d invalid_json tile tekrar denenmek uzere islenmemis sayildi.",
+            retryable_error_count,
+        )
 
     processed = set(records_by_tile)
     records: List[Dict[str, Any]] = []
@@ -915,6 +946,13 @@ def _resume_candidate_index(record: Dict[str, Any]) -> Optional[int]:
     if candidate_index is not None and candidate_index >= 0:
         return candidate_index
     return None
+
+
+def _is_retryable_resume_error(record: Dict[str, Any]) -> bool:
+    return (
+        str(record.get("status") or "").strip().lower() == "error"
+        and str(record.get("error_type") or "").strip().lower() == "invalid_json"
+    )
 
 
 def _resume_record_matches_plan(
@@ -1915,7 +1953,29 @@ def _review_candidate_record(
             use_response_format=use_response_format,
             logger=logger,
         )
-        review_parsed = _parse_model_json(review_response_text)
+        try:
+            review_parsed = _parse_model_json(review_response_text)
+        except Exception as parse_exc:
+            logger.warning(
+                "VLM tile %s aday %s A2 JSON bozuk; tek retry deneniyor: %s",
+                record.get("tile_index"),
+                record.get("candidate_index"),
+                str(parse_exc)[:240],
+            )
+            review_response_text, use_response_format = _request_vlm_json(
+                client=client,
+                config=config,
+                prompt=_build_json_retry_prompt(
+                    original_prompt=review_prompt,
+                    schema_text=REVIEW_SCHEMA_TEXT,
+                    stage_label="A2",
+                    parse_error=parse_exc,
+                ),
+                rendered_views=rendered_views,
+                use_response_format=use_response_format,
+                logger=logger,
+            )
+            review_parsed = _parse_model_json(review_response_text)
         _apply_review_result(record, review_parsed, raw_response=review_response_text)
         return use_response_format, None
     except Exception as exc:
@@ -1944,34 +2004,76 @@ def _mark_review_error(record: Dict[str, Any], *, error_type: str, message: str)
     )
 
 
+def _build_json_retry_prompt(
+    *,
+    original_prompt: str,
+    schema_text: str,
+    stage_label: str,
+    parse_error: Exception,
+) -> str:
+    return "\n\n".join(
+        [
+            (
+                f"{stage_label} JSON retry. Your previous answer was not valid JSON "
+                f"({str(parse_error)[:300]})."
+            ),
+            "Return only one valid JSON object. No markdown, no commentary, no self-correction text.",
+            "Use double quotes for every property name. Do not use unquoted keys, duplicate helper keys, comments, or trailing commas.",
+            "If uncertain, return an empty candidates list for A1 or confirmed=false for A2.",
+            "Required schema:\n" + schema_text,
+            "Original task:\n" + original_prompt,
+        ]
+    )
+
+
 def _parse_model_json(text: str) -> Dict[str, Any]:
     raw = str(text or "").strip()
-    json_text = _extract_json_object(raw)
-    parsed = json.loads(json_text)
-    if not isinstance(parsed, dict):
-        raise ValueError("Model JSON object dondurmedi.")
-    return parsed
+    candidates = _extract_json_object_candidates(raw)
+    if not candidates:
+        stripped = _strip_json_fence(raw)
+        if stripped.find("{") >= 0:
+            raise ValueError(f"Model JSON objesi tamamlanmamis. Ham cevap: {stripped[:300]}")
+        raise ValueError(f"Model JSON dondurmedi. Ham cevap: {stripped[:300]}")
+    parsed_candidates: List[Dict[str, Any]] = []
+    first_error: Optional[Exception] = None
+    for json_text in candidates:
+        for candidate_text in (json_text, _repair_jsonish_object_text(json_text)):
+            try:
+                parsed = json.loads(candidate_text)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            if isinstance(parsed, dict) and _looks_like_model_json_payload(parsed):
+                parsed_candidates.append(parsed)
+                break
+            if first_error is None:
+                first_error = ValueError("Model JSON object dondurmedi.")
+    if parsed_candidates:
+        return parsed_candidates[-1]
+    if first_error is not None:
+        raise first_error
+    raise ValueError(f"Model JSON dondurmedi. Ham cevap: {raw[:300]}")
 
 
 def _extract_json_object(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        stripped = "\n".join(lines).strip()
+    candidates = _extract_json_object_candidates(text)
+    if not candidates:
+        stripped = _strip_json_fence(text)
+        if stripped.find("{") < 0:
+            raise ValueError(f"Model JSON dondurmedi. Ham cevap: {stripped[:300]}")
+        raise ValueError(f"Model JSON objesi tamamlanmamis. Ham cevap: {stripped[:300]}")
+    return candidates[0]
 
-    start = stripped.find("{")
-    if start < 0:
-        raise ValueError(f"Model JSON dondurmedi. Ham cevap: {stripped[:300]}")
 
+def _extract_json_object_candidates(text: str) -> List[str]:
+    stripped = _strip_json_fence(text)
+    candidates: List[str] = []
+    start: Optional[int] = None
     depth = 0
     in_string = False
     escaped = False
-    for idx in range(start, len(stripped)):
-        ch = stripped[idx]
+    for idx, ch in enumerate(stripped):
         if in_string:
             if escaped:
                 escaped = False
@@ -1983,12 +2085,39 @@ def _extract_json_object(text: str) -> str:
         if ch == '"':
             in_string = True
         elif ch == "{":
+            if depth == 0:
+                start = idx
             depth += 1
         elif ch == "}":
+            if depth <= 0:
+                continue
             depth -= 1
-            if depth == 0:
-                return stripped[start : idx + 1]
-    raise ValueError(f"Model JSON objesi tamamlanmamis. Ham cevap: {stripped[:300]}")
+            if depth == 0 and start is not None:
+                candidates.append(stripped[start : idx + 1])
+                start = None
+    return candidates
+
+
+def _strip_json_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    return stripped
+
+
+def _repair_jsonish_object_text(text: str) -> str:
+    repaired = re.sub(r"(?m)([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', text)
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    return repaired
+
+
+def _looks_like_model_json_payload(parsed: Dict[str, Any]) -> bool:
+    return any(key in parsed for key in ("candidates", "candidate", "confirmed"))
 
 
 def _model_result_to_record(
@@ -2151,13 +2280,23 @@ def _candidate_payloads_from_model_result(parsed: Dict[str, Any]) -> List[Dict[s
         for item in parsed.get("candidates") or []:
             if not isinstance(item, dict):
                 continue
-            payload = dict(item)
+            payload = _normalise_candidate_payload_fields(dict(item))
             if payload.get("candidate") is False:
                 continue
             payload["candidate"] = True
             payloads.append(payload)
         return payloads
-    return [dict(parsed)]
+    return [_normalise_candidate_payload_fields(dict(parsed))]
+
+
+def _normalise_candidate_payload_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if "candidate_type" not in payload and "_candidate_type" in payload:
+        payload["candidate_type"] = payload.get("_candidate_type")
+    if "visual_evidence" not in payload and "visual__evidence" in payload:
+        payload["visual_evidence"] = payload.get("visual__evidence")
+    if "possible_false_positive" not in payload and "possible_false_position" in payload:
+        payload["possible_false_positive"] = payload.get("possible_false_position")
+    return payload
 
 
 def _empty_candidate_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:

@@ -28,32 +28,11 @@ Use "unknown" when the feature looks archaeological but the exact type is unclea
 If no feature meets the export threshold, return an empty candidates list.
 
 Confidence calibration:
-Below 0.75 means weak or ambiguous.
-Use 0.75 or higher only when the evidence is strong enough for export.
-Use 0.90 or higher only when archaeology is more likely than common false positives.
+Confidence < 0.75: weak or ambiguous — do not include in candidates list.
+Confidence 0.75–0.89: exportable — evidence is clear enough to flag for review.
+Confidence 0.90+: high confidence — archaeology is substantially more likely than any single false-positive explanation.
 
 recommended_check: pick the single most useful next step from the allowed enum. It must be realistic for the views actually listed in this request (e.g., if only "rgb" is provided, use "rgb" or "field_check" only—do not recommend hillshade, ndsm, dsm, dtm, or slope unless those views were actually provided for this tile).
 
 Keep visual_evidence short and concrete; name which provided view(s) support the decision.
 Return only the strongest distinct candidates up to the limit stated in the task. Do not add weak or duplicate candidates to fill the list.
-
-Return exactly one valid JSON object using the existing schema:
-{
-  "candidates": [
-    {
-      "confidence": number between 0 and 1,
-      "candidate_type": "mound | tumulus | ring_ditch | wall_trace | road_trace | foundation | enclosure | terrace | unknown",
-      "bbox_xyxy": [x1, y1, x2, y2],
-      "visual_evidence": "short concrete reason",
-      "possible_false_positive": "strongest non-archaeological explanation considered",
-      "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
-    }
-  ],
-  "visual_evidence": "short reason when candidates is empty",
-  "possible_false_positive": "strongest non-archaeological explanation when candidates is empty",
-  "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
-}
-
-Each candidate bbox_xyxy must tightly enclose one detected feature in tile pixel coordinates.
-If no candidate meets the threshold, return "candidates": [] and a concise possible_false_positive.
-Do not return markdown. Do not write any text outside the JSON object.

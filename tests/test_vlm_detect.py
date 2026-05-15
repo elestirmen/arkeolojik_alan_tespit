@@ -162,3 +162,34 @@ def test_resume_records_require_matching_prompt_fingerprint(tmp_path: Path):
     )
     assert records == []
     assert processed == set()
+
+
+def test_resume_invalid_json_errors_are_retried(tmp_path: Path):
+    resume_path = tmp_path / "resume.jsonl"
+    prompt_fingerprint = vlm_lmstudio._prompt_fingerprint(None, None)
+    resume_path.write_text(
+        (
+            '{"tile_index":1,"tile_row":0,"tile_col":0,"tile_width":8,"tile_height":8,'
+            '"used_views":["rgb"],"analysis_mode":"rgb_only","source_kind":"rgb",'
+            f'"prompt_fingerprint":"{prompt_fingerprint}",'
+            '"status":"error","error_type":"invalid_json"}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    records, processed = vlm_lmstudio._load_resume_records(
+        resume_path,
+        total_tiles=1,
+        raster_width=8,
+        raster_height=8,
+        tile=8,
+        overlap=0,
+        selected_views=["rgb"],
+        analysis_mode="rgb_only",
+        source_kind="rgb",
+        prompt_fingerprint=prompt_fingerprint,
+        logger=vlm_lmstudio.LOGGER,
+    )
+
+    assert records == []
+    assert processed == set()
