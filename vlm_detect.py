@@ -12,6 +12,8 @@ import json
 import logging
 import re
 import sys
+import urllib.parse
+import urllib.request
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +30,12 @@ try:
 except ImportError:  # pragma: no cover - optional dependency message is clearer at runtime
     yaml = None  # type: ignore[assignment]
 
-from vlm_lmstudio_detector import VlmLmStudioConfig, run_vlm_lmstudio_detection
+from vlm_lmstudio_detector import (
+    VlmLmStudioConfig,
+    _default_stage1_guidance,
+    _default_stage2_guidance,
+    run_vlm_lmstudio_detection,
+)
 
 
 LOGGER = logging.getLogger("vlm_detect")
@@ -71,6 +78,8 @@ VLM_KEY_ALIASES = {
     "vlm_reload_pause_seconds": "reload_pause_seconds",
     "vlm_timeout": "timeout",
     "vlm_temperature": "temperature",
+    "vlm_featureless_std_threshold": "featureless_std_threshold",
+    "vlm_cross_tile_iou_threshold": "cross_tile_iou_threshold",
 }
 
 
@@ -101,6 +110,8 @@ class StandaloneVlmConfig:
     timeout: int = 120
     temperature: float = 0.0
     log_level: str = "INFO"
+    featureless_std_threshold: float = 4.0
+    cross_tile_iou_threshold: float = 0.5
 
 
 def default_config_path() -> str:
@@ -363,6 +374,40 @@ def resolve_vlm_band_indexes(input_path: Path, band_spec: str) -> Optional[Tuple
     return parsed
 
 
+def _validate_startup_preconditions(input_path: Path, config: StandaloneVlmConfig) -> None:
+    """Çalışma başlamadan önce kritik ön koşulları doğrula; manifest yazılmadan hata fırlat."""
+    if not input_path.exists():
+        raise FileNotFoundError(f"Girdi GeoTIFF bulunamadi: {input_path}")
+
+    for label, prompt_path in (
+        ("Stage 1 prompt", config.prompt_stage1_path),
+        ("Stage 2 prompt", config.prompt_stage2_path),
+    ):
+        if prompt_path:
+            p = Path(prompt_path)
+            if not p.exists():
+                raise FileNotFoundError(f"{label} dosyasi bulunamadi: {p}")
+            if p.stat().st_size == 0:
+                raise ValueError(f"{label} dosyasi bos: {p}")
+
+    parsed = urllib.parse.urlparse(str(config.base_url or ""))
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"vlm_base_url gecerli bir HTTP/HTTPS URL olmali, alindi: {config.base_url!r}"
+        )
+
+    models_url = str(config.base_url).rstrip("/") + "/v1/models"
+    try:
+        req = urllib.request.Request(models_url, headers={"Accept": "application/json"})
+        urllib.request.urlopen(req, timeout=3)
+    except Exception as exc:
+        LOGGER.warning(
+            "LM Studio sunucusuna erisilemedi (%s): %s — sunucu hazir degil mi?",
+            models_url,
+            exc,
+        )
+
+
 def write_run_manifest(out_prefix: Path, config: StandaloneVlmConfig, band_indexes: Optional[Tuple[int, ...]]) -> Path:
     manifest_path = _output_base_path(out_prefix).parent / f"{_output_base_path(out_prefix).name}_vlm_run_config.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -373,10 +418,63 @@ def write_run_manifest(out_prefix: Path, config: StandaloneVlmConfig, band_index
     return manifest_path
 
 
+def _load_prompt_for_run_info(prompt_path: Optional[str], default_text: str) -> Tuple[str, str]:
+    if prompt_path is None:
+        return "default", default_text.strip()
+    path = Path(prompt_path)
+    return str(path), path.read_text(encoding="utf-8").strip()
+
+
+def _run_info_parameter_value(name: str, value: Any) -> Any:
+    if name in {"api_key"}:
+        return "<redacted>"
+    return value
+
+
+def write_run_info_txt(out_prefix: Path, config: StandaloneVlmConfig, band_indexes: Optional[Tuple[int, ...]]) -> Path:
+    base = _output_base_path(out_prefix)
+    info_path = base.parent / f"{base.name}_vlm_parameters_prompts.txt"
+    info_path.parent.mkdir(parents=True, exist_ok=True)
+
+    parameters = asdict(config)
+    parameters["resolved_band_indexes"] = list(band_indexes) if band_indexes is not None else "auto"
+    parameters["session_run_id"] = SESSION_RUN_ID
+
+    stage1_source, stage1_prompt = _load_prompt_for_run_info(config.prompt_stage1_path, _default_stage1_guidance())
+    stage2_source, stage2_prompt = _load_prompt_for_run_info(config.prompt_stage2_path, _default_stage2_guidance())
+
+    lines = [
+        "VLM run parameters",
+        "==================",
+    ]
+    for name in sorted(parameters):
+        value = _run_info_parameter_value(name, parameters[name])
+        lines.append(f"{name}: {value}")
+
+    lines.extend(
+        [
+            "",
+            "Stage 1 prompt",
+            "==============",
+            f"source: {stage1_source}",
+            "",
+            stage1_prompt,
+            "",
+            "Stage 2 prompt",
+            "==============",
+            f"source: {stage2_source}",
+            "",
+            stage2_prompt,
+            "",
+        ]
+    )
+    info_path.write_text("\n".join(lines), encoding="utf-8")
+    return info_path
+
+
 def run(config: StandaloneVlmConfig) -> int:
     input_path = Path(config.input)
-    if not input_path.exists():
-        raise FileNotFoundError(f"Girdi GeoTIFF bulunamadi: {input_path}")
+    _validate_startup_preconditions(input_path, config)
 
     out_prefix = resolve_out_prefix(input_path, config)
     band_indexes = resolve_vlm_band_indexes(input_path, config.bands)
@@ -391,10 +489,12 @@ def run(config: StandaloneVlmConfig) -> int:
             LOGGER.info("VLM resume JSONL bulundu: %s", resume_jsonl_path)
 
     manifest_path = write_run_manifest(out_prefix, config, band_indexes)
+    run_info_path = write_run_info_txt(out_prefix, config, band_indexes)
     LOGGER.info("VLM-only tarama basliyor")
     LOGGER.info("Girdi: %s", input_path)
     LOGGER.info("Cikti on eki: %s", out_prefix)
     LOGGER.info("Run config: %s", manifest_path)
+    LOGGER.info("Parametre/prompt TXT: %s", run_info_path)
 
     summary = run_vlm_lmstudio_detection(
         input_path=input_path,
@@ -421,6 +521,8 @@ def run(config: StandaloneVlmConfig) -> int:
             max_candidates_per_tile=config.max_candidates_per_tile,
             reload_every_tiles=config.reload_every_tiles,
             reload_pause_seconds=config.reload_pause_seconds,
+            featureless_std_threshold=config.featureless_std_threshold,
+            cross_tile_iou_threshold=config.cross_tile_iou_threshold,
         ),
         logger=LOGGER,
     )

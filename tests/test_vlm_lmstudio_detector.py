@@ -102,20 +102,15 @@ def test_prompt_includes_configured_gsd_scale():
     assert "0.30 m ground sampling distance" in prompt
     assert "307 m x 307 m" in prompt
     assert "nadir imagery" in prompt
-    assert "Cappadocia cultural and volcanic landscape" in prompt
-    assert "human-made spatial organization" in prompt
-    assert "old ruin remains" in prompt
-    assert "low wall traces, collapsed wall lines, stone alignments" in prompt
-    assert "rock-cut cultural features" in prompt
-    assert "A single isolated bush, tree, shadow, pit, rock, color patch, or dark spot is never enough" in prompt
-    assert "Vegetation veto" in prompt
-    assert "Cappadocia geology veto" in prompt
-    assert "fairy-chimney or hoodoo bases" in prompt
-    assert "the anomaly lacks coherent archaeology-like geometry" in prompt
-    assert "below 0.75 means not strong enough for export" in prompt
+    assert "coherent, plausible archaeological patterns" in prompt
+    assert "mounds, rings, wall or foundation lines, enclosures, terraces" in prompt
+    assert "Ignore isolated shadows, vegetation, modern or agricultural lines" in prompt
+    assert "clearly organized and supported by the provided views" in prompt
+    assert "Cappadocia" not in prompt
+    assert "Kapadokya" not in prompt
 
 
-def test_review_prompt_has_cappadocia_false_positive_gate():
+def test_review_prompt_has_general_false_positive_gate():
     prompt = vlm._build_review_prompt(
         {
             "tile_index": 1,
@@ -132,10 +127,10 @@ def test_review_prompt_has_cappadocia_false_positive_gate():
         source_kind="rgb",
     )
 
-    assert "Be more skeptical than the first pass" in prompt
-    assert "common false positives" in prompt
-    assert "vegetation, tree crown" in prompt
-    assert "Require coherent morphology, plausible archaeological scale, and at least two supporting cues" in prompt
+    assert "Review the proposed candidate skeptically" in prompt
+    assert "at least two supporting cues" in prompt
+    assert "archaeological explanation clearly stronger" in prompt
+    assert "natural, modern, vegetation, shadow, or image-artifact" in prompt
 
 
 def test_prompt_uses_external_stage1_guidance():
@@ -198,6 +193,14 @@ def test_hillshade_prompt_explains_grayscale_relief_source():
 def test_vlm_default_confidence_threshold_is_conservative():
     assert vlm.VlmLmStudioConfig().confidence_threshold == 0.75
     assert vlm.VlmLmStudioConfig().max_candidates_per_tile == 3
+
+
+def test_confidence_tier_labels_include_very_high_bucket():
+    assert vlm._confidence_tier(0.96) == "very_high_095"
+    assert vlm._confidence_tier(0.92) == "strong_090"
+    assert vlm._confidence_tier(0.76) == "candidate_075"
+    assert vlm._confidence_tier(0.42) == "below_075"
+    assert vlm._confidence_tier(0.0) == "none"
 
 
 def test_prompt_requests_bounded_candidate_list():
@@ -443,9 +446,9 @@ def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
         "tile_row": 0,
         "tile_col": 0,
         "candidate": True,
-        "confidence": 0.91,
+        "confidence": 0.96,
         "review_confirmed": True,
-        "review_confidence": 0.91,
+        "review_confidence": 0.96,
         "candidate_type": "ring_ditch",
         "google_maps_url": "",
         "status": "ok",
@@ -487,13 +490,18 @@ def test_candidate_xlsx_sorts_found_and_adds_not_found_sheet(tmp_path: Path):
     found_ws = wb["vlm_candidates"]
     first_stage_ws = wb["ilk_asama_pozitifler"]
     second_stage_ws = wb["ikinci_asama_pozitifler"]
+    very_high_ws = wb["kesin_095"]
     missing_ws = wb["bulunmayan_tilelar"]
     tile_col = vlm.CSV_COLUMNS.index("tile_index") + 1
+    review_tier_col = vlm.CSV_COLUMNS.index("review_confidence_tier") + 1
     reason_col = vlm.NOT_FOUND_COLUMNS.index("not_found_reason") + 1
 
     assert [found_ws.cell(row=2, column=tile_col).value, found_ws.cell(row=3, column=tile_col).value] == [1, 2]
     assert [first_stage_ws.cell(row=2, column=tile_col).value, first_stage_ws.cell(row=3, column=tile_col).value] == [1, 2]
     assert [second_stage_ws.cell(row=2, column=tile_col).value, second_stage_ws.cell(row=3, column=tile_col).value] == [1, 2]
+    assert very_high_ws.max_row == 2
+    assert very_high_ws.cell(row=2, column=tile_col).value == 1
+    assert very_high_ws.cell(row=2, column=review_tier_col).value == "very_high_095"
     assert [missing_ws.cell(row=2, column=tile_col).value, missing_ws.cell(row=3, column=tile_col).value] == [3, 4]
     assert [
         missing_ws.cell(row=2, column=reason_col).value,
@@ -764,7 +772,7 @@ def test_bad_json_response_is_recorded_with_raw_response(tmp_path: Path, monkeyp
     summary = vlm.run_vlm_lmstudio_detection(
         input_path=tif_path,
         out_prefix=tmp_path / "out" / "rgb",
-        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1),
+        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1, featureless_std_threshold=0.0),
     )
 
     assert summary.processed_tiles == 1
@@ -808,7 +816,7 @@ def test_incomplete_a1_json_response_is_retried_once(tmp_path: Path, monkeypatch
     summary = vlm.run_vlm_lmstudio_detection(
         input_path=tif_path,
         out_prefix=tmp_path / "out" / "rgb",
-        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1),
+        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1, featureless_std_threshold=0.0),
     )
 
     assert responses == []
@@ -913,7 +921,7 @@ def test_exportable_vlm_candidate_is_reviewed_before_final_export(tmp_path: Path
     summary = vlm.run_vlm_lmstudio_detection(
         input_path=tif_path,
         out_prefix=tmp_path / "out" / "rgb",
-        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1, confidence_threshold=0.75),
+        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1, confidence_threshold=0.75, featureless_std_threshold=0.0),
     )
 
     assert len(prompts) == 2
@@ -974,7 +982,7 @@ def test_multi_candidate_tile_reviews_and_exports_each_candidate(tmp_path: Path,
     summary = vlm.run_vlm_lmstudio_detection(
         input_path=tif_path,
         out_prefix=tmp_path / "out" / "rgb",
-        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1, confidence_threshold=0.75),
+        config=vlm.VlmLmStudioConfig(tile=8, overlap=0, max_tiles=1, confidence_threshold=0.75, featureless_std_threshold=0.0),
     )
 
     assert len(prompts) == 3
@@ -1161,6 +1169,7 @@ def test_partial_resume_continues_new_tiles_before_reviewing_old_candidates(tmp_
             max_tiles=2,
             resume=True,
             resume_jsonl_path=resume_path,
+            featureless_std_threshold=0.0,
         ),
     )
 
@@ -1245,6 +1254,7 @@ def test_resume_skips_tiles_already_present_in_jsonl(tmp_path: Path, monkeypatch
             export_every=1,
             resume=True,
             resume_jsonl_path=resume_path,
+            featureless_std_threshold=0.0,
         ),
     )
 

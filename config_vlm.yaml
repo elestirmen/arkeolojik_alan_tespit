@@ -52,3 +52,12 @@ reload_pause_seconds: 5
 timeout: 120
 temperature: 0.0
 log_level: "INFO"
+
+# Tekdüze/boş tile filtresi: tüm RGB kanalları bu std eşiğinin altındaysa tile VLM'e gönderilmez.
+# Artırırsanız daha fazla tile atlanır; azaltırsanız daha az atlanır. (0 = devre dışı)
+featureless_std_threshold: 4.0
+
+# Çapraz-tile deduplication: export çıktılarında (CSV/GeoJSON/GPKG) tile sınırındaki
+# tekrar tespitleri birleştirir. Ham JSONL kayıtları değişmez.
+# Değeri 0.0 yaparsanız deduplication kapatılır; 1.0 tüm örtüşmeleri birleştirir.
+cross_tile_iou_threshold: 0.5

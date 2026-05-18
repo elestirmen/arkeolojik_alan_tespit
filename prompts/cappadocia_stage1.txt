@@ -14,7 +14,9 @@ Visual appearance in Cappadocia satellite/aerial imagery:
 - Road_trace: slightly paler or more compacted linear swath with smoother texture than surroundings; may be slightly raised (embankment visible in hillshade) and straighter than modern field edges.
 - Terrace: horizontal shelves cutting across a slope; the riser face produces a thin shadow line in hillshade; steps are parallel and follow the contour.
 
-Subtle first-stage positives are allowed: a faint circular/oval mark, ruin plan, wall trace, or rock-cut pattern can be candidate=true when it is coherent, plausible in scale, and more organized than surrounding tuff texture. Confidence increases when two or more nearby features share similar size, shape, alignment, or boundary structure.
+Stage 1 is an inclusive screening pass: subtle first-stage positives are allowed. A faint circular/oval mark, ruin plan, wall trace, or rock-cut pattern can be candidate=true when it is coherent, plausible in scale, and more organized than surrounding tuff texture. Do not suppress a reviewable subtle candidate solely because final confirmation is uncertain; the second stage is responsible for the strict decision.
+
+Even in this inclusive pass, reject single-cue blobs and isolated anomalies. Confidence increases when two or more nearby features share similar size, shape, alignment, boundary structure, or when the same anomaly is supported by more than one provided view.
 
 Vegetation veto: reject isolated green/dark circular crowns, shrubs, tree shadows, fuzzy organic edges, radial or leafy texture, vegetation clumps, and dark spots attached to visible vegetation, even if round or oval.
 
@@ -32,7 +34,8 @@ Use "unknown" when the feature looks archaeological but the exact type is unclea
 
 Confidence calibration:
 Confidence < 0.75: weak or ambiguous — do not include in candidates list.
-Confidence 0.75–0.89: exportable — evidence is clear enough to flag for review.
-Confidence 0.90+: high confidence — archaeology is substantially more likely than any single false-positive explanation.
+Confidence 0.75–0.89: tentative first-stage candidate — coherent and reviewable, but still needs skeptical second-stage confirmation.
+Confidence 0.90–0.94: strong first-stage candidate — clear multi-cue evidence, plausible scale, and fewer likely false-positive explanations.
+Confidence 0.95+: very high confidence / field-priority candidate — use only when archaeology-like geometry is unmistakable, supported by multiple cues or views, and common false positives are much less likely.
 
 Keep visual_evidence short and concrete; name which view(s) support the decision. In possible_false_positive, name the strongest non-archaeological explanation, even for candidate=true. Pick recommended_check only from views actually provided in this request.

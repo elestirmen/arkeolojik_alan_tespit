@@ -118,6 +118,36 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
     assert config.prompt_stage2_path == str((Path.cwd() / "cli_stage2.txt").resolve(strict=False))
 
 
+def test_run_info_txt_includes_parameters_and_prompt_text(tmp_path: Path):
+    stage1_path = tmp_path / "stage1.txt"
+    stage2_path = tmp_path / "stage2.txt"
+    stage1_path.write_text("stage one prompt", encoding="utf-8")
+    stage2_path.write_text("stage two prompt", encoding="utf-8")
+
+    config = vlm_detect.StandaloneVlmConfig(
+        input=str(tmp_path / "input.tif"),
+        api_key="secret-key",
+        tile=8,
+        overlap=0,
+        prompt_stage1_path=str(stage1_path),
+        prompt_stage2_path=str(stage2_path),
+    )
+
+    info_path = vlm_detect.write_run_info_txt(tmp_path / "out" / "rgb", config, (1, 2, 3))
+    text = info_path.read_text(encoding="utf-8")
+
+    assert info_path.name == "rgb_vlm_parameters_prompts.txt"
+    assert "tile: 8" in text
+    assert "overlap: 0" in text
+    assert "resolved_band_indexes: [1, 2, 3]" in text
+    assert "api_key: <redacted>" in text
+    assert "secret-key" not in text
+    assert f"source: {stage1_path}" in text
+    assert "stage one prompt" in text
+    assert f"source: {stage2_path}" in text
+    assert "stage two prompt" in text
+
+
 def test_resume_records_require_matching_prompt_fingerprint(tmp_path: Path):
     resume_path = tmp_path / "resume.jsonl"
     prompt_fingerprint = vlm_lmstudio._prompt_fingerprint("stage 1 prompt", "stage 2 prompt")

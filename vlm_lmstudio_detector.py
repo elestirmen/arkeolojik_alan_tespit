@@ -8,7 +8,9 @@ vision-language model, and writes separate candidate outputs.
 from __future__ import annotations
 
 import base64
+import collections
 import csv
+import random
 import hashlib
 import io
 import json
@@ -35,6 +37,9 @@ LOGGER = logging.getLogger("vlm_lmstudio_detector")
 AUTO_MODEL_TOKENS = {"auto", "active", "current", "loaded"}
 DEFAULT_MAX_CANDIDATES_PER_TILE = 3
 SAME_TILE_DEDUPE_IOU_THRESHOLD = 0.75
+EXPORTABLE_CONFIDENCE_TIER_THRESHOLD = 0.75
+STRONG_CONFIDENCE_TIER_THRESHOLD = 0.90
+VERY_HIGH_CONFIDENCE_TIER_THRESHOLD = 0.95
 
 VIEW_ALIASES = {
     "rgb": "rgb",
@@ -141,6 +146,10 @@ class VlmLmStudioConfig:
     max_candidates_per_tile: int = DEFAULT_MAX_CANDIDATES_PER_TILE
     reload_every_tiles: int = 0
     reload_pause_seconds: float = 5.0
+    featureless_std_threshold: float = 4.0
+    cross_tile_iou_threshold: float = 0.5
+    retry_max_attempts: int = 3
+    retry_base_delay_seconds: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -311,6 +320,7 @@ def run_vlm_lmstudio_detection(
                 first_stage_records=first_stage_records,
                 all_records=records,
                 confidence_threshold=config.confidence_threshold,
+                cross_tile_iou_threshold=config.cross_tile_iou_threshold,
                 logger=log,
             )
             log.info("VLM resume tum hedef tile'lari kapsiyor; LM Studio'ya yeni istek gonderilmedi.")
@@ -348,6 +358,7 @@ def run_vlm_lmstudio_detection(
                 first_stage_records=first_stage_records,
                 all_records=[*records, run_record],
                 confidence_threshold=config.confidence_threshold,
+                cross_tile_iou_threshold=config.cross_tile_iou_threshold,
                 logger=log,
             )
             raise
@@ -375,6 +386,7 @@ def run_vlm_lmstudio_detection(
                     first_stage_records=first_stage_records,
                     all_records=records,
                     confidence_threshold=config.confidence_threshold,
+                    cross_tile_iou_threshold=config.cross_tile_iou_threshold,
                     logger=log,
                 )
                 log.info(
@@ -387,6 +399,7 @@ def run_vlm_lmstudio_detection(
                 )
 
             progress_iter = _generate_windows(src.width, src.height, config.tile, config.overlap)
+            tile_durations: collections.deque = collections.deque(maxlen=20)
             with tqdm(
                 total=total_tiles,
                 initial=min(len(processed_tile_indexes), total_tiles),
@@ -410,6 +423,7 @@ def run_vlm_lmstudio_detection(
                     if tile_index in processed_tile_indexes:
                         continue
 
+                    tile_t0 = time.monotonic()
                     tile_record_base = _base_tile_record(
                         tile_index=tile_index,
                         row=row,
@@ -434,6 +448,16 @@ def run_vlm_lmstudio_detection(
                                     reason="RGB tile is empty, nodata, transparent, or effectively black.",
                                 )
                             ]
+                        elif _is_featureless_rgb_tile(
+                            tile_arrays["rgb"], min_std=config.featureless_std_threshold
+                        ):
+                            tile_records = [
+                                _skipped_tile_record(
+                                    tile_record_base,
+                                    reason="RGB tile has insufficient spatial variation (featureless/uniform).",
+                                    error_type="featureless_tile",
+                                )
+                            ]
                         else:
                             rendered = _render_views(tile_arrays, selected_views, pixel_size=pixel_size)
                             prompt = _build_prompt(
@@ -447,7 +471,7 @@ def run_vlm_lmstudio_detection(
                                 max_candidates_per_tile=config.max_candidates_per_tile,
                                 confidence_threshold=config.confidence_threshold,
                             )
-                            response_text, use_response_format = _request_vlm_json(
+                            response_text, use_response_format = _request_vlm_json_with_retry(
                                 client=client,
                                 config=config,
                                 prompt=prompt,
@@ -463,7 +487,7 @@ def run_vlm_lmstudio_detection(
                                     tile_index,
                                     str(parse_exc)[:240],
                                 )
-                                response_text, use_response_format = _request_vlm_json(
+                                response_text, use_response_format = _request_vlm_json_with_retry(
                                     client=client,
                                     config=config,
                                     prompt=_build_json_retry_prompt(
@@ -569,6 +593,7 @@ def run_vlm_lmstudio_detection(
                         record for record in tile_records if _is_review_confirmed_candidate(record, config.confidence_threshold)
                     )
 
+                    tile_durations.append(time.monotonic() - tile_t0)
                     pbar.update(1)
                     tiles_since_export += 1
                     tiles_since_reload += 1
@@ -579,6 +604,7 @@ def run_vlm_lmstudio_detection(
                         skipped_count=skipped_count,
                         raw_candidate_count=raw_candidate_count,
                         candidate_records=candidate_records,
+                        sec_per_tile=float(np.mean(tile_durations)) if tile_durations else None,
                     )
                     if config.export_every > 0 and tiles_since_export >= config.export_every:
                         paths = _write_candidate_outputs(
@@ -588,6 +614,7 @@ def run_vlm_lmstudio_detection(
                             first_stage_records=first_stage_records,
                             all_records=records,
                             confidence_threshold=config.confidence_threshold,
+                            cross_tile_iou_threshold=config.cross_tile_iou_threshold,
                             logger=log,
                         )
                         tiles_since_export = 0
@@ -611,6 +638,7 @@ def run_vlm_lmstudio_detection(
                             first_stage_records=first_stage_records,
                             all_records=records,
                             confidence_threshold=config.confidence_threshold,
+                            cross_tile_iou_threshold=config.cross_tile_iou_threshold,
                             logger=log,
                         )
                         log.info(
@@ -704,8 +732,11 @@ def run_vlm_lmstudio_detection(
             first_stage_records=first_stage_records,
             all_records=records,
             confidence_threshold=config.confidence_threshold,
+            cross_tile_iou_threshold=config.cross_tile_iou_threshold,
             logger=log,
         )
+
+        _log_run_summary_statistics(records, config.confidence_threshold, log)
 
         return VlmDetectionSummary(
             paths=paths,
@@ -1338,6 +1369,24 @@ def _is_empty_rgb_tile(channels: Sequence[np.ndarray]) -> bool:
     return False
 
 
+def _is_featureless_rgb_tile(channels: Sequence[np.ndarray], min_std: float = 4.0) -> bool:
+    """Tekdüze/düz tile'ları (bulut, su, tarla vb.) VLM'e göndermeden atlar.
+
+    Tüm RGB kanallarının geçerli piksel std'si min_std altındaysa True döner.
+    """
+    if len(channels) < 3:
+        return False
+    stacked = np.stack([np.asarray(ch, dtype=np.float32) for ch in channels[:3]], axis=0)
+    valid = np.all(np.isfinite(stacked), axis=0)
+    if not np.any(valid):
+        return False
+    for ch in stacked:
+        ch_valid = ch[valid]
+        if float(np.nanstd(ch_valid)) >= min_std:
+            return False
+    return True
+
+
 def _render_views(
     arrays: Dict[str, Any],
     selected_views: Sequence[str],
@@ -1650,6 +1699,51 @@ def _message_content_to_text(content: Any) -> str:
     return str(content)
 
 
+def _is_retryable_api_exception(exc: Exception) -> bool:
+    """Geçici API hatalarını kalıcı hatalardan ayırt eder."""
+    error_type = _classify_exception(exc)
+    return error_type in ("api_error", "connection_failed")
+
+
+def _request_vlm_json_with_retry(
+    *,
+    client: Any,
+    config: VlmLmStudioConfig,
+    prompt: str,
+    rendered_views: Sequence[Tuple[str, str]],
+    use_response_format: bool,
+    logger: logging.Logger,
+) -> Tuple[str, bool]:
+    """_request_vlm_json sarmalayıcısı: geçici hatalarda exponential backoff ile yeniden dener."""
+    max_attempts = max(1, config.retry_max_attempts)
+    base_delay = max(0.0, config.retry_base_delay_seconds)
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return _request_vlm_json(
+                client=client,
+                config=config,
+                prompt=prompt,
+                rendered_views=rendered_views,
+                use_response_format=use_response_format,
+                logger=logger,
+            )
+        except Exception as exc:
+            if not _is_retryable_api_exception(exc) or attempt >= max_attempts - 1:
+                raise
+            last_exc = exc
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 0.1)
+            logger.warning(
+                "VLM API gecici hata (deneme %d/%d); %.1fs beklenip tekrar denenecek: %s",
+                attempt + 1,
+                max_attempts,
+                delay,
+                str(exc)[:200],
+            )
+            time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
 def _source_kind_prompt_context(source_kind: str, selected_views: Sequence[str]) -> str:
     kind = str(source_kind or "auto").strip().lower()
     has_rgb_label = "rgb" in {str(view).strip().lower() for view in selected_views}
@@ -1683,7 +1777,7 @@ def _source_kind_prompt_context(source_kind: str, selected_views: Sequence[str])
         return (
             "Source interpretation: DTM/DEM bare-earth terrain source. "
             "Focus on landform morphology and micro-relief; do not infer optical color or vegetation. Be strict with natural gullies, erosion, "
-            "volcanic tuff forms, and drainage patterns. "
+            "rough terrain forms, and drainage patterns. "
         )
     if kind == "mixed_topo":
         return (
@@ -1706,60 +1800,19 @@ def _prompt_guidance_or_default(guidance_text: Optional[str], default_text: str)
 
 
 def _default_stage1_guidance() -> str:
-    return "".join(
-        [
-            "Regional context: this tile is from the Cappadocia cultural and volcanic landscape. Archaeological traces may be subtle and embedded "
-            "in tuff terrain, but natural erosion can strongly mimic archaeology. ",
-            "Primary decision rule: look for human-made spatial organization, not isolated visual anomalies. Set candidate=true only when the feature "
-            "shows coherent artificial-looking morphology plus either a contextual cue or a repeated/paired pattern. Do not mark a feature as "
-            "candidate=true merely because it is round, dark, pale, or shadowed. ",
-            "Cappadocia-relevant targets include: 1) circular/oval features such as tumuli, robbed or eroded mounds, cairn-like rings, circular soil "
-            "marks, paired or clustered faint rings, central depressions, and partial raised rims; 2) rock-cut cultural features such as carved "
-            "openings, cave-room facades, chapel/monastery-like complexes, courtyard-like arrangements, artificial entrances, dovecote-like repeated "
-            "niches, and old paths leading to openings; 3) old ruin remains such as low wall traces, collapsed wall lines, stone alignments, "
-            "foundation outlines, rectilinear or courtyard-like plans, room clusters, enclosures, ruined farmsteads or hamlets, corners, entrances, "
-            "and pale stone/soil marks that form an organized plan; 4) landscape infrastructure such as old route alignments, terraces, water "
-            "channels, field systems, settlement edges, and spatially organized banks or ditches. ",
-            "First-stage screening should still catch subtle archaeology: a faint circular/oval feature, ruin plan, wall trace, or rock-cut pattern "
-            "can be candidate=true when it is coherent, plausible in scale, and more organized than the surrounding tuff texture. Confidence should "
-            "increase when two or more nearby features share similar size, shape, boundary structure, alignment, or contextual relationship. ",
-            "A single strong morphology cue can be enough only when it is a coherent artificial-looking boundary, ruin line, mound edge, central "
-            "depression, or rock-cut/courtyard pattern. A single isolated bush, tree, shadow, pit, rock, color patch, or dark spot is never enough. ",
-            "Before marking candidate=true, actively test alternative explanations: agriculture, field parcel edges, ploughing, irrigation, "
-            "drainage, roads or tracks, modern buildings or walls, vehicle marks, vegetation rows, individual tree crowns, natural gullies, "
-            "erosion, geology, shadows, seams, compression artifacts, and tile-edge artifacts. ",
-            "Vegetation veto: reject isolated green/dark circular crowns, shrubs, tree shadows, fuzzy organic edges, radial or leafy texture, "
-            "vegetation clumps, and dark spots attached to visible vegetation, even if they are round or oval. ",
-            "Cappadocia geology veto: reject volcanic tuff erosion pits, fairy-chimney or hoodoo bases, caprock shadows, natural gullies, drainage "
-            "scars, collapse scars, steep/irregular badland texture, isolated rock outcrops, random stone scatter, and natural cracks unless there "
-            "is clear artificial spatial organization. ",
-            "Modern/agricultural veto: reject modern tracks, field parcel edges, active roads, vineyards, recent construction debris, tourist or "
-            "agricultural disturbance, and regular agricultural traces unless they show older ruin-like organization not explained by modern use. ",
-            "If a non-archaeological explanation is as plausible as archaeology and the anomaly lacks coherent archaeology-like geometry, set candidate=false. ",
-            "Candidate-type rules: mound/tumulus requires a coherent raised or soil/vegetation signature with plausible size; use mound or tumulus "
-            "for circular/oval mound-like features, including robbed or eroded examples with a central depression; ring_ditch requires a continuous "
-            "or strongly implied circular/oval ditch pattern; enclosure can be used when the boundary is dominant; wall_trace/foundation/enclosure "
-            "requires intentional lines, corners, rooms, courtyard plans, or enclosed geometry; road_trace requires an old alignment that is not a "
-            "modern road, track, or field edge; use unknown when the pattern looks archaeological but the exact type is unclear. ",
-            "If the evidence is weak, ambiguous, modern-looking, only natural texture, only vegetation/shadow, or only one non-morphological cue, "
-            "set candidate=false. ",
-            "Confidence calibration: below 0.75 means not strong enough for export, 0.75 means clear multi-cue evidence, "
-            "0.90 means very strong evidence with archaeology more likely than common false positives. ",
-            "Keep visual_evidence short and concrete; mention the specific views that support the decision. ",
-            "In possible_false_positive, name the strongest non-archaeological explanation considered, even for candidate=true. ",
-            "In recommended_check, choose the single most useful next check from the allowed values. ",
-        ]
+    return (
+        "Flag only coherent, plausible archaeological patterns such as mounds, rings, wall or foundation lines, "
+        "enclosures, terraces, old routes, or organized rock-cut/opening-like features. "
+        "Ignore isolated shadows, vegetation, modern or agricultural lines, image seams, compression artifacts, and natural erosion "
+        "unless the geometry is clearly organized and supported by the provided views."
     )
 
 
 def _default_stage2_guidance() -> str:
-    return "".join(
-        [
-            "Be more skeptical than the first pass. Confirm only if archaeology is clearly more likely than common false positives. ",
-            "Reject if the feature can plausibly be a road/track, field boundary, ploughing, irrigation/drainage, vegetation, tree crown, "
-            "building/modern wall, shadow, erosion, geology, image seam, compression artifact, or tile-edge artifact. ",
-            "Require coherent morphology, plausible archaeological scale, and at least two supporting cues. ",
-        ]
+    return (
+        "Review the proposed candidate skeptically and confirm only when the visible geometry, scale, and at least two supporting cues "
+        "make an archaeological explanation clearly stronger than natural, modern, vegetation, shadow, or image-artifact explanations. "
+        "If the evidence is weak, single-cue, or plausibly non-archaeological, reject it."
     )
 
 
@@ -1839,7 +1892,7 @@ def _build_prompt(
             "Do not interpret gray tone as optical color, vegetation greenness, soil color, or photographic shadow unless another view supports it. "
             "Base the decision on coherent relief/texture geometry, plausible scale, organized boundaries, rims, depressions, banks, walls, terraces, "
             "or route-like alignments visible in the source image. "
-            "Be strict with natural drainage, volcanic tuff erosion, badland texture, illumination artifacts, and isolated dark or bright spots."
+            "Be strict with natural drainage, rough erosional texture, illumination artifacts, and isolated dark or bright spots."
         )
     elif analysis_mode == "rgb_only":
         mode_text = (
@@ -1967,7 +2020,7 @@ def _review_candidate_record(
             source_kind=source_kind,
             guidance_text=review_guidance_text,
         )
-        review_response_text, use_response_format = _request_vlm_json(
+        review_response_text, use_response_format = _request_vlm_json_with_retry(
             client=client,
             config=config,
             prompt=review_prompt,
@@ -1984,7 +2037,7 @@ def _review_candidate_record(
                 record.get("candidate_index"),
                 str(parse_exc)[:240],
             )
-            review_response_text, use_response_format = _request_vlm_json(
+            review_response_text, use_response_format = _request_vlm_json_with_retry(
                 client=client,
                 config=config,
                 prompt=_build_json_retry_prompt(
@@ -2501,7 +2554,9 @@ def _run_error_record(
     return record
 
 
-def _skipped_tile_record(base_record: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
+def _skipped_tile_record(
+    base_record: Dict[str, Any], *, reason: str, error_type: str = "empty_tile"
+) -> Dict[str, Any]:
     record = dict(base_record)
     record.update(
         {
@@ -2522,7 +2577,7 @@ def _skipped_tile_record(base_record: Dict[str, Any], *, reason: str) -> Dict[st
             "possible_false_positive": "",
             "recommended_check": "rgb",
             "status": "skipped",
-            "error_type": "empty_tile",
+            "error_type": error_type,
             "error_message": reason,
             "geometry": None,
         }
@@ -2601,6 +2656,30 @@ def _write_jsonl_records(path: Path, records: Sequence[Dict[str, Any]]) -> None:
             _write_jsonl_line(fh, record)
 
 
+def _cluster_cross_tile_candidates(
+    records: Sequence[Dict[str, Any]], iou_threshold: float = 0.5
+) -> List[Dict[str, Any]]:
+    """Tile sınırlarında oluşan tekrar tespitleri birleştirir; en yüksek güvenliliği tutar.
+
+    JSONL'i değiştirmez — yalnızca export çıktılarına (CSV/GeoJSON/GPKG) uygulanır.
+    """
+    sorted_recs = sorted(records, key=lambda r: -_record_confidence(r))
+    kept: List[Dict[str, Any]] = []
+    for record in sorted_recs:
+        global_bbox = record.get("bbox_global_xyxy")
+        if global_bbox is None:
+            kept.append(record)
+            continue
+        overlap = any(
+            _bbox_iou(global_bbox, kept_rec.get("bbox_global_xyxy")) >= iou_threshold
+            for kept_rec in kept
+            if kept_rec.get("bbox_global_xyxy") is not None
+        )
+        if not overlap:
+            kept.append(record)
+    return kept
+
+
 def _write_candidate_outputs(
     paths: VlmOutputPaths,
     records: Sequence[Dict[str, Any]],
@@ -2609,12 +2688,16 @@ def _write_candidate_outputs(
     first_stage_records: Optional[Sequence[Dict[str, Any]]] = None,
     all_records: Optional[Sequence[Dict[str, Any]]] = None,
     confidence_threshold: float = 0.0,
+    cross_tile_iou_threshold: float = 0.5,
     logger: logging.Logger,
 ) -> VlmOutputPaths:
-    sorted_records = _sort_candidate_records(records)
-    first_stage_sorted_records = _sort_candidate_records(
-        list(first_stage_records) if first_stage_records is not None else list(records)
+    deduped_records = _cluster_cross_tile_candidates(list(records), iou_threshold=cross_tile_iou_threshold)
+    deduped_stage1 = _cluster_cross_tile_candidates(
+        list(first_stage_records) if first_stage_records is not None else list(records),
+        iou_threshold=cross_tile_iou_threshold,
     )
+    sorted_records = _sort_candidate_records(deduped_records)
+    first_stage_sorted_records = _sort_candidate_records(deduped_stage1)
     _write_candidate_csv(paths.csv, sorted_records)
     xlsx_path = _write_candidate_xlsx(
         paths.xlsx,
@@ -2650,6 +2733,54 @@ def _write_candidate_outputs(
     )
 
 
+def _log_run_summary_statistics(
+    records: Sequence[Dict[str, Any]],
+    confidence_threshold: float,
+    logger: logging.Logger,
+) -> None:
+    """Tarama bittikten sonra güven dağılımı, aday tipi ve hata özetini loglar."""
+    candidate_records = [r for r in records if r.get("candidate")]
+    skipped_records = [r for r in records if r.get("status") == "skipped"]
+    reviewed_records = [r for r in records if r.get("review_status") not in (None, "")]
+
+    buckets = {"0.0-0.5": 0, "0.5-0.75": 0, "0.75-0.85": 0, "0.85-0.95": 0, "0.95-1.0": 0}
+    confidences: List[float] = []
+    for r in candidate_records:
+        conf = float(r.get("confidence") or 0.0)
+        confidences.append(conf)
+        if conf < 0.5:
+            buckets["0.0-0.5"] += 1
+        elif conf < 0.75:
+            buckets["0.5-0.75"] += 1
+        elif conf < 0.85:
+            buckets["0.75-0.85"] += 1
+        elif conf < 0.95:
+            buckets["0.85-0.95"] += 1
+        else:
+            buckets["0.95-1.0"] += 1
+
+    type_counts = collections.Counter(r.get("candidate_type", "unknown") for r in candidate_records)
+    skip_counts = collections.Counter(r.get("error_type", "unknown") for r in skipped_records)
+    review_confirmed = sum(1 for r in reviewed_records if r.get("review_confirmed") is True)
+    review_rejected = sum(1 for r in reviewed_records if r.get("review_confirmed") is False)
+    review_error = sum(1 for r in reviewed_records if r.get("review_status") == "error")
+
+    logger.info("--- VLM tarama ozeti ---")
+    logger.info("Toplam kayit: %d | Aday: %d | Atlanan: %d", len(records), len(candidate_records), len(skipped_records))
+    if confidences:
+        median_conf = float(np.percentile(confidences, 50))
+        p90_conf = float(np.percentile(confidences, 90))
+        logger.info("Guven skoru: medyan=%.2f | P90=%.2f | esik=%.2f", median_conf, p90_conf, confidence_threshold)
+        logger.info("Guven dagilimlari: %s", " | ".join(f"{k}:{v}" for k, v in buckets.items() if v > 0))
+    if type_counts:
+        logger.info("Aday tipi dagilimi: %s", " | ".join(f"{t}:{n}" for t, n in type_counts.most_common()))
+    if reviewed_records:
+        logger.info("2. asama inceleme: onaylandi=%d | reddedildi=%d | hata=%d", review_confirmed, review_rejected, review_error)
+    if skip_counts:
+        logger.info("Atlama nedenleri: %s", " | ".join(f"{k}:{v}" for k, v in skip_counts.most_common()))
+    logger.info("--- ozet sonu ---")
+
+
 def _set_progress_postfix(
     pbar: Any,
     *,
@@ -2658,16 +2789,18 @@ def _set_progress_postfix(
     skipped_count: int,
     raw_candidate_count: int,
     candidate_records: Sequence[Dict[str, Any]],
+    sec_per_tile: Optional[float] = None,
 ) -> None:
-    pbar.set_postfix(
-        {
-            "ok": len(records) - len(error_records) - skipped_count,
-            "skip": skipped_count,
-            "err": len(error_records),
-            "cand": raw_candidate_count,
-            "out": len(candidate_records),
-        }
-    )
+    postfix: Dict[str, Any] = {
+        "ok": len(records) - len(error_records) - skipped_count,
+        "skip": skipped_count,
+        "err": len(error_records),
+        "cand": raw_candidate_count,
+        "out": len(candidate_records),
+    }
+    if sec_per_tile is not None:
+        postfix["s/t"] = f"{sec_per_tile:.1f}s"
+    pbar.set_postfix(postfix)
 
 
 CSV_COLUMNS = [
@@ -2680,9 +2813,11 @@ CSV_COLUMNS = [
     "candidate_count",
     "candidate",
     "confidence",
+    "confidence_tier",
     "candidate_type",
     "review_confirmed",
     "review_confidence",
+    "review_confidence_tier",
     "review_reason",
     "review_false_positive",
     "review_recommended_check",
@@ -2718,6 +2853,22 @@ def _record_confidence(record: Dict[str, Any]) -> float:
         return float(record.get("confidence") or 0.0)
     except Exception:
         return 0.0
+
+
+def _confidence_tier(confidence: Any) -> str:
+    try:
+        value = float(confidence or 0.0)
+    except Exception:
+        value = 0.0
+    if value >= VERY_HIGH_CONFIDENCE_TIER_THRESHOLD:
+        return "very_high_095"
+    if value >= STRONG_CONFIDENCE_TIER_THRESHOLD:
+        return "strong_090"
+    if value >= EXPORTABLE_CONFIDENCE_TIER_THRESHOLD:
+        return "candidate_075"
+    if value > 0.0:
+        return "below_075"
+    return "none"
 
 
 def _record_tile_index(record: Dict[str, Any]) -> int:
@@ -2902,6 +3053,18 @@ def _write_candidate_xlsx(
         columns=CSV_COLUMNS,
         sheet_records=_sort_candidate_records(records),
         table_name="VlmSecondStage",
+    )
+    very_high_records = [
+        record
+        for record in records
+        if _record_confidence({"confidence": record.get("review_confidence")}) >= VERY_HIGH_CONFIDENCE_TIER_THRESHOLD
+    ]
+    write_sheet(
+        wb.create_sheet("kesin_095"),
+        title="kesin_095",
+        columns=CSV_COLUMNS,
+        sheet_records=_sort_candidate_records(very_high_records),
+        table_name="VlmVeryHigh095",
     )
     missing_records = _not_found_records(
         list(all_records) if all_records is not None else [],
@@ -3106,7 +3269,9 @@ def _write_candidate_gpkg_layer(
             "cand_idx": "int",
             "cand_count": "int",
             "confidence": "float",
+            "conf_tier": "str",
             "review_conf": "float",
+            "review_tier": "str",
             "review_ok": "int",
             "cand_type": "str",
             "bbox_px": "str",
@@ -3150,7 +3315,9 @@ def _write_candidate_gpkg_layer(
                         "cand_idx": int(record.get("candidate_index") or 0),
                         "cand_count": int(record.get("candidate_count") or 0),
                         "confidence": float(record.get("confidence") or 0.0),
+                        "conf_tier": _confidence_tier(record.get("confidence")),
                         "review_conf": float(record.get("review_confidence") or 0.0),
+                        "review_tier": _confidence_tier(record.get("review_confidence")),
                         "review_ok": int(bool(record.get("review_confirmed"))),
                         "cand_type": str(record.get("candidate_type") or ""),
                         "bbox_px": _jsonish(record.get("bbox_xyxy")),
@@ -3178,7 +3345,12 @@ def _write_candidate_gpkg_layer(
 def _flatten_record(record: Dict[str, Any], columns: Sequence[str]) -> Dict[str, Any]:
     flat: Dict[str, Any] = {}
     for col in columns:
-        value = record.get(col)
+        if col == "confidence_tier":
+            value = _confidence_tier(record.get("confidence"))
+        elif col == "review_confidence_tier":
+            value = _confidence_tier(record.get("review_confidence"))
+        else:
+            value = record.get(col)
         if isinstance(value, (list, tuple, dict)):
             flat[col] = json.dumps(value, ensure_ascii=False)
         elif isinstance(value, bool):
