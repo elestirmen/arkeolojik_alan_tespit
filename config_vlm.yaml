@@ -46,7 +46,7 @@ resume: true
 
 # Uzun calismalarda LM Studio VRAM sisiyorsa modeli periyodik reload eder.
 # 0 kapatir.
-reload_every_tiles: 250
+reload_every_tiles: 100
 reload_pause_seconds: 5
 
 timeout: 120
