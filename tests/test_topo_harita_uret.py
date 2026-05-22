@@ -36,12 +36,28 @@ def test_parse_products_expands_all_and_deduplicates() -> None:
     assert topo.parse_products("hillshade,svf,all,hs") == ("hillshade", "svf", "slrm")
 
 
+def test_rvt_slrm_radius_is_normalized_to_supported_cell_range(monkeypatch) -> None:
+    class DummyRvt:
+        @staticmethod
+        def slrm(**_kwargs):
+            return np.zeros((1, 1), dtype=np.float32)
+
+    monkeypatch.setattr(topo, "rvt_vis", DummyRvt)
+
+    effective_m, requested_cell, effective_cell = topo._resolve_rvt_slrm_radius(10.0, 0.061)
+
+    assert requested_cell == 164
+    assert effective_cell == 50
+    assert np.isclose(effective_m, 3.05)
+
+
 def test_parser_uses_top_level_config_defaults(monkeypatch) -> None:
     monkeypatch.setitem(topo.CONFIG, "input", "configured_dem.tif")
     monkeypatch.setitem(topo.CONFIG, "elevation_band", 5)
     monkeypatch.setitem(topo.CONFIG, "output_dir", "configured_out")
     monkeypatch.setitem(topo.CONFIG, "prefix", "configured_prefix")
     monkeypatch.setitem(topo.CONFIG, "products", "hillshade,slrm")
+    monkeypatch.setitem(topo.CONFIG, "workers", 7)
     monkeypatch.setitem(topo.CONFIG, "overwrite", True)
 
     args = topo.build_arg_parser().parse_args([])
@@ -52,6 +68,7 @@ def test_parser_uses_top_level_config_defaults(monkeypatch) -> None:
     assert config.output_dir == Path("configured_out")
     assert config.prefix == "configured_prefix"
     assert config.products == ("hillshade", "slrm")
+    assert config.workers == 7
     assert config.overwrite is True
 
 
@@ -68,6 +85,8 @@ def test_cli_args_override_top_level_config(monkeypatch, tmp_path: Path) -> None
             "1",
             "--products",
             "slope",
+            "--workers",
+            "2",
             "--no-overwrite",
         ]
     )
@@ -76,6 +95,7 @@ def test_cli_args_override_top_level_config(monkeypatch, tmp_path: Path) -> None
     assert config.input_path == cli_input
     assert config.elevation_band == 1
     assert config.products == ("slope",)
+    assert config.workers == 2
     assert config.overwrite is False
 
 
