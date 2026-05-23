@@ -701,6 +701,8 @@ Before running, load a vision/multimodal model in LM Studio and start the Local 
 
 The current prompt is intentionally conservative. A first-stage tile is considered positive only when the model gives clear multi-cue archaeological evidence above `vlm_confidence_threshold`. Those first-stage positives are then sent through a second skeptical reviewer prompt. Final CSV/GIS exports use the second-stage positives; Excel keeps both stages for audit and comparison. Lower the threshold for exploratory sweeps; raise it when false positives are too frequent.
 
+For VLM-only runs, `input` can also be a directory. The scanner picks an RGB/ortho GeoTIFF as the reference when present and sends matching `hillshade`, `SLRM`, `SVF`/`SVM`, `slope`, `DSM`, and `DTM` GeoTIFFs from the same folder as separate model views. Auxiliary rasters are aligned to the reference grid before tiling.
+
 ### Command-Line Parameters (Full List)
 
 ```bash

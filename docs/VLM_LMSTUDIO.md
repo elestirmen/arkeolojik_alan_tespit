@@ -82,6 +82,8 @@ Auto mod rasterda kullanilabilir bantlara gore view secer:
 | RGB + DSM + DTM | `rgb`, `hillshade`, `ndsm`, `slope` |
 | RGB + DTM | `rgb`, `hillshade`, `slope` |
 | RGB + DSM | `rgb`, `dsm` |
+| Klasor: RGB + hillshade/SLRM/SVF/slope | `rgb` + bulunan topo turevleri |
+| Klasor: sadece hillshade/SLRM/SVF/slope | tek bant referans + bulunan topo turevleri |
 
 Manuel view listesi de verilebilir:
 
@@ -91,6 +93,26 @@ vlm_views: "rgb,hillshade,ndsm,slope"
 
 Eksik bant gerektiren view'lar warning log ile atlanir. VLM icin RGB zorunludur;
 RGB yoksa tarama aciklayici hata verir.
+
+`input` bir GeoTIFF dosyasi yerine klasor de olabilir. Bu durumda kod klasordeki
+`.tif/.tiff` dosyalarini tarar; RGB/ortho goruntu varsa referans raster olarak
+onu secer, `hillshade`, `slrm`, `svf`/`svm`, `slope`, `dsm`, `dtm` adlarini
+dosya adi veya band aciklamasindan yakalayip ayni tile icinde ayri VLM view'lari
+olarak gonderir. Ek rasterlar referans grid ile birebir ayni degilse rasterio
+WarpedVRT ile referans CRS/transform/extent uzerine hizalanir.
+
+Ornek:
+
+```yaml
+input: "workspace/on_veri/karlik_vadi_set/topo_haritalar"
+vlm_views: "auto"
+vlm_source_kind: "auto"
+```
+
+Klasor icinde birden fazla ayni tip view varsa ilk bulunan kullanilir ve digeri
+warning ile atlanir. En iyi sonuc icin dosya adlarini acik tutun:
+`alan_rgb.tif`, `alan_hillshade.tif`, `alan_slrm.tif`, `alan_svf.tif`,
+`alan_slope.tif`.
 
 Not: 4 bantli RGB+DTM dosyalarinda band aciklamasi DTM/terrain olarak
 etiketlenmemisse `bands: "1,2,3,0,4"` kullanarak dorduncu bandin DTM oldugunu

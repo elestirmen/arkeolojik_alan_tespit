@@ -1,4 +1,5 @@
 import json
+from contextlib import ExitStack
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -735,6 +736,184 @@ def test_source_kind_auto_detects_hillshade_name_for_single_band(tmp_path: Path)
         )
 
     assert source_kind == "hillshade"
+
+
+def test_source_kind_auto_detects_relief_derivative_names(tmp_path: Path):
+    for filename, expected in [
+        ("area_slrm.tif", "slrm"),
+        ("area_svf.tif", "svf"),
+        ("area_svm.tif", "svf"),
+        ("area_slope.tif", "slope"),
+    ]:
+        tif_path = tmp_path / filename
+        data = np.arange(64, dtype=np.uint8).reshape(1, 8, 8)
+        with rasterio.open(
+            tif_path,
+            "w",
+            driver="GTiff",
+            width=8,
+            height=8,
+            count=1,
+            dtype="uint8",
+            transform=from_origin(0, 8, 1, 1),
+        ) as dst:
+            dst.write(data)
+
+        with rasterio.open(tif_path) as src:
+            layout = vlm._detect_band_layout(src, band_indexes=(1, 1, 1), logger=vlm.LOGGER)
+            source_kind = vlm._resolve_source_kind(
+                "auto",
+                input_path=tif_path,
+                src=src,
+                layout=layout,
+                selected_views=["rgb"],
+                logger=vlm.LOGGER,
+            )
+
+        assert source_kind == expected
+
+
+def test_folder_input_discovers_rgb_and_relief_views(tmp_path: Path):
+    transform = from_origin(0, 8, 1, 1)
+    rgb_path = tmp_path / "area_rgb.tif"
+    rgb = np.ones((3, 8, 8), dtype=np.uint8) * 100
+    with rasterio.open(
+        rgb_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=transform,
+    ) as dst:
+        dst.write(rgb)
+        dst.colorinterp = (ColorInterp.red, ColorInterp.green, ColorInterp.blue)
+
+    for name in ("area_hillshade.tif", "area_slrm.tif", "area_svm.tif", "area_slope.tif"):
+        with rasterio.open(
+            tmp_path / name,
+            "w",
+            driver="GTiff",
+            width=8,
+            height=8,
+            count=1,
+            dtype="uint8",
+            transform=transform,
+        ) as dst:
+            dst.write(np.arange(64, dtype=np.uint8).reshape(1, 8, 8))
+
+    plan = vlm._build_raster_input_plan(tmp_path, logger=vlm.LOGGER)
+    assert plan.reference_path == rgb_path
+    assert [aux.view for aux in plan.auxiliary_views] == ["hillshade", "slrm", "svf", "slope"]
+
+    with rasterio.open(plan.reference_path) as src:
+        layout = vlm._detect_band_layout(src, band_indexes=None, logger=vlm.LOGGER)
+        layout = vlm.replace(layout, external_views=tuple(aux.view for aux in plan.auxiliary_views))
+        assert vlm._resolve_views("auto", layout, logger=vlm.LOGGER) == ["rgb", "hillshade", "slrm", "svf", "slope"]
+        assert layout.analysis_mode == "rgb_topo"
+
+
+def test_folder_aux_view_with_non_overlapping_bounds_is_skipped(tmp_path: Path):
+    rgb_path = tmp_path / "area_rgb.tif"
+    slope_path = tmp_path / "other_area_slope.tif"
+    with rasterio.open(
+        rgb_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(np.ones((3, 8, 8), dtype=np.uint8) * 100)
+        dst.colorinterp = (ColorInterp.red, ColorInterp.green, ColorInterp.blue)
+
+    with rasterio.open(
+        slope_path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=1,
+        dtype="uint8",
+        transform=from_origin(1000, 1008, 1, 1),
+    ) as dst:
+        dst.write(np.arange(64, dtype=np.uint8).reshape(1, 8, 8))
+
+    plan = vlm._build_raster_input_plan(tmp_path, logger=vlm.LOGGER)
+    with ExitStack() as stack:
+        src = stack.enter_context(rasterio.open(plan.reference_path))
+        opened = vlm._open_auxiliary_raster_views(plan.auxiliary_views, src, stack=stack, logger=vlm.LOGGER)
+
+    assert [aux.view for aux in plan.auxiliary_views] == ["slope"]
+    assert opened == ()
+
+
+def test_folder_input_sends_discovered_views_to_vlm(tmp_path: Path, monkeypatch):
+    transform = from_origin(0, 8, 1, 1)
+    with rasterio.open(
+        tmp_path / "area_rgb.tif",
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=transform,
+    ) as dst:
+        dst.write(np.ones((3, 8, 8), dtype=np.uint8) * 120)
+        dst.colorinterp = (ColorInterp.red, ColorInterp.green, ColorInterp.blue)
+
+    for offset, name in enumerate(("area_hillshade.tif", "area_slrm.tif", "area_svm.tif", "area_slope.tif"), start=1):
+        data = (np.arange(64, dtype=np.uint8).reshape(1, 8, 8) + offset).astype(np.uint8)
+        with rasterio.open(
+            tmp_path / name,
+            "w",
+            driver="GTiff",
+            width=8,
+            height=8,
+            count=1,
+            dtype="uint8",
+            transform=transform,
+        ) as dst:
+            dst.write(data)
+
+    calls = []
+
+    def fake_request(**kwargs):
+        calls.append(
+            {
+                "prompt": kwargs["prompt"],
+                "views": [view for view, _ in kwargs["rendered_views"]],
+            }
+        )
+        return (
+            '{"candidates":[],"visual_evidence":"none","possible_false_positive":"natural texture","recommended_check":"rgb"}',
+            True,
+        )
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(vlm, "_request_vlm_json", fake_request)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tmp_path,
+        out_prefix=tmp_path / "out" / "folder",
+        config=vlm.VlmLmStudioConfig(
+            tile=8,
+            overlap=0,
+            max_tiles=1,
+            resume=False,
+            featureless_std_threshold=0.0,
+        ),
+    )
+
+    assert summary.processed_tiles == 1
+    assert calls[0]["views"] == ["rgb", "hillshade", "slrm", "svf", "slope"]
+    assert "Provided views: rgb, hillshade, slrm, svf, slope" in calls[0]["prompt"]
+    assert "SLRM" in calls[0]["prompt"]
 
 
 def test_empty_rgb_tile_is_skipped_before_model_call():

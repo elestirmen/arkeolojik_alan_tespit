@@ -37,6 +37,14 @@ def test_auto_bands_delegate_three_band_raster_to_vlm_auto(tmp_path: Path):
     assert vlm_detect.resolve_vlm_band_indexes(tif_path, "auto") is None
 
 
+def test_auto_bands_accept_directory_input(tmp_path: Path):
+    _write_test_raster(tmp_path / "rgb.tif", count=3)
+    _write_test_raster(tmp_path / "hillshade.tif", count=1)
+
+    assert vlm_detect.resolve_vlm_band_indexes(tmp_path, "auto") is None
+    assert vlm_detect.resolve_vlm_band_indexes(tmp_path, "1,2,3") == (1, 2, 3)
+
+
 def test_legacy_vlm_prefixed_config_keys_are_accepted(tmp_path: Path):
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(

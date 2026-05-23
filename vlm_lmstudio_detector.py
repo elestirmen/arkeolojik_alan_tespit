@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import collections
+from contextlib import ExitStack
 import csv
 import random
 import hashlib
@@ -27,8 +28,11 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 import numpy as np
 import rasterio
 from rasterio.crs import CRS as RasterioCRS
+from rasterio.enums import Resampling
 from rasterio.transform import Affine
+from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform as rasterio_transform
+from rasterio.warp import transform_bounds
 from rasterio.windows import Window
 from tqdm import tqdm
 
@@ -52,10 +56,24 @@ VIEW_ALIASES = {
     "n_dsm": "ndsm",
     "hillshade": "hillshade",
     "hill": "hillshade",
+    "shaded_relief": "hillshade",
+    "shaded-relief": "hillshade",
+    "slrm": "slrm",
+    "lrm": "slrm",
+    "local_relief": "slrm",
+    "local-relief": "slrm",
+    "local_relief_model": "slrm",
+    "svf": "svf",
+    "sky_view_factor": "svf",
+    "sky-view-factor": "svf",
+    "skyview": "svf",
+    "sky-view": "svf",
+    "svm": "svf",
+    "openness": "svf",
     "slope": "slope",
 }
 
-RECOMMENDED_CHECKS = {"rgb", "hillshade", "ndsm", "dsm", "dtm", "slope", "field_check"}
+RECOMMENDED_CHECKS = {"rgb", "hillshade", "slrm", "svf", "ndsm", "dsm", "dtm", "slope", "field_check"}
 SOURCE_KIND_ALIASES = {
     "auto": "auto",
     "rgb": "rgb",
@@ -67,6 +85,19 @@ SOURCE_KIND_ALIASES = {
     "shaded_relief": "hillshade",
     "shaded-relief": "hillshade",
     "shade": "hillshade",
+    "slrm": "slrm",
+    "lrm": "slrm",
+    "local_relief": "slrm",
+    "local-relief": "slrm",
+    "local_relief_model": "slrm",
+    "svf": "svf",
+    "sky_view_factor": "svf",
+    "sky-view-factor": "svf",
+    "skyview": "svf",
+    "sky-view": "svf",
+    "svm": "svf",
+    "openness": "svf",
+    "slope": "slope",
     "single_band": "single_band",
     "single-band": "single_band",
     "grayscale": "single_band",
@@ -81,7 +112,14 @@ SOURCE_KIND_ALIASES = {
     "topographic": "mixed_topo",
     "mixed": "mixed_topo",
     "mixed_topo": "mixed_topo",
+    "terrain_derivative": "terrain_derivative",
+    "terrain-derived": "terrain_derivative",
+    "relief_derivative": "terrain_derivative",
+    "relief-derived": "terrain_derivative",
 }
+RASTER_SUFFIXES = {".tif", ".tiff"}
+TOPO_VIEW_NAMES = {"hillshade", "slrm", "svf", "slope", "ndsm", "dsm", "dtm"}
+DIRECT_AUX_VIEW_ORDER = ("hillshade", "slrm", "svf", "slope", "dsm", "dtm", "ndsm")
 ALLOWED_CANDIDATE_TYPES = {
     "none",
     "mound",
@@ -103,12 +141,12 @@ JSON_SCHEMA_TEXT = """{
       "bbox_xyxy": [x1, y1, x2, y2],
       "visual_evidence": "...",
       "possible_false_positive": "...",
-      "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
+      "recommended_check": "rgb | hillshade | slrm | svf | ndsm | dsm | dtm | slope | field_check"
     }
   ],
   "visual_evidence": "short reason when candidates is empty",
   "possible_false_positive": "strongest non-archaeological explanation when candidates is empty",
-  "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
+  "recommended_check": "rgb | hillshade | slrm | svf | ndsm | dsm | dtm | slope | field_check"
 }"""
 
 REVIEW_SCHEMA_TEXT = """{
@@ -116,7 +154,7 @@ REVIEW_SCHEMA_TEXT = """{
   "review_confidence": 0.0,
   "review_reason": "...",
   "review_false_positive": "...",
-  "recommended_check": "rgb | hillshade | ndsm | dsm | dtm | slope | field_check"
+  "recommended_check": "rgb | hillshade | slrm | svf | ndsm | dsm | dtm | slope | field_check"
 }"""
 
 
@@ -153,10 +191,34 @@ class VlmLmStudioConfig:
 
 
 @dataclass(frozen=True)
+class AuxiliaryRasterView:
+    view: str
+    path: Path
+    band_index: int = 1
+
+
+@dataclass(frozen=True)
+class OpenAuxiliaryRasterView:
+    view: str
+    path: Path
+    band_index: int
+    dataset: Any
+
+
+@dataclass(frozen=True)
+class RasterInputPlan:
+    input_path: Path
+    reference_path: Path
+    auxiliary_views: Tuple[AuxiliaryRasterView, ...] = ()
+    folder_mode: bool = False
+
+
+@dataclass(frozen=True)
 class RasterBandLayout:
     rgb: Tuple[int, int, int]
     dsm: Optional[int]
     dtm: Optional[int]
+    external_views: Tuple[str, ...] = ()
 
     @property
     def has_rgb(self) -> bool:
@@ -164,11 +226,15 @@ class RasterBandLayout:
 
     @property
     def has_dsm(self) -> bool:
-        return self.dsm is not None and self.dsm > 0
+        return (self.dsm is not None and self.dsm > 0) or "dsm" in self.external_views
 
     @property
     def has_dtm(self) -> bool:
-        return self.dtm is not None and self.dtm > 0
+        return (self.dtm is not None and self.dtm > 0) or "dtm" in self.external_views
+
+    @property
+    def has_topo_views(self) -> bool:
+        return self.has_dsm or self.has_dtm or any(view in TOPO_VIEW_NAMES for view in self.external_views)
 
     @property
     def analysis_mode(self) -> str:
@@ -178,6 +244,8 @@ class RasterBandLayout:
             return "rgb_dsm"
         if self.has_dtm:
             return "rgb_dtm"
+        if self.has_topo_views:
+            return "rgb_topo"
         return "rgb_only"
 
 
@@ -235,15 +303,30 @@ def run_vlm_lmstudio_detection(
     )
     log.info("VLM prompt fingerprint: %s", prompt_fingerprint[:12])
 
-    with rasterio.open(input_path) as src:
-        layout = _detect_band_layout(src, band_indexes=band_indexes, logger=log)
+    input_plan = _build_raster_input_plan(input_path, logger=log)
+
+    with ExitStack() as raster_stack:
+        src = raster_stack.enter_context(rasterio.open(input_plan.reference_path))
+        aux_views = _open_auxiliary_raster_views(
+            input_plan.auxiliary_views,
+            src,
+            stack=raster_stack,
+            logger=log,
+        )
+        effective_band_indexes = band_indexes
+        if effective_band_indexes is None and int(src.count) == 1:
+            effective_band_indexes = (1, 1, 1)
+
+        layout = _detect_band_layout(src, band_indexes=effective_band_indexes, logger=log)
+        if aux_views:
+            layout = replace(layout, external_views=tuple(aux.view for aux in aux_views))
         if not layout.has_rgb:
             raise ValueError("VLM taramasi icin en az uc RGB bandi gerekir; girdi raster RGB icermiyor.")
 
         selected_views = _resolve_views(config.views, layout, logger=log)
         source_kind = _resolve_source_kind(
             config.source_kind,
-            input_path=input_path,
+            input_path=input_plan.input_path,
             src=src,
             layout=layout,
             selected_views=selected_views,
@@ -440,21 +523,23 @@ def run_vlm_lmstudio_detection(
                     tile_records: List[Dict[str, Any]] = []
                     break_after_tile = False
                     try:
-                        tile_arrays = _read_tile_arrays(src, layout, window)
-                        if _is_empty_rgb_tile(tile_arrays["rgb"]):
+                        tile_arrays = _read_tile_arrays(src, layout, window, auxiliary_views=aux_views)
+                        if _is_empty_rgb_tile(tile_arrays["rgb"]) and not _has_non_rgb_spatial_signal(
+                            tile_arrays,
+                            selected_views,
+                            min_std=config.featureless_std_threshold,
+                        ):
                             tile_records = [
                                 _skipped_tile_record(
                                     tile_record_base,
                                     reason="RGB tile is empty, nodata, transparent, or effectively black.",
                                 )
                             ]
-                        elif _is_featureless_rgb_tile(
-                            tile_arrays["rgb"], min_std=config.featureless_std_threshold
-                        ):
+                        elif _is_featureless_tile(tile_arrays, selected_views, min_std=config.featureless_std_threshold):
                             tile_records = [
                                 _skipped_tile_record(
                                     tile_record_base,
-                                    reason="RGB tile has insufficient spatial variation (featureless/uniform).",
+                                    reason="Tile has insufficient spatial variation in the selected VLM views.",
                                     error_type="featureless_tile",
                                 )
                             ]
@@ -687,7 +772,7 @@ def run_vlm_lmstudio_detection(
                                 int(record.get("tile_width") or config.tile),
                                 int(record.get("tile_height") or config.tile),
                             )
-                            tile_arrays = _read_tile_arrays(src, layout, window)
+                            tile_arrays = _read_tile_arrays(src, layout, window, auxiliary_views=aux_views)
                             rendered = _render_views(tile_arrays, selected_views, pixel_size=pixel_size)
                             use_response_format, raw_review_record = _review_candidate_record(
                                 record,
@@ -781,7 +866,12 @@ def _validate_config(config: VlmLmStudioConfig) -> None:
     if not str(config.model or "").strip():
         raise ValueError("vlm_model bos olamaz.")
     if SOURCE_KIND_ALIASES.get(str(config.source_kind or "").strip().lower()) is None:
-        raise ValueError("source_kind gecersiz. Gecerli degerler: auto, rgb, hillshade, single_band, dsm, dtm, mixed_topo.")
+        raise ValueError(
+            "source_kind gecersiz. Gecerli degerler: auto, rgb, hillshade, slrm, svf, "
+            "slope, single_band, dsm, dtm, mixed_topo, terrain_derivative."
+        )
+        if input_plan.folder_mode:
+            log.info("VLM referans raster: %s", input_plan.reference_path)
 
 
 def _ensure_pillow_available() -> None:
@@ -789,6 +879,290 @@ def _ensure_pillow_available() -> None:
         from PIL import Image  # noqa: F401
     except ImportError as exc:
         raise ImportError("VLM PNG uretimi icin pillow>=10.0.0 gereklidir.") from exc
+
+
+def _raster_paths_from_directory(input_dir: Path) -> List[Path]:
+    direct = sorted(
+        path
+        for path in input_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in RASTER_SUFFIXES
+    )
+    if direct:
+        return direct
+    return sorted(
+        path
+        for path in input_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in RASTER_SUFFIXES
+    )
+
+
+def _source_text_for_raster(path: Path, src: rasterio.io.DatasetReader) -> str:
+    parts = [path.name.lower(), path.stem.lower()]
+    for band_index in range(1, int(src.count) + 1):
+        parts.append(_band_text(src, band_index))
+    try:
+        for key, value in src.tags().items():
+            parts.append(str(key))
+            parts.append(str(value))
+    except Exception:
+        pass
+    return " ".join(parts).lower()
+
+
+def _text_has_any(text: str, tokens: Sequence[str]) -> bool:
+    return any(token in text for token in tokens)
+
+
+def _colorinterp_starts_rgb(src: rasterio.io.DatasetReader) -> bool:
+    try:
+        names = [str(getattr(item, "name", item)).lower() for item in src.colorinterp[:3]]
+    except Exception:
+        return False
+    return names[:3] == ["red", "green", "blue"]
+
+
+def _infer_raster_view_kind(path: Path, src: rasterio.io.DatasetReader) -> str:
+    source_text = _source_text_for_raster(path, src)
+    rgb_tokens = ("rgb", "ortho", "orthophoto", "satellite", "imagery", "bing")
+    derivative_tokens = (
+        "hillshade",
+        "hill_shade",
+        "shaded relief",
+        "shaded_relief",
+        "shaded-relief",
+        "slrm",
+        "local relief",
+        "local_relief",
+        "local-relief",
+        "lrm",
+        "svf",
+        "sky view",
+        "sky_view",
+        "sky-view",
+        "skyview",
+        "svm",
+        "openness",
+        "slope",
+        "ndsm",
+        "n_dsm",
+        "dsm",
+        "dtm",
+        "dem",
+    )
+    if src.count >= 3 and (_text_has_any(source_text, rgb_tokens) or _colorinterp_starts_rgb(src)):
+        return "rgb"
+    if src.count >= 3 and not _text_has_any(source_text, derivative_tokens):
+        return "rgb"
+
+    kind_tokens = (
+        ("hillshade", ("hillshade", "hill_shade", "shaded relief", "shaded_relief", "shaded-relief")),
+        ("slrm", ("slrm", "local relief", "local_relief", "local-relief", "local_relief_model", "lrm")),
+        ("svf", ("svf", "sky view", "sky_view", "sky-view", "skyview", "svm", "openness")),
+        ("slope", ("slope", "egim")),
+        ("ndsm", ("ndsm", "n_dsm")),
+        ("dsm", ("dsm", "surface", "canopy")),
+        ("dtm", ("dtm", "dem", "terrain", "bare earth", "bare_earth", "elevation")),
+    )
+    for kind, tokens in kind_tokens:
+        if _text_has_any(source_text, tokens):
+            return kind
+    if src.count >= 3:
+        return "rgb"
+    return "single_band"
+
+
+def _reference_priority(kind: str, count: int) -> Tuple[int, str]:
+    if kind == "rgb" and count >= 3:
+        return (0, kind)
+    if count >= 3:
+        return (1, kind)
+    priority = {
+        "hillshade": 2,
+        "slrm": 3,
+        "svf": 4,
+        "slope": 5,
+        "dtm": 6,
+        "dsm": 7,
+        "ndsm": 8,
+        "single_band": 9,
+    }
+    return (priority.get(kind, 99), kind)
+
+
+def _build_raster_input_plan(input_path: Path, *, logger: logging.Logger) -> RasterInputPlan:
+    if input_path.is_file():
+        return RasterInputPlan(input_path=input_path, reference_path=input_path)
+    if not input_path.is_dir():
+        raise FileNotFoundError(f"VLM input bulunamadi: {input_path}")
+
+    raster_paths = _raster_paths_from_directory(input_path)
+    if not raster_paths:
+        raise FileNotFoundError(f"VLM klasor girdisinde GeoTIFF bulunamadi: {input_path}")
+
+    infos: List[Dict[str, Any]] = []
+    for path in raster_paths:
+        try:
+            with rasterio.open(path) as src:
+                kind = _infer_raster_view_kind(path, src)
+                infos.append({"path": path, "kind": kind, "count": int(src.count)})
+        except Exception as exc:
+            logger.warning("VLM klasor girdisinde raster okunamadi ve atlandi: %s (%s)", path, exc)
+    if not infos:
+        raise FileNotFoundError(f"VLM klasor girdisinde okunabilir GeoTIFF bulunamadi: {input_path}")
+
+    reference_info = min(infos, key=lambda item: (_reference_priority(str(item["kind"]), int(item["count"])), str(item["path"])))
+    reference_path = Path(reference_info["path"])
+    auxiliary_views: List[AuxiliaryRasterView] = []
+    seen_views: set[str] = set()
+
+    def add_aux(view: str, path: Path) -> None:
+        if view not in DIRECT_AUX_VIEW_ORDER:
+            return
+        if view in seen_views:
+            logger.warning("VLM klasor girdisinde yinelenen '%s' view atlandi: %s", view, path)
+            return
+        auxiliary_views.append(AuxiliaryRasterView(view=view, path=path, band_index=1))
+        seen_views.add(view)
+
+    if int(reference_info["count"]) == 1:
+        add_aux(str(reference_info["kind"]), reference_path)
+
+    for info in sorted(infos, key=lambda item: str(item["path"])):
+        path = Path(info["path"])
+        if path == reference_path:
+            continue
+        add_aux(str(info["kind"]), path)
+
+    auxiliary_views.sort(key=lambda aux: DIRECT_AUX_VIEW_ORDER.index(aux.view))
+
+    logger.info("VLM modele beslenecek katman plani:")
+    logger.info("  - [Referans Grid] (%s): %s", reference_info["kind"], reference_path)
+    for aux in auxiliary_views:
+        if aux.path == reference_path:
+            logger.info("  - [Ek Katman] (%s) (Referans dosyasindan): %s", aux.view, aux.path)
+        else:
+            logger.info("  - [Ek Katman] (%s): %s", aux.view, aux.path)
+    return RasterInputPlan(
+        input_path=input_path,
+        reference_path=reference_path,
+        auxiliary_views=tuple(auxiliary_views),
+        folder_mode=True,
+    )
+
+
+def _same_raster_grid(
+    src: rasterio.io.DatasetReader,
+    reference_src: rasterio.io.DatasetReader,
+) -> bool:
+    try:
+        same_transform = all(
+            abs(float(a) - float(b)) <= 1e-9
+            for a, b in zip(tuple(src.transform), tuple(reference_src.transform))
+        )
+        return (
+            int(src.width) == int(reference_src.width)
+            and int(src.height) == int(reference_src.height)
+            and src.crs == reference_src.crs
+            and same_transform
+        )
+    except Exception:
+        return False
+
+
+def _bounds_area(bounds: Sequence[float]) -> float:
+    left, bottom, right, top = [float(value) for value in bounds]
+    return max(0.0, right - left) * max(0.0, top - bottom)
+
+
+def _bounds_overlap_fraction(
+    src: rasterio.io.DatasetReader,
+    reference_src: rasterio.io.DatasetReader,
+) -> Optional[float]:
+    try:
+        src_bounds = tuple(src.bounds)
+        if src.crs is not None and reference_src.crs is not None and src.crs != reference_src.crs:
+            src_bounds = tuple(transform_bounds(src.crs, reference_src.crs, *src_bounds, densify_pts=21))
+        ref_bounds = tuple(reference_src.bounds)
+        left = max(float(src_bounds[0]), float(ref_bounds[0]))
+        bottom = max(float(src_bounds[1]), float(ref_bounds[1]))
+        right = min(float(src_bounds[2]), float(ref_bounds[2]))
+        top = min(float(src_bounds[3]), float(ref_bounds[3]))
+        intersection = _bounds_area((left, bottom, right, top))
+        if intersection <= 0:
+            return 0.0
+        smaller_area = min(_bounds_area(src_bounds), _bounds_area(ref_bounds))
+        if smaller_area <= 0:
+            return None
+        return intersection / smaller_area
+    except Exception:
+        return None
+
+
+def _open_auxiliary_raster_views(
+    auxiliary_views: Sequence[AuxiliaryRasterView],
+    reference_src: rasterio.io.DatasetReader,
+    *,
+    stack: ExitStack,
+    logger: logging.Logger,
+) -> Tuple[OpenAuxiliaryRasterView, ...]:
+    opened: List[OpenAuxiliaryRasterView] = []
+    reference_path = Path(str(reference_src.name)).resolve(strict=False)
+    for aux in auxiliary_views:
+        aux_path = Path(aux.path).resolve(strict=False)
+        if aux_path == reference_path:
+            dataset: Any = reference_src
+        else:
+            raw_src = stack.enter_context(rasterio.open(aux.path))
+            overlap_fraction = _bounds_overlap_fraction(raw_src, reference_src)
+            if overlap_fraction is not None and overlap_fraction < 0.05:
+                logger.warning(
+                    "VLM ek view '%s' referans rasterla ortusmuyor gibi gorundugu icin atlandi: %s",
+                    aux.view,
+                    aux.path,
+                )
+                continue
+            if _same_raster_grid(raw_src, reference_src):
+                dataset = raw_src
+            else:
+                if raw_src.crs is None or reference_src.crs is None:
+                    logger.warning(
+                        "VLM ek view '%s' referans grid'e hizalanamadi; CRS eksik oldugu icin atlandi: %s",
+                        aux.view,
+                        aux.path,
+                    )
+                    continue
+                try:
+                    dataset = stack.enter_context(
+                        WarpedVRT(
+                            raw_src,
+                            crs=reference_src.crs,
+                            transform=reference_src.transform,
+                            width=reference_src.width,
+                            height=reference_src.height,
+                            resampling=Resampling.bilinear,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "VLM ek view '%s' referans grid'e hizalanamadi ve atlandi: %s (%s)",
+                        aux.view,
+                        aux.path,
+                        exc,
+                    )
+                    continue
+                logger.info("VLM ek view referans grid'e hizalandi: %s -> %s", aux.view, aux.path)
+        if aux.band_index <= 0 or aux.band_index > int(dataset.count):
+            logger.warning("VLM ek view '%s' icin band %s gecersiz, atlandi: %s", aux.view, aux.band_index, aux.path)
+            continue
+        opened.append(
+            OpenAuxiliaryRasterView(
+                view=aux.view,
+                path=aux.path,
+                band_index=int(aux.band_index),
+                dataset=dataset,
+            )
+        )
+    return tuple(opened)
 
 
 def _output_base_path(path: Path) -> Path:
@@ -1207,13 +1581,25 @@ def _resolve_views(
     logger: logging.Logger,
 ) -> List[str]:
     if isinstance(requested, str) and requested.strip().lower() == "auto":
+        selected = ["rgb"]
+        for view in DIRECT_AUX_VIEW_ORDER:
+            if view in layout.external_views and view not in selected:
+                selected.append(view)
         if layout.has_dsm and layout.has_dtm:
-            return ["rgb", "hillshade", "ndsm", "slope"]
+            for view in ("hillshade", "ndsm", "slope"):
+                if view not in selected:
+                    selected.append(view)
+            return selected
         if layout.has_dtm:
-            return ["rgb", "hillshade", "slope"]
+            for view in ("hillshade", "slope"):
+                if view not in selected:
+                    selected.append(view)
+            return selected
         if layout.has_dsm:
-            return ["rgb", "dsm"]
-        return ["rgb"]
+            if "dsm" not in selected:
+                selected.append("dsm")
+            return selected
+        return selected
 
     raw_views: Iterable[str]
     if isinstance(requested, str):
@@ -1260,26 +1646,41 @@ def _resolve_source_kind(
     source_kind = SOURCE_KIND_ALIASES.get(requested_text)
     if source_kind is None:
         raise ValueError(
-            "source_kind gecersiz. Gecerli degerler: auto, rgb, hillshade, single_band, dsm, dtm, mixed_topo."
+            "source_kind gecersiz. Gecerli degerler: auto, rgb, hillshade, slrm, svf, "
+            "slope, single_band, dsm, dtm, mixed_topo, terrain_derivative."
         )
     if source_kind != "auto":
         return source_kind
+
+    selected_view_set = {str(view).strip().lower() for view in selected_views}
+    selected_topo_views = selected_view_set & TOPO_VIEW_NAMES
+    replicated_single_band = src.count == 1 or len(set(layout.rgb)) == 1
+    if selected_topo_views and replicated_single_band and len(selected_topo_views) > 1:
+        return "terrain_derivative"
+    if selected_topo_views and not replicated_single_band:
+        return "mixed_topo"
 
     text_parts = [input_path.stem.lower()]
     for band_index in range(1, int(src.count) + 1):
         text_parts.append(_band_text(src, band_index))
     source_text = " ".join(text_parts)
 
-    if any(token in source_text for token in ("hillshade", "hill_shade", "shaded relief", "shaded_relief", "relief")):
+    if any(token in source_text for token in ("hillshade", "hill_shade", "shaded relief", "shaded_relief")):
         return "hillshade"
+    if any(token in source_text for token in ("slrm", "local relief", "local_relief", "local-relief", "local_relief_model", "lrm")):
+        return "slrm"
+    if any(token in source_text for token in ("svf", "sky view", "sky_view", "sky-view", "skyview", "svm", "openness")):
+        return "svf"
+    if any(token in source_text for token in ("slope", "egim")):
+        return "slope"
     if any(token in source_text for token in ("dsm", "surface", "canopy")):
         return "dsm"
     if any(token in source_text for token in ("dtm", "dem", "terrain", "bare earth", "bare_earth", "elevation")):
         return "dtm"
     if any(token in source_text for token in ("rgb", "ortho", "orthophoto", "satellite", "imagery")):
         return "rgb"
-    if any(view in set(selected_views) for view in ("hillshade", "slope", "ndsm", "dsm", "dtm")):
-        return "mixed_topo"
+    if selected_topo_views:
+        return "terrain_derivative" if replicated_single_band else "mixed_topo"
     if src.count == 1 or len(set(layout.rgb)) == 1:
         logger.info("VLM source_kind=auto tek bant/grayscale girdi icin single_band olarak cozuldu.")
         return "single_band"
@@ -1287,6 +1688,8 @@ def _resolve_source_kind(
 
 
 def _missing_view_reason(view: str, layout: RasterBandLayout) -> Optional[str]:
+    if view in layout.external_views:
+        return None
     if view == "rgb" and not layout.has_rgb:
         return "RGB bandlari yok"
     if view == "dsm" and not layout.has_dsm:
@@ -1297,6 +1700,8 @@ def _missing_view_reason(view: str, layout: RasterBandLayout) -> Optional[str]:
         return "DTM bandi yok"
     if view == "ndsm" and not (layout.has_dsm and layout.has_dtm):
         return "DSM ve DTM birlikte gerekli"
+    if view in {"slrm", "svf"}:
+        return "ek raster view yok"
     return None
 
 
@@ -1342,6 +1747,7 @@ def _read_tile_arrays(
     src: rasterio.io.DatasetReader,
     layout: RasterBandLayout,
     window: Window,
+    auxiliary_views: Sequence[OpenAuxiliaryRasterView] = (),
 ) -> Dict[str, Any]:
     rgb_arrays = [_read_band(src, idx, window) for idx in layout.rgb]
     out: Dict[str, Any] = {"rgb": rgb_arrays}
@@ -1349,6 +1755,8 @@ def _read_tile_arrays(
         out["dsm"] = _read_band(src, layout.dsm, window)
     if layout.has_dtm and layout.dtm is not None:
         out["dtm"] = _read_band(src, layout.dtm, window)
+    for aux in auxiliary_views:
+        out[aux.view] = _read_band(aux.dataset, aux.band_index, window)
     return out
 
 
@@ -1387,6 +1795,50 @@ def _is_featureless_rgb_tile(channels: Sequence[np.ndarray], min_std: float = 4.
     return True
 
 
+def _array_has_spatial_variation(arr: np.ndarray, min_std: float) -> bool:
+    values = np.asarray(arr, dtype=np.float32)
+    valid = np.isfinite(values)
+    if not np.any(valid):
+        return False
+    return float(np.nanstd(values[valid])) >= float(min_std)
+
+
+def _array_for_view_variation(arrays: Dict[str, Any], view: str) -> Optional[np.ndarray]:
+    if view in arrays and view != "rgb":
+        return np.asarray(arrays[view], dtype=np.float32)
+    if view in {"hillshade", "slope"} and "dtm" in arrays:
+        return np.asarray(arrays["dtm"], dtype=np.float32)
+    if view == "ndsm" and "dsm" in arrays and "dtm" in arrays:
+        return np.asarray(arrays["dsm"], dtype=np.float32) - np.asarray(arrays["dtm"], dtype=np.float32)
+    return None
+
+
+def _has_non_rgb_spatial_signal(
+    arrays: Dict[str, Any],
+    selected_views: Sequence[str],
+    *,
+    min_std: float,
+) -> bool:
+    for view in selected_views:
+        if view == "rgb":
+            continue
+        view_arr = _array_for_view_variation(arrays, str(view))
+        if view_arr is not None and _array_has_spatial_variation(view_arr, min_std):
+            return True
+    return False
+
+
+def _is_featureless_tile(
+    arrays: Dict[str, Any],
+    selected_views: Sequence[str],
+    *,
+    min_std: float,
+) -> bool:
+    if not _is_featureless_rgb_tile(arrays.get("rgb", ()), min_std=min_std):
+        return False
+    return not _has_non_rgb_spatial_signal(arrays, selected_views, min_std=min_std)
+
+
 def _render_views(
     arrays: Dict[str, Any],
     selected_views: Sequence[str],
@@ -1397,6 +1849,8 @@ def _render_views(
     for view in selected_views:
         if view == "rgb":
             image = _rgb_to_uint8(arrays["rgb"])
+        elif view in arrays:
+            image = _grayscale_to_rgb(_scale_to_uint8(arrays[view]))
         elif view == "dsm":
             image = _grayscale_to_rgb(_scale_to_uint8(arrays["dsm"]))
         elif view == "dtm":
@@ -1767,6 +2221,25 @@ def _source_kind_prompt_context(source_kind: str, selected_views: Sequence[str])
             "Treat brightness as an analytical raster value, not optical color. It may be hillshade or another terrain-derived view, so avoid "
             "claims about vegetation color or soil color unless the pattern geometry itself supports archaeology. "
         )
+    if kind == "slrm":
+        return (
+            "Source interpretation: SLRM / simple local relief model. "
+            "Tone represents local elevation residuals after terrain trend removal, not real surface color or illumination. "
+            "Use it for subtle local relief such as low banks, rims, depressions, terraces, wall lines, and mound shoulders; be strict with "
+            "filter artifacts, drainage texture, ploughing, and noisy rough ground. "
+        )
+    if kind == "svf":
+        return (
+            "Source interpretation: SVF / sky-view-factor or openness-style terrain derivative. "
+            "Brightness represents topographic openness/visibility, not optical color. Use it to cross-check concave and convex relief forms, "
+            "but reject isolated tonal speckle and processing artifacts. "
+        )
+    if kind == "slope":
+        return (
+            "Source interpretation: slope terrain derivative. "
+            "Tone highlights gradient and break-of-slope edges, not height or optical color. Prefer organized edges, rims, banks, terraces, "
+            "and enclosure boundaries over natural drainage or rough erosional texture. "
+        )
     if kind == "dsm":
         return (
             "Source interpretation: DSM or surface-height source. "
@@ -1782,8 +2255,14 @@ def _source_kind_prompt_context(source_kind: str, selected_views: Sequence[str])
     if kind == "mixed_topo":
         return (
             "Source interpretation: mixed optical and terrain-derived views. "
-            "Use cross-view consistency: RGB may show crop/soil/surface traces while hillshade, nDSM, DSM, DTM, or slope views may show relief. "
+            "Use cross-view consistency: RGB may show crop/soil/surface traces while hillshade, SLRM, SVF, nDSM, DSM, DTM, or slope views may show relief. "
             "Give more weight to anomalies that persist across the relevant views and reject one-view artifacts. "
+        )
+    if kind == "terrain_derivative":
+        return (
+            "Source interpretation: multiple terrain-derived raster views with no reliable optical RGB. "
+            "Treat every grayscale view as an analytical terrain product, not color or shadow. Compare hillshade, SLRM, SVF, slope, DSM/DTM, "
+            "or nDSM cues when present; prioritize landform geometry that is coherent across views and reject single-view processing artifacts. "
         )
     return (
         "Source interpretation: optical RGB / orthophoto-like imagery. "
@@ -1886,7 +2365,17 @@ def _build_prompt(
             JSON_SCHEMA_TEXT,
         ]
     )
-    if analysis_mode == "rgb_only" and str(source_kind).strip().lower() in {"hillshade", "single_band", "dsm", "dtm"}:
+    terrain_source_kinds = {
+        "hillshade",
+        "single_band",
+        "slrm",
+        "svf",
+        "slope",
+        "dsm",
+        "dtm",
+        "terrain_derivative",
+    }
+    if analysis_mode == "rgb_only" and str(source_kind).strip().lower() in terrain_source_kinds:
         mode_text = (
             "Data mode: single-source grayscale/terrain-derived input only. "
             "Do not interpret gray tone as optical color, vegetation greenness, soil color, or photographic shadow unless another view supports it. "
@@ -1909,10 +2398,16 @@ def _build_prompt(
             "Be careful: DSM can include vegetation, buildings, and other modern surface objects, so do not treat every height anomaly "
             "as terrain archaeology. Reject height patterns that align with trees, roofs, roads, field edges, or other modern surface objects."
         )
+    elif str(source_kind).strip().lower() == "terrain_derivative":
+        mode_text = (
+            "Data mode: multiple terrain-derived grayscale views, with no reliable optical RGB. "
+            "Use cross-view terrain consistency across hillshade, SLRM, SVF, slope, DSM/DTM, or nDSM when present. "
+            "Do not interpret brightness as color, vegetation, or soil marks; prioritize coherent landform morphology and plausible scale."
+        )
     else:
         mode_text = (
             "Data mode: RGB plus topographic derivative views. "
-            "Use RGB for crop/soil/surface traces and hillshade/nDSM/DSM/DTM/slope views for micro-topographic evidence. "
+            "Use RGB for crop/soil/surface traces and hillshade/SLRM/SVF/nDSM/DSM/DTM/slope views for micro-topographic evidence. "
             "Prioritize anomalies that appear consistently across relevant views, such as mounds, tumuli, ring ditches, banks, walls, "
             "terraces, foundation traces, old road traces, enclosures, and regular terrain forms. "
             "Reject anomalies that appear in only one noisy view or are better explained by natural drainage, vegetation, or modern land use."

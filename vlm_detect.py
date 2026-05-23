@@ -32,9 +32,12 @@ except ImportError:  # pragma: no cover - optional dependency message is clearer
 
 from vlm_lmstudio_detector import (
     VlmLmStudioConfig,
+    VlmOutputPaths,
     _default_stage1_guidance,
     _default_stage2_guidance,
     run_vlm_lmstudio_detection,
+    _write_candidate_outputs,
+    _candidate_record_lists,
 )
 
 
@@ -80,6 +83,7 @@ VLM_KEY_ALIASES = {
     "vlm_temperature": "temperature",
     "vlm_featureless_std_threshold": "featureless_std_threshold",
     "vlm_cross_tile_iou_threshold": "cross_tile_iou_threshold",
+    "vlm_batch": "batch",
 }
 
 
@@ -112,6 +116,7 @@ class StandaloneVlmConfig:
     log_level: str = "INFO"
     featureless_std_threshold: float = 4.0
     cross_tile_iou_threshold: float = 0.5
+    batch: bool = False
 
 
 def default_config_path() -> str:
@@ -179,7 +184,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--source-kind",
         "--vlm-source-kind",
         dest="source_kind",
-        help="Input interpretation: auto, rgb, hillshade, single_band, dsm, dtm, or mixed_topo.",
+        help=(
+            "Input interpretation: auto, rgb, hillshade, slrm, svf, slope, single_band, "
+            "dsm, dtm, mixed_topo, or terrain_derivative."
+        ),
     )
     parser.add_argument("--gsd-m", "--vlm-gsd-m", dest="gsd_m", type=float, help="Ground sample distance in m/px; 0 auto.")
     parser.add_argument(
@@ -199,6 +207,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--resume", dest="resume", action="store_true", default=None, help="Resume from previous JSONL.")
     parser.add_argument("--no-resume", dest="resume", action="store_false", default=None, help="Disable resume.")
+    parser.add_argument("--batch", dest="batch", action="store_true", default=None, help="Klasor girdisindeki her bir dosyayi ayri bir karo olarak sirayla tara ve birlesik cikti uret.")
+    parser.add_argument("--no-batch", dest="batch", action="store_false", default=None, help="Batch modunu kapat (klasor girdilerini ek view'lar olarak algilar).")
     parser.add_argument("--resume-jsonl-path", dest="resume_jsonl_path", help="Explicit VLM JSONL resume source.")
     parser.add_argument(
         "--prompt-stage1-path",
@@ -356,6 +366,10 @@ def parse_manual_band_indexes(band_string: str) -> Tuple[int, ...]:
 def resolve_vlm_band_indexes(input_path: Path, band_spec: str) -> Optional[Tuple[int, ...]]:
     """Resolve VLM bands. None means let vlm_lmstudio_detector auto-detect 3+ band rasters."""
     spec = str(band_spec or "").strip()
+    if input_path.is_dir():
+        if not spec or spec.lower() == "auto":
+            return None
+        return parse_manual_band_indexes(spec)
     if not spec or spec.lower() == "auto":
         with rasterio.open(input_path) as src:
             band_count = int(src.count)
@@ -378,6 +392,18 @@ def _validate_startup_preconditions(input_path: Path, config: StandaloneVlmConfi
     """Çalışma başlamadan önce kritik ön koşulları doğrula; manifest yazılmadan hata fırlat."""
     if not input_path.exists():
         raise FileNotFoundError(f"Girdi GeoTIFF bulunamadi: {input_path}")
+    if input_path.is_dir():
+        has_raster = any(
+            path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+            for path in input_path.iterdir()
+        )
+        if not has_raster:
+            has_raster = any(
+                path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+                for path in input_path.rglob("*")
+            )
+        if not has_raster:
+            raise FileNotFoundError(f"Girdi klasorunde GeoTIFF bulunamadi: {input_path}")
 
     for label, prompt_path in (
         ("Stage 1 prompt", config.prompt_stage1_path),
@@ -472,9 +498,202 @@ def write_run_info_txt(out_prefix: Path, config: StandaloneVlmConfig, band_index
     return info_path
 
 
+def run_batch(config: StandaloneVlmConfig) -> int:
+    input_dir = Path(config.input)
+    if not input_dir.is_dir():
+        LOGGER.error("Girdi yolu bir klasor olmalidir: %s", input_dir)
+        return 1
+
+    tif_paths = sorted(
+        path for path in input_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+    )
+    if not tif_paths:
+        tif_paths = sorted(
+            path for path in input_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".tif", ".tiff"}
+        )
+
+    if not tif_paths:
+        LOGGER.error("Klasor icinde hic .tif veya .tiff dosyasi bulunamadi: %s", input_dir)
+        return 1
+
+    LOGGER.info("Batch modunda toplam %d adet cografi karo (tile) bulundu.", len(tif_paths))
+    for idx, path in enumerate(tif_paths, 1):
+        LOGGER.info("  %d. %s", idx, path.name)
+
+    output_root = Path(config.output_root)
+    combined_folder = output_root / f"{SESSION_RUN_ID}_kapadokya_merged_batch"
+    combined_folder.mkdir(parents=True, exist_ok=True)
+
+    combined_paths = VlmOutputPaths(
+        jsonl=combined_folder / "combined_vlm_candidates.jsonl",
+        csv=combined_folder / "combined_vlm_candidates.csv",
+        xlsx=combined_folder / "combined_vlm_candidates.xlsx",
+        geojson=combined_folder / "combined_vlm_candidates.geojson",
+        gpkg=combined_folder / "combined_vlm_stage2_verified.gpkg",
+        gpkg_stage1=combined_folder / "combined_vlm_stage1_positives.gpkg",
+        gpkg_stage2=combined_folder / "combined_vlm_stage2_verified.gpkg",
+        raw_errors_jsonl=combined_folder / "combined_vlm_raw_errors.jsonl",
+    )
+
+    all_records: List[Dict[str, Any]] = []
+    all_error_records: List[Dict[str, Any]] = []
+    combined_crs = None
+
+    for idx, tif_path in enumerate(tif_paths, 1):
+        LOGGER.info("================================================================================")
+        LOGGER.info("KARO TARAMA BASLIYOR (%d/%d): %s", idx, len(tif_paths), tif_path.name)
+        LOGGER.info("================================================================================")
+
+        try:
+            with rasterio.open(tif_path) as src:
+                if combined_crs is None:
+                    combined_crs = src.crs
+
+            tile_config = StandaloneVlmConfig(
+                input=str(tif_path),
+                out_prefix=str(combined_folder / tif_path.stem),
+                output_root=config.output_root,
+                bands=config.bands,
+                base_url=config.base_url,
+                api_key=config.api_key,
+                model=config.model,
+                tile=config.tile,
+                overlap=config.overlap,
+                views=config.views,
+                source_kind=config.source_kind,
+                gsd_m=config.gsd_m,
+                confidence_threshold=config.confidence_threshold,
+                max_tiles=config.max_tiles,
+                export_every=config.export_every,
+                resume=config.resume,
+                resume_jsonl_path=None,
+                prompt_stage1_path=config.prompt_stage1_path,
+                prompt_stage2_path=config.prompt_stage2_path,
+                max_candidates_per_tile=config.max_candidates_per_tile,
+                reload_every_tiles=config.reload_every_tiles,
+                reload_pause_seconds=config.reload_pause_seconds,
+                timeout=config.timeout,
+                temperature=config.temperature,
+                log_level=config.log_level,
+                featureless_std_threshold=config.featureless_std_threshold,
+                cross_tile_iou_threshold=config.cross_tile_iou_threshold,
+                batch=False,
+            )
+
+            _validate_startup_preconditions(tif_path, tile_config)
+            band_indexes = resolve_vlm_band_indexes(tif_path, tile_config.bands)
+            sub_out_prefix = combined_folder / tif_path.stem
+            write_run_manifest(sub_out_prefix, tile_config, band_indexes)
+            write_run_info_txt(sub_out_prefix, tile_config, band_indexes)
+
+            summary = run_vlm_lmstudio_detection(
+                input_path=tif_path,
+                out_prefix=sub_out_prefix,
+                band_indexes=band_indexes,
+                config=VlmLmStudioConfig(
+                    base_url=tile_config.base_url,
+                    api_key=tile_config.api_key,
+                    model=tile_config.model,
+                    tile=tile_config.tile,
+                    overlap=tile_config.overlap,
+                    views=tile_config.views,
+                    source_kind=tile_config.source_kind,
+                    gsd_m=tile_config.gsd_m,
+                    confidence_threshold=tile_config.confidence_threshold,
+                    max_tiles=tile_config.max_tiles,
+                    timeout=tile_config.timeout,
+                    temperature=tile_config.temperature,
+                    export_every=tile_config.export_every,
+                    resume=tile_config.resume,
+                    resume_jsonl_path=sub_out_prefix.parent / f"{sub_out_prefix.name}_vlm_candidates.jsonl",
+                    prompt_stage1_path=tile_config.prompt_stage1_path,
+                    prompt_stage2_path=tile_config.prompt_stage2_path,
+                    max_candidates_per_tile=tile_config.max_candidates_per_tile,
+                    reload_every_tiles=tile_config.reload_every_tiles,
+                    reload_pause_seconds=tile_config.reload_pause_seconds,
+                    featureless_std_threshold=tile_config.featureless_std_threshold,
+                    cross_tile_iou_threshold=tile_config.cross_tile_iou_threshold,
+                ),
+                logger=LOGGER,
+            )
+
+            tile_jsonl = sub_out_prefix.parent / f"{sub_out_prefix.name}_vlm_candidates.jsonl"
+            tile_errors_jsonl = sub_out_prefix.parent / f"{sub_out_prefix.name}_vlm_raw_errors.jsonl"
+
+            if tile_jsonl.exists():
+                with tile_jsonl.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        if line.strip():
+                            record = json.loads(line)
+                            record["batch_tile_name"] = tif_path.name
+                            all_records.append(record)
+
+            if tile_errors_jsonl.exists():
+                with tile_errors_jsonl.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        if line.strip():
+                            err_record = json.loads(line)
+                            err_record["batch_tile_name"] = tif_path.name
+                            all_error_records.append(err_record)
+
+        except Exception as exc:
+            LOGGER.error("%s karosu taranirken kritik hata olustu: %s", tif_path.name, exc)
+            continue
+
+    if not all_records:
+        LOGGER.warning("Taramalar sonucunda hicbir kayit uretilemedi.")
+        return 0
+
+    LOGGER.info("================================================================================")
+    LOGGER.info("TUM KAROLAR TAMAMLANDI. BIRLESTIRILMIS CIKTILAR YAZILIYOR...")
+    LOGGER.info("================================================================================")
+
+    with combined_paths.jsonl.open("w", encoding="utf-8") as fh:
+        for record in all_records:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            
+    with combined_paths.raw_errors_jsonl.open("w", encoding="utf-8") as fh:
+        for record in all_error_records:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    first_stage_records, candidate_records = _candidate_record_lists(all_records, config.confidence_threshold)
+
+    _write_candidate_outputs(
+        paths=combined_paths,
+        records=candidate_records,
+        crs=combined_crs,
+        first_stage_records=first_stage_records,
+        all_records=all_records,
+        confidence_threshold=config.confidence_threshold,
+        cross_tile_iou_threshold=config.cross_tile_iou_threshold,
+        logger=LOGGER,
+    )
+
+    LOGGER.info("Birlesik batch tarama basariyla tamamlandi!")
+    LOGGER.info("Birlesik Sonuclar Klasoru: %s", combined_folder)
+    LOGGER.info("Birlesik JSONL: %s", combined_paths.jsonl)
+    LOGGER.info("Birlesik CSV: %s", combined_paths.csv)
+    if combined_paths.xlsx.exists():
+        LOGGER.info("Birlesik Excel: %s", combined_paths.xlsx)
+    LOGGER.info("Birlesik GeoJSON: %s", combined_paths.geojson)
+    if combined_paths.gpkg_stage1.exists():
+        LOGGER.info("Birlesik GPKG ilk asama pozitifler: %s", combined_paths.gpkg_stage1)
+        LOGGER.info("Birlesik GPKG ikinci asama dogrulanan: %s", combined_paths.gpkg_stage2)
+
+    return 0
+
+
 def run(config: StandaloneVlmConfig) -> int:
     input_path = Path(config.input)
     _validate_startup_preconditions(input_path, config)
+
+    if config.batch:
+        if not input_path.is_dir():
+            LOGGER.error("Batch modu icin girdi yolu bir klasor olmalidir: %s", input_path)
+            return 1
+        return run_batch(config)
 
     out_prefix = resolve_out_prefix(input_path, config)
     band_indexes = resolve_vlm_band_indexes(input_path, config.bands)
