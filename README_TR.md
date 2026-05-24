@@ -1,180 +1,197 @@
-﻿# ğŸ›ï¸ Arkeolojik Alan Tespiti (Derin Ã–ÄŸrenme + Klasik GÃ¶rÃ¼ntÃ¼ Ä°ÅŸleme)
+# 🏛️ Arkeolojik Alan Tespiti (Derin Öğrenme + Klasik Görüntü İşleme)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Ä°ngilizce dokÃ¼mantasyon: [`README.md`](README.md).
+İngilizce dokümantasyon: [`README.md`](README.md).
 
-> **Ã‡ok bantlÄ± GeoTIFF verilerinden arkeolojik yapÄ±larÄ±n otomatik tespiti iÃ§in geliÅŸmiÅŸ yapay zeka sistemi. Ã–ncelikli olarak Ä°HA (insansÄ±z hava aracÄ±) nadir gÃ¶rÃ¼ntÃ¼lerinden Ã¼retilen tÃ¼revler Ã¼zerinde Ã§alÄ±ÅŸÄ±râ€”ortofoto, DSM/DTM ve tÃ¼retilmiÅŸ kabartma kanallarÄ±. Uydu gÃ¶rÃ¼ntÃ¼leri ve diÄŸer hava/LiDAR kaynaklarÄ± da aynÄ± Ã§ok bantlÄ± GeoTIFF formatÄ±nda saÄŸlandÄ±ÄŸÄ±nda desteklenir.**
+> **Çok bantlı GeoTIFF verilerinden arkeolojik yapıların otomatik tespiti için gelişmiş yapay zeka sistemi. Öncelikli olarak İHA (insansız hava aracı) nadir görüntülerinden üretilen türevler üzerinde çalışır—ortofoto, DSM/DTM ve türetilmiş kabartma kanalları. Uydu görüntüleri ve diğer hava/LiDAR kaynakları da aynı çok bantlı GeoTIFF formatında sağlandığında desteklenir.**
 
-Bu proje, Ã§ok bantlÄ± GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (tÃ¼mÃ¼lÃ¼s, hendek, hÃ¶yÃ¼k, duvar kalÄ±ntÄ±larÄ± vb.) tespit etmek iÃ§in **derin Ã¶ÄŸrenme** ve **klasik gÃ¶rÃ¼ntÃ¼ iÅŸleme** yÃ¶ntemlerini birleÅŸtirir. Girdi verileri Ã§oÄŸunlukla **Ä°HA fotogrametrisinden** elde edilir; **uydu gÃ¶rÃ¼ntÃ¼leri veya diÄŸer hava Ã¼rÃ¼nleri** de bant yapÄ±sÄ± ve jeoreferans uyumlu olduÄŸu sÃ¼rece kullanÄ±labilir.
+Bu proje, çok bantlı GeoTIFF verilerinden (RGB, DSM, DTM) arkeolojik izleri (tümülüs, hendek, höyük, duvar kalıntıları vb.) tespit etmek için **derin öğrenme** ve **klasik görüntü işleme** yöntemlerini birleştirir. Girdi verileri çoğunlukla **İHA fotogrametrisinden** elde edilir; **uydu görüntüleri veya diğer hava ürünleri** de bant yapısı ve jeoreferans uyumlu olduğu sürece kullanılabilir.
 
-### Depodaki varsayilan is akisi (`config.yaml`)
+### Depodaki varsayılan iş akışı (`config.yaml`)
 
-Eger `config.local.yaml` varsa CLI otomatik olarak onu tercih eder; yoksa `config.yaml` kullanilir.
+Eğer `config.local.yaml` varsa CLI otomatik olarak onu tercih eder; yoksa `config.yaml` kullanılır.
 
-KayÄ±tlÄ± profil **karo dÃ¼zeyinde sÄ±nÄ±flandÄ±rma** (`dl_task: tile_classification`) ve **tek eÄŸitilmiÅŸ checkpoint** (`trained_model_only: true`) iÃ§in ayarlÄ±dÄ±r. Bu modda:
+Kayıtlı `config.yaml` şu an **karo düzeyinde sınıflandırma** (`dl_task: tile_classification`) akışını belgelendirir, ancak tespit yöntemleri güvenli başlangıç için kapalıdır: `enable_deep_learning: false`, `enable_classic: false`, `enable_fusion: false`, `enable_yolo: false` ve `trained_model_only: false`. Bu nedenle yalnızca `python archaeo_detect.py` çalıştırmak, en az bir yöntem açılmadığı sürece kodun beklediği şekilde hata verir. Gerçek çıkarım için CLI'dan bir yöntem açın veya `config.yaml` içinde ilgili yöntemi etkinleştirin.
 
-**Topo feature modlari:** topo modlarda kaynak raster yine **5 bantli GeoTIFF** kalir: **R, G, B, DSM, DTM**. `feature_mode: topo5` modeli **R, G, B, SVF, SLRM** ile besler. `feature_mode: topo7` modeli **R, G, B, SVF, SLRM, Slope, nDSM** ile besler. SVF/SLRM/Slope DTM'den uretilir; `nDSM = DSM - DTM`; DSM ve DTM ham kanal olarak modele verilmez. Egitim ve inference metadata'si `in_channels` ve `channel_names` tuttugu icin topo5 checkpoint topo7 tensorle, topo7 checkpoint de topo5 tensorle sessizce calismaz; acik sema hatasi verir.
+**Topo feature modları:** topo modlarda kaynak raster yine **5 bantlı GeoTIFF** kalır: **R, G, B, DSM, DTM**. `feature_mode: topo5` modeli **R, G, B, SVF, SLRM** ile besler. `feature_mode: topo7` modeli **R, G, B, SVF, SLRM, Slope, nDSM** ile besler. SVF/SLRM/Slope DTM'den üretilir; `nDSM = DSM - DTM`; DSM ve DTM ham kanal olarak modele verilmez. Eğitim ve inference metadata'sı `in_channels` ve `channel_names` tuttuğu için topo5 checkpoint topo7 tensorle, topo7 checkpoint de topo5 tensorle sessizce çalışmaz; açık şema hatası verir.
 
-- **`weights`** (`.pth` dosyasÄ±) ve **`training_metadata`** (eÄŸitimden gelen JSON) kullanÄ±lÄ±r.
-- **`tile`**, **`overlap`** ve **`bands`** Ã§Ä±karÄ±m sÄ±rasÄ±nda `training_metadata.json` iÃ§inden kilitlenir; YAMLâ€™da yalnÄ±zca `overlap` deÄŸerini artÄ±rarak uyumsuzluÄŸu gidermeyin â€” farklÄ± overlap iÃ§in veri Ã¼retimini ve eÄŸitimi o overlap ile yeniden yapÄ±n.
-- BaÅŸarÄ±lÄ± bir `training.py` Ã§alÄ±ÅŸmasÄ±ndan sonra en iyi aÄŸÄ±rlÄ±klar `workspace/checkpoints/active/model.pth` dosyasÄ±na, metadata ise `workspace/checkpoints/active/training_metadata.json` dosyasÄ±na kopyalanÄ±r (`weights` yolunu `workspace/checkpoints/active/` altÄ±ndaki baÅŸka bir checkpointâ€™e de yÃ¶nlendirebilirsiniz).
+- Eğitilmiş tek checkpoint ile çalışacaksanız `enable_deep_learning: true`, `trained_model_only: true`, **`weights`** (`.pth`) ve **`training_metadata`** (eğitim JSON'u) birlikte kullanılmalıdır.
+- `trained_model_only: true` iken **`tile`**, **`overlap`** ve **`bands`** çıkarım sırasında `training_metadata.json` içinden kilitlenir; YAML'da yalnızca `overlap` değerini artırarak uyumsuzluğu gidermeyin — farklı overlap için veri üretimini ve eğitimi o overlap ile yeniden yapın.
+- Başarılı bir `training.py` çalışmasından sonra en iyi ağırlıklar `workspace/checkpoints/active/model.pth` dosyasına, metadata ise `workspace/checkpoints/active/training_metadata.json` dosyasına kopyalanır (`weights` yolunu `workspace/checkpoints/active/` altındaki başka bir checkpoint'e de yönlendirebilirsiniz).
 
-**Model girdi kanallari (guncel kod):** `MODEL_CHANNEL_NAMES` **topo5 geriye uyumluluk varsayilani** olarak kalir: **R, G, B, SVF, SLRM**. Yeni topo7 akislari `feature_mode: topo7` / metadata `channel_names` ile **R, G, B, SVF, SLRM, Slope, nDSM** semasini secer. Eski belgelerde gecen **12 kanalli** tensor onceki bir semayi anlatir; guncel egitim ve cikarim yolu bunu kullanmaz.
-
----
-
-## ğŸ“‘ Ä°Ã§indekiler
-
-- [âœ¨ Ã–zellikler](#-Ã¶zellikler)
-- [ğŸ¯ Ne Yapar](#-ne-yapar)
-- [ğŸš€ HÄ±zlÄ± BaÅŸlangÄ±Ã§](#-hÄ±zlÄ±-baÅŸlangÄ±Ã§)
-- [ğŸ“¦ Kurulum](#-kurulum)
-- [ğŸ·ï¸ Ground Truth Etiketleme AracÄ± (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-etiketleme-aracÄ±-ground_truth_kare_etiketleme_qtpy)
-- [ğŸ® KullanÄ±m](#-kullanÄ±m)
-- [âš™ï¸ YapÄ±landÄ±rma](#ï¸-yapÄ±landÄ±rma)
-- [ğŸ“‚ Ã‡Ä±ktÄ± DosyalarÄ±](#-Ã§Ä±ktÄ±-dosyalarÄ±)
-- [ğŸ”¬ NasÄ±l Ã‡alÄ±ÅŸÄ±r](#-nasÄ±l-Ã§alÄ±ÅŸÄ±r)
-- [ğŸ’¡ KullanÄ±m SenaryolarÄ±](#-kullanÄ±m-senaryolarÄ±)
-- [ğŸ¨ GÃ¶rselleÅŸtirme](#-gÃ¶rselleÅŸtirme)
-- [âš¡ Performans Optimizasyonu](#-performans-optimizasyonu)
-- [ğŸ› Sorun Giderme](#-sorun-giderme)
-- [â“ SSS](#-sss)
-- [ğŸ“ Model EÄŸitimi KÄ±lavuzu](#-model-eÄŸitimi-kÄ±lavuzu)
-- [ğŸ”¬ GeliÅŸmiÅŸ Ã–zellikler](#-geliÅŸmiÅŸ-Ã¶zellikler)
-- [ğŸ“š Teknik Detaylar](#-teknik-detaylar)
-- [ğŸ¤ KatkÄ±da Bulunma](#-katkÄ±da-bulunma)
-- [ğŸ“„ Lisans](#-lisans)
+**Model girdi kanalları (güncel kod):** `MODEL_CHANNEL_NAMES` **topo5 geriye uyumluluk varsayılanı** olarak kalır: **R, G, B, SVF, SLRM**. `feature_mode: rgb3` yalnızca **R, G, B** kullanır. Yeni topo7 akışları `feature_mode: topo7` / metadata `channel_names` ile **R, G, B, SVF, SLRM, Slope, nDSM** şemasını seçer. Eski belgelerde geçen **12 kanallı** tensor önceki bir şemayı anlatır; güncel eğitim ve çıkarım yolu bunu kullanmaz.
 
 ---
 
-## âœ¨ Ã–zellikler
+## 📑 İçindekiler
 
-### ğŸ§  DÃ¶rt GÃ¼Ã§lÃ¼ YÃ¶ntem
-- **Derin Ã–ÄŸrenme**: U-Net, DeepLabV3+ ve diÄŸer modern segmentasyon mimarileri
-- **YOLO11 (YENÄ°!)**: Ultralytics YOLO11 ile hÄ±zlÄ± nesne tespiti ve segmentasyon + etiketli arazi envanteri ğŸ·ï¸
-  - âš ï¸ **Not:** Nadir (kuÅŸbakÄ±ÅŸÄ±) gÃ¶rÃ¼ntÃ¼ler iÃ§in ince ayar gereklidir (bkz. docs/YOLO11_NADIR_TRAINING.md)
-- **Klasik GÃ¶rÃ¼ntÃ¼ Ä°ÅŸleme**: RVT (Kabartma GÃ¶rselleÅŸtirme AraÃ§ Kutusu), Hessian matrisi, Morfolojik operatÃ¶rler
-- **Hibrit FÃ¼zyon**: Her yÃ¶ntemin gÃ¼Ã§lÃ¼ yÃ¶nlerini birleÅŸtiren akÄ±llÄ± fÃ¼zyon
-
-### ğŸ¯ AkÄ±llÄ± Tespit Ã–zellikleri
-- âœ… **Ã‡oklu KodlayÄ±cÄ± DesteÄŸi**: ResNet, EfficientNet, VGG, DenseNet, MobileNet ve daha fazlasÄ±
-- âœ… **SÄ±fÄ±r AtÄ±ÅŸ Ã–ÄŸrenme**: ImageNet aÄŸÄ±rlÄ±klarÄ±nÄ± kullanarak eÄŸitilmiÅŸ modeller olmadan bile Ã§alÄ±ÅŸÄ±r
-- âœ… **Topluluk Ã–ÄŸrenme**: Daha gÃ¼venilir tespit iÃ§in birden fazla kodlayÄ±cÄ±nÄ±n sonuÃ§larÄ±nÄ± birleÅŸtirir
-- âœ… **Ã‡ok Ã–lÃ§ekli Analiz**: FarklÄ± boyutlardaki yapÄ±larÄ± tespit eder
-- âœ… **ğŸ†• Etiketli Nesne Tespiti**: YOLO11 ile 80 farklÄ± nesne sÄ±nÄ±fÄ±nÄ±n otomatik etiketlenmesi (aÄŸaÃ§lar, binalar, araÃ§lar vb.)
-- âœ… **ğŸ†• 5 kanallÄ± DL yÄ±ÄŸÄ±nÄ±**: Rasterdan R, G, B; DTM Ã¼zerinden RVT ile **SVF** ve **SLRM** â€” kodda birleÅŸtirilir, ekstra GeoTIFF bandÄ± deÄŸildir
-- âœ… **ğŸ†• CBAM dikkat (isteÄŸe baÄŸlÄ±)**: `training.py` iÃ§inde etkinleÅŸtirilebilir; kayÄ±tlÄ± `CONFIG` varsayÄ±lanÄ±nda genelde kapalÄ± (`no_attention: true`)
-
-### ğŸ”§ Teknik Ã–zellikler
-- ğŸš€ **Karo TabanlÄ± Ä°ÅŸleme**: BÃ¼yÃ¼k gÃ¶rÃ¼ntÃ¼ler iÃ§in bellek verimli iÅŸleme
-- ğŸ¨ **Sorunsuz Mozaikleme**: KosinÃ¼s yumuÅŸatma ile karo sÄ±nÄ±rlarÄ±nda artefakt yok
-- ğŸ“Š **SaÄŸlam Normalizasyon**: Global veya yerel yÃ¼zdelik tabanlÄ± normalizasyon
-- âš¡ **Ã–nbellek Sistemi**: RVT hesaplamalarÄ±nÄ± Ã¶nbelleÄŸe alarak 10-100x hÄ±zlanma
-- ğŸ¯ **AkÄ±llÄ± Maskeleme**: YÃ¼ksek yapÄ±larÄ±n (aÄŸaÃ§lar, binalar) otomatik filtrelenmesi
-- ğŸ“ **VektÃ¶rleÅŸtirme**: SonuÃ§larÄ± CBS uyumlu Ã§okgenlere dÃ¶nÃ¼ÅŸtÃ¼rÃ¼r
-- ğŸ·ï¸ **Ground Truth Etiketleme**: Katman yÃ¶netimli interaktif Qt tabanlÄ± GeoTIFF etiketleme aracÄ±
-
-### ğŸŒ CBS Entegrasyonu
-- ğŸ“ GeoPackage (.gpkg) formatÄ±nda vektÃ¶r Ã§Ä±ktÄ±sÄ±
-- ğŸ—ºï¸ CoÄŸrafi koordinat sistemi (CRS) korunur
-- ğŸ“ Alan hesaplama ve filtreleme
-- ğŸ¯ QGIS, ArcGIS ve benzeri yazÄ±lÄ±mlarla uyumlu
+- [✨ Özellikler](#-özellikler)
+- [🎯 Ne Yapar](#-ne-yapar)
+- [🚀 Hızlı Başlangıç](#-hızlı-başlangıç)
+- [📦 Kurulum](#-kurulum)
+- [🔗 Bant Birleştirme Aracı (`veri_birlestir_rgb_dsm_dtm.py`)](#-bant-birleştirme-aracı-veri_birlestir_rgb_dsm_dtmpy)
+- [DSM'den DTM Ön İşleme (`dtm_uret.py`)](#dsmden-dtm-ön-işleme-dtm_uretpy)
+- [🏷️ Ground Truth Etiketleme Aracı (`ground_truth_kare_etiketleme_qt.py`)](#%EF%B8%8F-ground-truth-etiketleme-aracı-ground_truth_kare_etiketleme_qtpy)
+- [🗂️ Tile Classification Dataset Aracı (`prepare_tile_classification_dataset.py`)](#%EF%B8%8F-tile-classification-dataset-aracı-prepare_tile_classification_datasetpy)
+- [🎮 Kullanım](#-kullanım)
+- [VLM / LM Studio Aday Taraması](#vlm--lm-studio-aday-taraması)
+- [⚙️ Yapılandırma](#️-yapılandırma)
+- [📂 Çıktı Dosyaları](#-çıktı-dosyaları)
+- [🔬 Nasıl Çalışır](#-nasıl-çalışır)
+- [💡 Kullanım Senaryoları](#-kullanım-senaryoları)
+- [🎨 Görselleştirme](#-görselleştirme)
+- [⚡ Performans Optimizasyonu](#-performans-optimizasyonu)
+- [🐛 Sorun Giderme](#-sorun-giderme)
+- [❓ SSS](#-sss)
+- [🎓 Model Eğitimi Kılavuzu](#-model-eğitimi-kılavuzu)
+- [🔬 Gelişmiş Özellikler](#-gelişmiş-özellikler)
+- [📚 Teknik Detaylar](#-teknik-detaylar)
+- [🤝 Katkıda Bulunma](#-katkıda-bulunma)
+- [📄 Lisans](#-lisans)
 
 ---
 
-## ğŸ¯ Ne Yapar
+## ✨ Özellikler
 
-Bu sistem aÅŸaÄŸÄ±daki arkeolojik Ã¶zellikleri tespit edebilir:
+### 🧠 Beş Güçlü Yöntem
+- **Derin Öğrenme**: U-Net, DeepLabV3+ ve diğer modern segmentasyon mimarileri
+- **YOLO11 (YENİ!)**: Ultralytics YOLO11 ile hızlı nesne tespiti ve segmentasyon + etiketli arazi envanteri 🏷️
+  - ⚠️ **Not:** Nadir (kuşbakışı) görüntüler için ince ayar gereklidir (bkz. docs/YOLO11_NADIR_TRAINING.md)
+- **LM Studio VLM tarayıcı**: OpenAI uyumlu vision-language model ile ayrı aday tabloları ve CBS katmanları üretir; DL/fusion maskelerine karıştırılmaz
+- **Klasik Görüntü İşleme**: RVT (Kabartma Görselleştirme Araç Kutusu), Hessian matrisi, Morfolojik operatörler
+- **Hibrit Füzyon**: Her yöntemin güçlü yönlerini birleştiren akıllı füzyon
 
-| YapÄ± Tipi | AÃ§Ä±klama | Tespit YÃ¶ntemi |
+### 🎯 Akıllı Tespit Özellikleri
+- ✅ **Çoklu Kodlayıcı Desteği**: ResNet, EfficientNet, VGG, DenseNet, MobileNet ve daha fazlası
+- ✅ **Sıfır Atış Öğrenme**: ImageNet ağırlıklarını kullanarak eğitilmiş modeller olmadan bile çalışır
+- ✅ **Topluluk Öğrenme**: Daha güvenilir tespit için birden fazla kodlayıcının sonuçlarını birleştirir
+- ✅ **Çok Ölçekli Analiz**: Farklı boyutlardaki yapıları tespit eder
+- ✅ **🆕 Etiketli Nesne Tespiti**: YOLO11 ile 80 farklı nesne sınıfının otomatik etiketlenmesi (ağaçlar, binalar, araçlar vb.)
+- ✅ **🆕 5 kanallı DL yığını**: Rasterdan R, G, B; DTM üzerinden RVT ile **SVF** ve **SLRM** — kodda birleştirilir, ekstra GeoTIFF bandı değildir
+- ✅ **🆕 CBAM dikkat (isteğe bağlı)**: `training.py` içinde etkinleştirilebilir; kayıtlı `CONFIG` varsayılanında genelde kapalı (`no_attention: true`)
+
+### 🔧 Teknik Özellikler
+- 🚀 **Karo Tabanlı İşleme**: Büyük görüntüler için bellek verimli işleme
+- 🎨 **Sorunsuz Mozaikleme**: Kosinüs yumuşatma ile karo sınırlarında artefakt yok
+- 📊 **Sağlam Normalizasyon**: Global veya yerel yüzdelik tabanlı normalizasyon
+- ⚡ **Önbellek Sistemi**: RVT hesaplamalarını önbelleğe alarak 10-100x hızlanma
+- 🎯 **Akıllı Maskeleme**: Yüksek yapıların (ağaçlar, binalar) otomatik filtrelenmesi
+- 📐 **Vektörleştirme**: Sonuçları CBS uyumlu çokgenlere dönüştürür
+- 🏷️ **Ground Truth Etiketleme**: Katman yönetimli interaktif Qt tabanlı GeoTIFF etiketleme aracı
+
+### 🌐 CBS Entegrasyonu
+- 📁 GeoPackage (.gpkg) formatında vektör çıktısı
+- 🗺️ Coğrafi koordinat sistemi (CRS) korunur
+- 📏 Alan hesaplama ve filtreleme
+- 🎯 QGIS, ArcGIS ve benzeri yazılımlarla uyumlu
+
+---
+
+## 🎯 Ne Yapar
+
+Bu sistem aşağıdaki arkeolojik özellikleri tespit edebilir:
+
+| Yapı Tipi | Açıklama | Tespit Yöntemi |
 |-----------|----------|----------------|
-| ğŸ”ï¸ **TÃ¼mÃ¼lÃ¼sler** | YÃ¼kseltilmiÅŸ mezar hÃ¶yÃ¼kleri | RVT + Hessian + DL |
-| ğŸ›ï¸ **HÃ¶yÃ¼kler** | YerleÅŸim hÃ¶yÃ¼kleri | TÃ¼m yÃ¶ntemler |
-| ğŸ§± **Duvar KalÄ±ntÄ±larÄ±** | DoÄŸrusal yapÄ± izleri | Hessian + DL |
-| â­• **Halka Hendekler** | Dairesel savunma yapÄ±larÄ± | Morfolojik + DL |
-| ğŸ° **Kale KalÄ±ntÄ±larÄ±** | BÃ¼yÃ¼k yapÄ± kompleksleri | FÃ¼zyon (en etkili) |
-| ğŸº **YerleÅŸim Ä°zleri** | DÃ¼zensiz topografik anomaliler | Klasik + DL |
-| ğŸ›¤ï¸ **Antik Yollar** | DoÄŸrusal yÃ¼kseklik deÄŸiÅŸimleri | Hessian + RVT |
+| 🏔️ **Tümülüsler** | Yükseltilmiş mezar höyükleri | RVT + Hessian + DL |
+| 🏛️ **Höyükler** | Yerleşim höyükleri | Tüm yöntemler |
+| 🧱 **Duvar Kalıntıları** | Doğrusal yapı izleri | Hessian + DL |
+| ⭕ **Halka Hendekler** | Dairesel savunma yapıları | Morfolojik + DL |
+| 🏰 **Kale Kalıntıları** | Büyük yapı kompleksleri | Füzyon (en etkili) |
+| 🏺 **Yerleşim İzleri** | Düzensiz topografik anomaliler | Klasik + DL |
+| 🛤️ **Antik Yollar** | Doğrusal yükseklik değişimleri | Hessian + RVT |
 
 ---
 
-## ğŸš€ HÄ±zlÄ± BaÅŸlangÄ±Ã§
+## 🚀 Hızlı Başlangıç
 
-### UÃ§tan uca: etiket â†’ karo â†’ eÄŸitim â†’ tespit
+### Uçtan uca: etiket → karo → eğitim → tespit
 
 ```bash
 pip install -r requirements.txt
 
-# 1a) Eski paired dÃ¼zen (images + masks): segmentation veya geri uyumluluk iÃ§in
+# 1a) Eski paired düzen (images + masks): segmentation veya geri uyumluluk için
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
   --output workspace/training_data
 
-# 1b) DoÄŸrudan Positive/Negative klasÃ¶rleri Ã¼reten tile-classification dataset
+# 1b) Doğrudan Positive/Negative klasörleri üreten tile-classification dataset
 python prepare_tile_classification_dataset.py \
   --pair kesif_alani.tif ground_truth.tif \
   --output-dir workspace/training_data_classification \
   --sampling-mode selected_regions \
   --overwrite
 
-# 2) EÄŸitim (training.py artÄ±k iki dÃ¼zeni de kabul ediyor)
+# 2) Eğitim (training.py artık iki düzeni de kabul ediyor)
 python training.py --data workspace/training_data_classification --task tile_classification --epochs 50
 
-# 3) Ã‡Ä±karÄ±m (config.yaml; workspace/checkpoints/active/ yayÄ±nÄ± eÄŸitim Ã§Ä±ktÄ±sÄ±nda Ã¶zetlenir)
-python archaeo_detect.py
+# 3) Çıkarım (eğitilmiş tek checkpoint ile)
+python archaeo_detect.py \
+  --enable-deep-learning \
+  --trained-model-only \
+  --weights workspace/checkpoints/active/model.pth \
+  --training-metadata workspace/checkpoints/active/training_metadata.json
 ```
 
-EÄŸitim sonrasÄ± artefactâ€™lar:
+Eğitim sonrası artefact'lar:
 
-- `workspace/checkpoints/active/model.pth` â€” Ã§Ä±karÄ±m iÃ§in kopyalanan en iyi aÄŸÄ±rlÄ±klar
-- `workspace/checkpoints/active/training_metadata.json` â€” `trained_model_only: true` iken **`tile` / `overlap` / `bands` iÃ§in kaynak**
+- `workspace/checkpoints/active/model.pth` — çıkarım için kopyalanan en iyi ağırlıklar
+- `workspace/checkpoints/active/training_metadata.json` — `trained_model_only: true` iken **`tile` / `overlap` / `bands` için kaynak**
 
-**Ã–nemli:** `trained_model_only: true` iken YAMLâ€™da yalnÄ±zca `overlap` artÄ±rarak eÄŸitimle uyumu â€œsaÄŸlamayaâ€ Ã§alÄ±ÅŸmayÄ±n; metadata bu alanlarÄ± kilitler. FarklÄ± overlap gerekiyorsa veriyi o overlap ile Ã¼retin ve modeli yeniden eÄŸitin.
+**Önemli:** `trained_model_only: true` iken YAML'da yalnızca `overlap` artırarak eğitimle uyumu "sağlamaya" çalışmayın; metadata bu alanları kilitler. Farklı overlap gerekiyorsa veriyi o overlap ile üretin ve modeli yeniden eğitin.
 
-**HenÃ¼z eÄŸitilmiÅŸ model yoksa:** sÄ±fÄ±r atÄ±ÅŸ / klasik yollar iÃ§in [KullanÄ±m](#-kullanÄ±m) bÃ¶lÃ¼mÃ¼ne bakÄ±n; ana `config.yaml` yerine Ã¶rnek profil ile denemek iÃ§in:
+**Henüz eğitilmiş model yoksa:** sıfır atış / klasik yollar için [Kullanım](#-kullanım) bölümüne bakın; ana `config.yaml` yerine örnek profil ile denemek için:
 
 ```bash
 python archaeo_detect.py --config configs/tile_classification_baseline.example.yaml
 ```
 
-### YalnÄ±zca tespit (ortam hazÄ±r)
+### Yalnızca tespit (ortam hazır)
 
 ```bash
-python archaeo_detect.py
+# RGB-only kayıtlı config ile YOLO11 kullanmak için
+python archaeo_detect.py --enable-yolo
+
+# Eğitilmiş DL checkpoint ile
+python archaeo_detect.py \
+  --enable-deep-learning \
+  --trained-model-only \
+  --weights workspace/checkpoints/active/model.pth \
+  --training-metadata workspace/checkpoints/active/training_metadata.json
 ```
 
-`config.yaml` iÃ§indeki girdi rasterÄ±, yÃ¶ntemler ve eÅŸikler kullanÄ±lÄ±r. SonuÃ§lar `workspace/ciktilar/<oturum>/` altÄ±na yazÄ±lÄ±r.
+`config.yaml` içindeki girdi rasterı, yöntemler ve eşikler kullanılır. Güncel `config.yaml` içinde tüm yöntem bayrakları kapalı olduğu için argümansız çalıştırmadan önce `enable_deep_learning`, `enable_classic` veya `enable_yolo` seçeneklerinden en az birini açmanız gerekir. Sonuçlar `workspace/ciktilar/<oturum>/` altına yazılır.
 
-### IDE / CLI ile veri hazÄ±rlÄ±ÄŸÄ±
+### IDE / CLI ile veri hazırlığı
 
-`egitim_verisi_olusturma.py` dosyasÄ±nda bir `CONFIG` sÃ¶zlÃ¼ÄŸÃ¼ vardÄ±r (varsayÄ±lan `input`, `mask`, `output`, `tile_size`, `overlap`, `bands`, â€¦). `--input` / `--mask` vermeden Ã§alÄ±ÅŸtÄ±rÄ±yorsanÄ±z bu anahtarlarÄ±n `CONFIG` iÃ§inde dolu olmasÄ± gerekir â€” girdi iÃ§in etkileÅŸimli dosya penceresi yoktur.
+`egitim_verisi_olusturma.py` dosyasında bir `CONFIG` sözlüğü vardır (varsayılan `input`, `mask`, `output`, `tile_size`, `overlap`, `bands`, …). `--input` / `--mask` vermeden çalıştırıyorsanız bu anahtarların `CONFIG` içinde dolu olması gerekir — girdi için etkileşimli dosya penceresi yoktur.
 
 ---
 
-## ğŸ“¦ Kurulum
+## 📦 Kurulum
 
 ### Sistem Gereksinimleri
 
-| Gereksinim | Minimum | Ã–nerilen |
+| Gereksinim | Minimum | Önerilen |
 |------------|---------|----------|
 | **Python** | 3.10+ | 3.11+ |
 | **RAM** | 8 GB | 16 GB+ |
-| **Disk AlanÄ±** | 2 GB | 5 GB+ |
-| **GPU** | Yok (CPU ile Ã§alÄ±ÅŸÄ±r) | NVIDIA CUDA destekli GPU |
+| **Disk Alanı** | 2 GB | 5 GB+ |
+| **GPU** | Yok (CPU ile çalışır) | NVIDIA CUDA destekli GPU |
 
-### AdÄ±m AdÄ±m Kurulum
+### Adım Adım Kurulum
 
-#### 1ï¸âƒ£ Python ve Pip KontrolÃ¼
+#### 1️⃣ Python ve Pip Kontrolü
 
 ```bash
-python --version  # Python 3.10 veya Ã¼stÃ¼ olmalÄ±
-pip --version     # pip yÃ¼klÃ¼ olmalÄ±
+python --version  # Python 3.10 veya üstü olmalı
+pip --version     # pip yüklü olmalı
 ```
 
-#### 2ï¸âƒ£ Sanal Ortam OluÅŸturma (Ã–nerilir)
+#### 2️⃣ Sanal Ortam Oluşturma (Önerilir)
 
 ```bash
 # Windows
@@ -186,29 +203,29 @@ python -m venv .venv310
 source .venv310/bin/activate
 ```
 
-**Not:** `.venv310` opsiyoneldir. Conda (`archeo`) kullanÄ±yorsanÄ±z `.venv310` oluÅŸturmanÄ±z gerekmez ve varsa silebilirsiniz.
+**Not:** `.venv310` opsiyoneldir. Conda (`archeo`) kullanıyorsanız `.venv310` oluşturmanız gerekmez ve varsa silebilirsiniz.
 
-#### 3ï¸âƒ£ Gerekli Paketleri YÃ¼kleme
+#### 3️⃣ Gerekli Paketleri Yükleme
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**requirements.txt iÃ§eriÄŸi:**
-- `torch>=2.0.0` - PyTorch (derin Ã¶ÄŸrenme)
-- `torchvision>=0.15.0` - GÃ¶rÃ¼ntÃ¼ iÅŸleme
+**requirements.txt içeriği:**
+- `torch>=2.0.0` - PyTorch (derin öğrenme)
+- `torchvision>=0.15.0` - Görüntü işleme
 - `segmentation-models-pytorch>=0.3.2` - Segmentasyon modelleri
 - `rasterio>=1.3.0` - Raster veri okuma/yazma
-- `fiona>=1.9.0` - VektÃ¶r veri iÅŸleme
-- `geopandas>=0.12.0` - CoÄŸrafi veri analizi
-- `opencv-python>=4.7.0` - GÃ¶rÃ¼ntÃ¼ iÅŸleme
-- `scikit-image>=0.20.0` - GeliÅŸmiÅŸ gÃ¶rÃ¼ntÃ¼ iÅŸleme
+- `fiona>=1.9.0` - Vektör veri işleme
+- `geopandas>=0.12.0` - Coğrafi veri analizi
+- `opencv-python>=4.7.0` - Görüntü işleme
+- `scikit-image>=0.20.0` - Gelişmiş görüntü işleme
 - `scipy>=1.10.0` - Bilimsel hesaplama
-- `numpy>=1.24.0` - SayÄ±sal iÅŸlemler
-- `rvt-py>=1.2.0` (Python < 3.11) veya `rvt>=2.0.0` (Python >= 3.11) - Kabartma GÃ¶rselleÅŸtirme AraÃ§ Kutusu
-- `pyyaml>=6.0` - YAML yapÄ±landÄ±rma dosyalarÄ±
+- `numpy>=1.24.0` - Sayısal işlemler
+- `rvt-py>=1.2.0` (Python < 3.11) veya `rvt>=2.0.0` (Python >= 3.11) - Kabartma Görselleştirme Araç Kutusu
+- `pyyaml>=6.0` - YAML yapılandırma dosyaları
 
-#### 4ï¸âƒ£ GDAL Kurulumu (Ä°steÄŸe BaÄŸlÄ± ama Ã–nerilir)
+#### 4️⃣ GDAL Kurulumu (İsteğe Bağlı ama Önerilir)
 
 **Windows:**
 ```bash
@@ -227,126 +244,229 @@ sudo apt-get install gdal-bin python3-gdal
 brew install gdal
 ```
 
-#### 5ï¸âƒ£ GPU DesteÄŸi (Ä°steÄŸe BaÄŸlÄ±)
+#### 5️⃣ GPU Desteği (İsteğe Bağlı)
 
-NVIDIA GPU'nuz varsa, CUDA'yÄ± yÃ¼kleyin:
+NVIDIA GPU'nuz varsa, CUDA'yı yükleyin:
 
 ```bash
-# CUDA 11.8 iÃ§in
+# CUDA 11.8 için
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
-# CUDA 12.1 iÃ§in
+# CUDA 12.1 için
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```
 
-GPU kontrolÃ¼:
+GPU kontrolü:
 ```python
 import torch
-print(torch.cuda.is_available())  # True olmalÄ±
+print(torch.cuda.is_available())  # True olmalı
 ```
 
 ---
 
-## ğŸ·ï¸ Ground Truth Etiketleme AracÄ± (`ground_truth_kare_etiketleme_qt.py`)
+## 🔗 Bant Birleştirme Aracı (`veri_birlestir_rgb_dsm_dtm.py`)
 
-GeoTIFF gÃ¶rÃ¼ntÃ¼leri Ã¼zerinde ikili (binary) ground truth maskeleri oluÅŸturmak iÃ§in interaktif Qt tabanlÄ± etiketleme aracÄ±. Raster verinizin Ã¶nizlemesi Ã¼zerinde dikdÃ¶rtgenler Ã§izerek model eÄŸitimi iÃ§in piksel dÃ¼zeyinde doÄŸru GeoTIFF maskeleri oluÅŸturabilirsiniz.
+`veri_birlestir_rgb_dsm_dtm.py`, ayrı RGB, DSM ve DTM GeoTIFF dosyalarını tespit/eğitim hattının beklediği tek bir **5 bantlı GeoTIFF** dosyasında birleştirir.
 
-### âœ¨ Temel Ã–zellikler
+**Çıktı bant sırası:**
+| Bant | İçerik |
+|------|--------|
+| 1 | Red (RGB) |
+| 2 | Green (RGB) |
+| 3 | Blue (RGB) |
+| 4 | DSM |
+| 5 | DTM |
 
-| Ã–zellik | AÃ§Ä±klama |
-|---------|----------|
-| **ğŸ–±ï¸ DikdÃ¶rtgen Ã‡izim** | Sol tÄ±klama + sÃ¼rÃ¼kle ile etiketleme/silme dikdÃ¶rtgeni Ã§iz |
-| **ğŸ” YakÄ±nlaÅŸtÄ±rma & KaydÄ±rma** | Fare tekerleÄŸi ile yakÄ±nlaÅŸtÄ±rma, saÄŸ tÄ±klama ile kaydÄ±rma |
-| **ğŸ“ Kare Kilidi** | Ã‡izimi mÃ¼kemmel kareye sÄ±nÄ±rla |
-| **â†©ï¸ Geri Al** | Tam geri alma geÃ§miÅŸi (Ctrl+Z) |
-| **ğŸ¨ Bant SeÃ§imi** | Otomatik bant algÄ±lama; Ã§ok bantlÄ± dosyalarda seÃ§im dialogâ€™u (RGB, BGR, NIR Ã¶n ayarlarÄ±) |
-| **ğŸ—‚ï¸ Katman Paneli** | GÃ¶rÃ¼nÃ¼rlÃ¼k, saydamlÄ±k ayarÄ±, sÃ¼rÃ¼kle-bÄ±rak ile sÄ±ralama |
-| **â• Ek Katmanlar** | Ek GeoTIFF raster dosyalarÄ±nÄ± Ã¼st katman olarak yÃ¼kleyin |
-| **ğŸ’¾ GeoTIFF Ã‡Ä±ktÄ±** | Kaynak CRS, dÃ¶nÃ¼ÅŸÃ¼m ve DEFLATE sÄ±kÄ±ÅŸtÄ±rma ile maske kaydet |
-| **ğŸ–¼ï¸ SÃ¼rÃ¼kle & BÄ±rak** | `.tif` dosyalarÄ±nÄ± doÄŸrudan pencereye bÄ±rakÄ±n |
-| **ğŸ¨ AÃ§Ä±k Tema** | Gradient araÃ§ Ã§ubuÄŸu ve stilize kontroller ile modern aÃ§Ä±k arayÃ¼z |
-| **ğŸ”Œ Ã‡ift Backend** | PySide6 veya PyQt6 ile Ã§alÄ±ÅŸÄ±r |
-
-### ğŸš€ HÄ±zlÄ± BaÅŸlangÄ±Ã§
+### Hızlı Çalıştırma
 
 ```bash
-# ArgÃ¼mansÄ±z â€” dosya dialogâ€™u aÃ§Ä±lÄ±r
+python veri_birlestir_rgb_dsm_dtm.py \
+  --rgb-input veri/ortofoto_rgb.tif \
+  --dsm-input veri/dsm.tif \
+  --dtm-input veri/dtm.tif \
+  --output veri/combined_5band.tif
+```
+
+### Temel CLI Parametreleri
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `--rgb-input` | _(zorunlu)_ | RGB raster (en az 3 bant) |
+| `--dsm-input` | _(zorunlu)_ | DSM raster (1 bant) |
+| `--dtm-input` | _(zorunlu)_ | DTM raster (1 bant) |
+| `--output` | _(zorunlu)_ | Çıktı 5 bantlı GeoTIFF yolu |
+| `--nodata` | `-9999.0` | Çıktı NoData değeri |
+| `--compression` | `LZW` | TIFF sıkıştırma (`LZW`, `DEFLATE`, `NONE`) |
+| `--block-size` | `512` | TIFF tile/blok boyutu; en yakın 16 katına yuvarlanır |
+| `--log-level` | `INFO` | Log seviyesi (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `--progress` / `--no-progress` | açık | İlerleme çubuğu |
+
+Notlar:
+- Tüm girdiler RGB rasterın çözünürlük ve kapsamına yeniden örneklenir.
+- Kaynak CRS değerleri birleştirmeden önce uyumluluk açısından kontrol edilir.
+- IDE'den argümansız çalıştıracaksanız dosyanın başındaki `CONFIG` sözlüğünü doldurun.
+
+---
+
+## DSM'den DTM Ön İşleme (`dtm_uret.py`)
+
+`dtm_uret.py`, DSM GeoTIFF veya LAS/LAZ nokta bulutu girdisinden DTM GeoTIFF üretir. Kodda güncel akış dört adımdır: girdi raster metadata okuma, PDAL SMRF çalıştırma, çıktı DTM'yi kaynak grid'e hizalama ve gerekirse morfolojik fallback DTM.
+
+### Hızlı Çalıştırma
+
+```bash
+python dtm_uret.py \
+  --input veri/karlik_dag_dsm.tif \
+  --output veri/karlik_dag_dtm_smrf.tif \
+  --progress
+```
+
+LAS/LAZ girdisi:
+
+```bash
+python dtm_uret.py \
+  --input veri/karlik_dag_dsm.las \
+  --output veri/karlik_dag_dtm_smrf.tif \
+  --method smrf \
+  --cell 0.5 \
+  --progress
+```
+
+Büyük LAS/LAZ dosyaları için tiled SMRF:
+
+```bash
+python dtm_uret.py \
+  --input veri/karlik_dag_dsm.las \
+  --output veri/karlik_dag_dtm_smrf.tif \
+  --method smrf \
+  --smrf-tiled \
+  --smrf-tile-size 4096 \
+  --smrf-overlap-px 0 \
+  --smrf-tile-workers 2 \
+  --progress
+```
+
+### Temel CLI Parametreleri
+
+- `--input`, `--output`
+- `--method` (`auto`, `smrf`, `fallback`; varsayılan kodda `fallback`)
+- `--cell`, `--slope`, `--threshold`, `--window`, `--scalar` (SMRF ayarları)
+- `--las-crs` (LAS/LAZ çıktı CRS override, ör. `EPSG:32636`)
+- `--smrf-max-pixels`, `--smrf-downsample-factor`
+- `--smrf-tiled`, `--smrf-tile-size`, `--smrf-overlap-px`, `--smrf-tile-workers`
+- `--allow-fallback` / `--no-fallback`
+- `--opening-meters`, `--smooth-sigma-px`, `--tile-size`
+- `--hillshade` / `--no-hillshade`, `--hillshade-output`
+- `--nodata`, `--compression`, `--log-level`, `--progress` / `--no-progress`
+
+Ortam notları:
+- SMRF için aynı ortamda Python PDAL modülü gerekir: `conda install -n <env_name> -c conda-forge pdal python-pdal`
+- Fallback yöntem raster girdiler içindir ve `scipy` gerektirir.
+- LAS/LAZ girdileri PDAL `readers.las` + `writers.gdal` yolunu kullanır.
+- Windows'ta `pip` GDAL/Rasterio ile conda GDAL DLL'lerini karıştırmamaya çalışın.
+
+---
+
+## 🏷️ Ground Truth Etiketleme Aracı (`ground_truth_kare_etiketleme_qt.py`)
+
+GeoTIFF görüntüleri üzerinde ikili (binary) ground truth maskeleri oluşturmak için interaktif Qt tabanlı etiketleme aracı. Raster verinizin önizlemesi üzerinde dikdörtgenler çizerek model eğitimi için piksel düzeyinde doğru GeoTIFF maskeleri oluşturabilirsiniz.
+
+### ✨ Temel Özellikler
+
+| Özellik | Açıklama |
+|---------|----------|
+| **🖱️ Dikdörtgen Çizim** | Sol tıklama + sürükle ile etiketleme/silme dikdörtgeni çiz |
+| **🔍 Yakınlaştırma & Kaydırma** | Fare tekerleği ile yakınlaştırma, sağ tıklama ile kaydırma |
+| **📐 Kare Kilidi** | Çizimi mükemmel kareye sınırla |
+| **↩️ Geri Al** | Tam geri alma geçmişi (Ctrl+Z) |
+| **🎨 Bant Seçimi** | Otomatik bant algılama; çok bantlı dosyalarda seçim dialog'u (RGB, BGR, NIR ön ayarları) |
+| **🗂️ Katman Paneli** | Görünürlük, saydamlık ayarı, sürükle-bırak ile sıralama |
+| **➕ Ek Katmanlar** | Ek GeoTIFF raster dosyalarını üst katman olarak yükleyin |
+| **💾 GeoTIFF Çıktı** | Kaynak CRS, dönüşüm ve DEFLATE sıkıştırma ile maske kaydet |
+| **🖼️ Sürükle & Bırak** | `.tif` dosyalarını doğrudan pencereye bırakın |
+| **🎨 Açık Tema** | Gradient araç çubuğu ve stilize kontroller ile modern açık arayüz |
+| **🔌 Çift Backend** | PySide6 veya PyQt6 ile çalışır |
+
+### 🚀 Hızlı Başlangıç
+
+```bash
+# Argümansız — dosya dialog'u açılır
 python ground_truth_kare_etiketleme_qt.py
 
-# ArgÃ¼manlarla
+# Argümanlarla
 python ground_truth_kare_etiketleme_qt.py \
   --input kesif_alani.tif \
   --output kesif_alani_ground_truth.tif
 
-# Mevcut maskeyi dÃ¼zenlemeye devam
+# Mevcut maskeyi düzenlemeye devam
 python ground_truth_kare_etiketleme_qt.py \
   --input kesif_alani.tif \
   --existing-mask kesif_alani_ground_truth.tif
 
-# Tek bantlÄ± DEM, Ã¶nizleme kÃ¼Ã§Ã¼ltme ile
+# Tek bantlı DEM, önizleme küçültme ile
 python ground_truth_kare_etiketleme_qt.py \
   --input karlik_dag_dsm.tif \
   --preview-max-size 4096
 ```
 
-### âŒ¨ï¸ Klavye KÄ±sayollarÄ±
+### ⌨️ Klavye Kısayolları
 
-| KÄ±sayol | Eylem |
+| Kısayol | Eylem |
 |---------|-------|
-| `Ctrl+O` | GeoTIFF AÃ§ |
+| `Ctrl+O` | GeoTIFF Aç |
 | `Ctrl+S` | Maskeyi Kaydet |
-| `Ctrl+Shift+S` | FarklÄ± Kaydet |
+| `Ctrl+Shift+S` | Farklı Kaydet |
 | `Ctrl+Z` | Geri Al |
-| `D` | Ã‡izim modu |
+| `D` | Çizim modu |
 | `E` | Silme modu |
-| `S` | Kare kilidi aÃ§/kapat |
-| `F` | Pencereye sÄ±ÄŸdÄ±r |
-| `W` | Fare tekerleÄŸi yÃ¶nÃ¼nÃ¼ ters Ã§evir |
+| `S` | Kare kilidi aç/kapat |
+| `F` | Pencereye sığdır |
+| `W` | Fare tekerleği yönünü ters çevir |
 
-### ğŸ“‹ Komut SatÄ±rÄ± Parametreleri
+### 📋 Komut Satırı Parametreleri
 
-| Parametre | AÃ§Ä±klama | VarsayÄ±lan |
+| Parametre | Açıklama | Varsayılan |
 |-----------|----------|----------:|
-| `--input`, `-i` | Girdi GeoTIFF yolu | _(dosya dialogâ€™u)_ |
-| `--output`, `-o` | Ã‡Ä±ktÄ± maske yolu | `<girdi>_ground_truth.tif` |
-| `--existing-mask` | DÃ¼zenlemeye devam edilecek mevcut maske | _(yok)_ |
-| `--preview-max-size` | Maks Ã¶nizleme boyutu piksel (0 = tam Ã§Ã¶zÃ¼nÃ¼rlÃ¼k) | `0` |
-| `--bands` | RGB gÃ¶rÃ¼ntÃ¼leme iÃ§in virgÃ¼lle ayrÄ±lmÄ±ÅŸ bant indeksleri | `1,2,3` |
-| `--positive-value` | Pozitif sÄ±nÄ±f piksel deÄŸeri (1â€“255) | `1` |
-| `--square-mode` | Kare kilidi aÃ§Ä±k baÅŸlat | `false` |
+| `--input`, `-i` | Girdi GeoTIFF yolu | _(dosya dialog'u)_ |
+| `--output`, `-o` | Çıktı maske yolu | `<girdi>_ground_truth.tif` |
+| `--existing-mask` | Düzenlemeye devam edilecek mevcut maske | _(yok)_ |
+| `--preview-max-size` | Maks önizleme boyutu piksel (0 = tam çözünürlük) | `0` |
+| `--bands` | RGB görüntüleme için virgülle ayrılmış bant indeksleri | `1,2,3` |
+| `--positive-value` | Pozitif sınıf piksel değeri (1–255) | `1` |
+| `--square-mode` | Kare kilidi açık başlat | `false` |
 
-### ğŸµ Bant SeÃ§imi
+### 🎵 Bant Seçimi
 
-Dosya aÃ§Ä±ldÄ±ÄŸÄ±nda araÃ§ bant sayÄ±sÄ±nÄ± otomatik algÄ±lar:
+Dosya açıldığında araç bant sayısını otomatik algılar:
 
-| Bant SayÄ±sÄ± | DavranÄ±ÅŸ |
+| Bant Sayısı | Davranış |
 |:----------:|----------|
-| **1** | Otomatik gri tonlama â€” dialog yok |
-| **2** | Bant 1,2 kullanÄ±lÄ±r â€” dialog yok |
-| **3+** | Ã–n ayarlarla **Bant SeÃ§im Dialogâ€™u** gÃ¶sterilir |
+| **1** | Otomatik gri tonlama — dialog yok |
+| **2** | Bant 1,2 kullanılır — dialog yok |
+| **3+** | Ön ayarlarla **Bant Seçim Dialog'u** gösterilir |
 
-**Mevcut Ã–n Ayarlar (3+ bant):**
-- **RGB (1, 2, 3)** â€” standart gerÃ§ek renk
-- **BGR (3, 2, 1)** â€” ters bant sÄ±rasÄ±
-- **NIR (4, 3, 2)** â€” yakÄ±n kÄ±zÄ±lÃ¶tesi sahte renk (5+ bant)
-- **Gri Tonlama (Bant 1)** â€” tek bant
-- **Ã–zel** â€” R/G/B iÃ§in SpinBox ile herhangi bir bant seÃ§
+**Mevcut Ön Ayarlar (3+ bant):**
+- **RGB (1, 2, 3)** — standart gerçek renk
+- **BGR (3, 2, 1)** — ters bant sırası
+- **NIR (4, 3, 2)** — yakın kızılötesi sahte renk (5+ bant)
+- **Gri Tonlama (Bant 1)** — tek bant
+- **Özel** — R/G/B için SpinBox ile herhangi bir bant seç
 
-### ğŸ—‚ï¸ Katman Paneli
+### 🗂️ Katman Paneli
 
-Sol taraftaki panel gÃ¶rÃ¼ntÃ¼ katmanlarÄ±nÄ± yÃ¶netir:
+Sol taraftaki panel görüntü katmanlarını yönetir:
 
-- **â˜‘ï¸ GÃ¶rÃ¼nÃ¼rlÃ¼k** â€” her katman iÃ§in iÅŸaret kutusu
-- **ğŸ”€ SÄ±ralama** â€” sÃ¼rÃ¼kle veya â¬†/â¬‡ butonlarÄ± (en Ã¼stteki Ã¶n planda)
-- **ğŸšï¸ SaydamlÄ±k** â€” seÃ§ili katman iÃ§in sÃ¼rÃ¼gÃ¼ (%0â€“100)
-- **â• Katman Ekle** â€” ek GeoTIFF dosyalarÄ±nÄ± gÃ¶rsel katman olarak yÃ¼kle
-- **â– Katman Sil** â€” ekstra katmanlarÄ± kaldÄ±r (ana gÃ¶rÃ¼ntÃ¼ ve maske silinemez)
+- **☑️ Görünürlük** — her katman için işaret kutusu
+- **🔀 Sıralama** — sürükle veya ⬆/⬇ butonları (en üstteki ön planda)
+- **🎚️ Saydamlık** — seçili katman için sürügü (%0–100)
+- **➕ Katman Ekle** — ek GeoTIFF dosyalarını görsel katman olarak yükle
+- **➖ Katman Sil** — ekstra katmanları kaldır (ana görüntü ve maske silinemez)
 
-VarsayÄ±lan katmanlar:
-1. ğŸ”´ **Maske** â€” etiketleme katmanÄ± (kÄ±rmÄ±zÄ±, yarÄ± saydam)
-2. ğŸ–¼ï¸ **Ana GÃ¶rÃ¼ntÃ¼** â€” temel raster
+Varsayılan katmanlar:
+1. 🔴 **Maske** — etiketleme katmanı (kırmızı, yarı saydam)
+2. 🖼️ **Ana Görüntü** — temel raster
 
-### ğŸ”§ BaÄŸÄ±mlÄ±lÄ±klar
+### 🔧 Bağımlılıklar
 
 ```bash
 pip install rasterio opencv-python numpy
@@ -355,70 +475,151 @@ pip install PySide6   # veya: pip install PyQt6
 
 ---
 
-## ğŸ® KullanÄ±m
+## 🗂️ Tile Classification Dataset Aracı (`prepare_tile_classification_dataset.py`)
 
-### Temel KullanÄ±m
+`prepare_tile_classification_dataset.py`, raster + maske çiftlerinden `training.py --task tile_classification` ile uyumlu açık sınıf klasörleri üretir.
 
-#### VarsayÄ±lan Ayarlarla Ã‡alÄ±ÅŸtÄ±rma
+### Çıktı Düzeni
 
-```bash
-python archaeo_detect.py
+```text
+output_dir/
+  train/
+    Positive/
+    Negative/
+  val/
+    Positive/
+    Negative/
+  test/                # --test-ratio > 0 ise
+    Positive/
+    Negative/
 ```
 
-Bu komut `config.yaml` dosyasÄ±ndaki ayarlarÄ± kullanÄ±r ve giriÅŸ olarak tanÄ±mlanan GeoTIFF dosyasÄ±nÄ± iÅŸler.
+Kaydedilen karolar `.npz` veya `.npy` olabilir; `feature_mode: rgb3` için PNG önizleme çıktısı da seçilebilir.
 
-#### Komut SatÄ±rÄ± Parametreleriyle Ã‡alÄ±ÅŸtÄ±rma
+### Hızlı Çalıştırma
+
+Tek raster + maske çifti:
 
 ```bash
-# EÅŸik deÄŸerini deÄŸiÅŸtirme
-python archaeo_detect.py --th 0.7
+python prepare_tile_classification_dataset.py \
+  --pair kesif_alani.tif ground_truth.tif \
+  --output-dir workspace/training_data_classification \
+  --sampling-mode selected_regions \
+  --overwrite
+```
+
+Birden fazla kaynak:
+
+```bash
+python prepare_tile_classification_dataset.py \
+  --pair alan1.tif alan1_mask.tif \
+  --pair alan2.tif alan2_mask.tif \
+  --output-dir workspace/training_data_classification \
+  --feature-mode topo5 \
+  --bands 1,2,3,4,5 \
+  --overwrite
+```
+
+### Örnekleme Modları
+
+| Mod | Açıklama |
+|-----|----------|
+| `full_grid` | Tüm raster üzerinde düzenli grid karoları üretir |
+| `selected_regions` | Maskedeki pozitif alanlara odaklanan veri üretimi için kullanılır |
+
+### Temel CLI Parametreleri
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `--pair` | `CONFIG["pairs"]` | Her kullanımda bir raster + maske çifti |
+| `--output-dir` | `workspace/training_data_classification` | Üretilecek dataset dizini |
+| `--tile-size` | `256` | Karo boyutu |
+| `--overlap` | `128` | Karo örtüşmesi |
+| `--feature-mode` | `topo5` | `rgb3`, `topo5`, `topo7` |
+| `--bands` | `1,2,3,4,5` | Kaynak raster bantları |
+| `--sampling-mode` | `full_grid` | Örnekleme stratejisi |
+| `--positive-ratio-threshold` | `0.02` | Pozitif sınıf eşiği |
+| `--train-negative-keep-ratio` | `0.35` | Eğitim negatiflerinden tutulacak oran |
+| `--format` | `npz` | `npz`, `npy`, `png` |
+| `--num-workers` | CPU'ya göre | Paralel işçi sayısı |
+| `--derivative-cache-mode` | `auto` | Türev kanal önbelleği |
+| `--overwrite` | kapalı | Var olan çıktı dizinini yeniden üretir |
+
+Manifest ve metadata dosyaları eğitim/çıkarım sırasında kanal şeması, tile, overlap ve kaynak bantların izlenebilmesi için çıktı dizinine yazılır.
+
+---
+
+## 🎮 Kullanım
+
+### Temel Kullanım
+
+#### Varsayılan Ayarlarla Çalıştırma
+
+```bash
+python archaeo_detect.py --enable-yolo
+```
+
+Bu komut `config.yaml` dosyasındaki RGB girdiyi kullanır ve YOLO11 yolunu etkinleştirir. Güncel `config.yaml` tüm yöntemleri kapalı tuttuğu için tamamen argümansız `python archaeo_detect.py` en az bir yöntem seçilmediğinde hata verir.
+
+#### Komut Satırı Parametreleriyle Çalıştırma
+
+```bash
+# Eşik değerini değiştirme
+python archaeo_detect.py --enable-deep-learning --zero-shot-imagenet --th 0.7
 
 # Karo boyutunu ayarlama
-python archaeo_detect.py --tile 512 --overlap 128
+python archaeo_detect.py --enable-yolo --tile 512 --overlap 128
 
-# AyrÄ±ntÄ±lÄ± modu etkinleÅŸtirme (detaylÄ± log)
-python archaeo_detect.py -v
+# Ayrıntılı modu etkinleştirme (detaylı log)
+python archaeo_detect.py --enable-yolo -v
 
-# FarklÄ± bir giriÅŸ dosyasÄ± kullanma
-python archaeo_detect.py --input yeni_alan.tif
+# Farklı bir giriş dosyası kullanma
+python archaeo_detect.py --enable-yolo --input yeni_alan.tif
 
 # Birden fazla parametre
-python archaeo_detect.py --th 0.7 --tile 1024 --enable-fusion -v
+python archaeo_detect.py --enable-deep-learning --zero-shot-imagenet --th 0.7 --tile 1024 -v
 ```
 
-### YaygÄ±n KullanÄ±m Ã–rnekleri
+### Yaygın Kullanım Örnekleri
 
-#### ğŸ”° Ã–rnek 1: Ä°lk Kez KullanÄ±m (SÄ±fÄ±r AtÄ±ÅŸ)
+#### 🔰 Örnek 1: İlk Kez Kullanım (Sıfır Atış)
 
-EÄŸitilmiÅŸ modeller olmadan, sadece ImageNet aÄŸÄ±rlÄ±klarÄ±nÄ± kullanarak:
+Eğitilmiş modeller olmadan, sadece ImageNet ağırlıklarını kullanarak:
 
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
   --encoder resnet34 \
   --zero-shot-imagenet \
+  --enable-deep-learning \
   --enable-classic \
   --enable-fusion \
   -v
 ```
 
-#### ğŸ¯ Ã–rnek 2: Sadece Klasik YÃ¶ntem (HÄ±zlÄ±)
+#### 🎯 Örnek 2: Sadece Klasik Yöntem (Hızlı)
 
-GPU yoksa veya hÄ±zlÄ± test iÃ§in:
+GPU yoksa veya hızlı test için:
 
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
   --no-enable-deep-learning \
   --enable-classic \
   --classic-modes combo \
   --cache-derivatives
 ```
 
-#### ğŸš€ Ã–rnek 3: Topluluk (Ã‡oklu KodlayÄ±cÄ±)
+#### 🚀 Örnek 3: Topluluk (Çoklu Kodlayıcı)
 
-Birden fazla kodlayÄ±cÄ± ile en yÃ¼ksek doÄŸruluk iÃ§in:
+Birden fazla kodlayıcı ile en yüksek doğruluk için:
 
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
   --encoders all \
   --enable-deep-learning \
   --enable-classic \
@@ -428,26 +629,33 @@ python archaeo_detect.py \
   -v
 ```
 
-#### ğŸ¨ Ã–rnek 4: Ã–zel EÄŸitilmiÅŸ Modelle
+#### 🎨 Örnek 4: Özel Eğitilmiş Modelle
 
-Kendi eÄŸitilmiÅŸ modelinizle:
+Kendi eğitilmiş modelinizle:
 
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
   --encoder resnet50 \
   --weights models/benim_egitilmis_modelim.pth \
+  --training-metadata models/training_metadata.json \
+  --trained-model-only \
+  --enable-deep-learning \
   --th 0.65 \
-  --enable-classic \
-  --enable-fusion \
-  --alpha 0.7
+  -v
 ```
 
-#### ğŸ“Š Ã–rnek 5: GeniÅŸ Alan Analizi (Optimize EdilmiÅŸ)
+#### 📊 Örnek 5: Geniş Alan Analizi (Optimize Edilmiş)
 
-GeniÅŸ bir alan iÃ§in optimize edilmiÅŸ ayarlar:
+Geniş bir alan için optimize edilmiş ayarlar:
 
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
+  --enable-deep-learning \
+  --enable-classic \
   --tile 2048 \
   --overlap 512 \
   --half \
@@ -458,58 +666,94 @@ python archaeo_detect.py \
   -v
 ```
 
-### Komut SatÄ±rÄ± Parametreleri (Tam Liste)
+### VLM / LM Studio Aday Taraması
+
+VLM akışı ana DL/klasik/YOLO hattından ayrıdır ve `vlm_detect.py` ile çalışır. LM Studio'nun OpenAI uyumlu local server'ı açık olmalıdır; varsayılan VLM config'i `http://127.0.0.1:8081` adresini ve `model: auto` seçimini kullanır.
+
+```bash
+python vlm_detect.py --config config_vlm.yaml
+```
+
+Tek dosya taramak için:
+
+```bash
+python vlm_detect.py \
+  --input veri/combined_5band.tif \
+  --output-root workspace/ciktilar \
+  --base-url http://127.0.0.1:8081 \
+  --model auto \
+  --tile 1024 \
+  --overlap 256
+```
+
+Klasör girdisi için `config_vlm.yaml` içinde `batch: true` ise klasördeki okunabilir GeoTIFF dosyaları ayrı ayrı taranır ve birleşik VLM çıktıları üretilir. `--batch` / `--no-batch`, `--resume` / `--no-resume`, `--reload-every-tiles`, `--prompt-stage1-path` ve `--prompt-stage2-path` CLI'dan da verilebilir.
+
+VLM çıktıları DL/fusion maskelerine karışmaz; ayrı JSONL/CSV/XLSX/GeoJSON/GPKG aday katmanları olarak yazılır.
+
+### Komut Satırı Parametreleri (Tam Liste)
 
 ```bash
 python archaeo_detect.py --help
 ```
 
-**Ã–nemli Parametreler:**
+**Önemli Parametreler:**
 
-| Parametre | AÃ§Ä±klama | Ã–rnek |
+| Parametre | Açıklama | Örnek |
 |-----------|----------|-------|
-| `--input` | GiriÅŸ GeoTIFF dosyasÄ± | `--input alan.tif` |
-| `--th` | DL eÅŸiÄŸi (0-1) | `--th 0.7` |
+| `--config` | YAML config yolu | `--config config.yaml` |
+| `--input` | Giriş GeoTIFF dosyası | `--input alan.tif` |
+| `--bands` | Kaynak raster bantları | `--bands 1,2,3,4,5` |
+| `--feature-mode` | Model kanal şeması | `--feature-mode topo5` |
+| `--dl-task` | DL görevi | `--dl-task tile_classification` |
+| `--th` | DL eşiği (0-1) | `--th 0.7` |
 | `--tile` | Karo boyutu (piksel) | `--tile 1024` |
-| `--overlap` | Ã–rtÃ¼ÅŸme miktarÄ± | `--overlap 128` |
-| `--encoder` | Tek kodlayÄ±cÄ± seÃ§imi | `--encoder resnet34` |
-| `--encoders` | Ã‡oklu kodlayÄ±cÄ± modu | `--encoders all` |
-| `--alpha` | FÃ¼zyon aÄŸÄ±rlÄ±ÄŸÄ± | `--alpha 0.6` |
-| `--enable-fusion` | FÃ¼zyonu etkinleÅŸtir | (bayrak) |
-| `--cache-derivatives` | Ã–nbellek kullan | (bayrak) |
-| `-v` veya `--verbose` | DetaylÄ± log | (bayrak) |
+| `--overlap` | Örtüşme miktarı | `--overlap 128` |
+| `--enable-deep-learning` | DL yolunu açar | (bayrak) |
+| `--enable-classic` | Klasik RVT/Hessian yolunu açar | (bayrak) |
+| `--enable-yolo` | YOLO11 yolunu açar | (bayrak) |
+| `--encoder` | Tek kodlayıcı seçimi | `--encoder resnet34` |
+| `--encoders` | Çoklu kodlayıcı modu | `--encoders all` |
+| `--weights` | Model checkpoint yolu | `--weights model.pth` |
+| `--training-metadata` | Eğitim metadata JSON'u | `--training-metadata training_metadata.json` |
+| `--trained-model-only` | Tek eğitilmiş checkpoint modunu zorlar | (bayrak) |
+| `--alpha` | Füzyon ağırlığı | `--alpha 0.6` |
+| `--enable-fusion` | Füzyonu etkinleştir | (bayrak) |
+| `--cache-derivatives` | Önbellek kullan | (bayrak) |
+| `-v` veya `--verbose` | Detaylı log | (bayrak) |
 
 ---
 
-## âš™ï¸ YapÄ±landÄ±rma
+## ⚙️ Yapılandırma
 
-### config.yaml DosyasÄ±
+### config.yaml Dosyası
 
-Sistem davranÄ±ÅŸÄ± `config.yaml` dosyasÄ± tarafÄ±ndan kontrol edilir. Bu dosya detaylÄ± aÃ§Ä±klamalarla **zengin bir ÅŸekilde belgelenmiÅŸtir** (satÄ±r iÃ§i TÃ¼rkÃ§e yorumlar dahil).
+Sistem davranışı `config.yaml` dosyası tarafından kontrol edilir. Bu dosya detaylı açıklamalarla **zengin bir şekilde belgelenmiştir** (satır içi Türkçe yorumlar dahil).
 
-**Yol Ã§Ã¶zÃ¼mlemesi:** YAML iÃ§indeki gÃ¶reli yollar, **`config.yaml` dosyasÄ±nÄ±n bulunduÄŸu dizine** gÃ¶re Ã§Ã¶zÃ¼lÃ¼r; Ã§alÄ±ÅŸma dizininize gÃ¶re deÄŸil. Komut satÄ±rÄ±ndan verdiÄŸiniz yollar ise **o anki Ã§alÄ±ÅŸma dizinine** gÃ¶re Ã§Ã¶zÃ¼lÃ¼r.
+**Yol çözümlemesi:** YAML içindeki göreli yollar, **`config.yaml` dosyasının bulunduğu dizine** göre çözülür; çalışma dizininize göre değil. Komut satırından verdiğiniz yollar ise **o anki çalışma dizinine** göre çözülür.
 
-#### Ana BÃ¶lÃ¼mler:
+**Güncel kayıtlı değerler:** `input` RGB-only örnek girdiye (`workspace/on_veri/karlik_dag_rgb.tif`), `bands` ise `1,2,3` değerine ayarlı. `dl_task: tile_classification`, `feature_mode: auto`, `trained_model_only: false` ve tüm yöntem bayrakları kapalıdır. Kod, `archaeo_detect.py` içinde en az bir yöntem (`enable_deep_learning`, `enable_classic` veya `enable_yolo`) açık olmasını zorunlu tutar.
 
-1. **GiriÅŸ/Ã‡Ä±kÄ±ÅŸ**: Dosya yollarÄ± ve bant seÃ§imi
-2. **YÃ¶ntem SeÃ§imi**: `enable_deep_learning`, `enable_classic`, `enable_yolo`, `enable_fusion`
-3. **DL gÃ¶revi**: `dl_task` â€” `segmentation` (piksel) veya `tile_classification` (karo skoru â†’ bindirme ile risk haritasÄ±)
-4. **EÄŸitilmiÅŸ-tekil mod**: `trained_model_only` â€” `true` iken tek checkpoint + metadata (`weights`, `training_metadata`); `tile` / `overlap` / `bands` metadataâ€™dan kilitlenir
-5. **Derin Ã¶ÄŸrenme**: Mimari, encoder, aÄŸÄ±rlÄ±klar, `zero_shot_imagenet`, dikkat / bant Ã¶nem raporu
-6. **Klasik YÃ¶ntemler**: RVT, Hessian, Morfoloji parametreleri
-7. **GeliÅŸmiÅŸ topografik analiz (legacy / varsayÄ±lan presetâ€™te kapalÄ±)**: `enable_curvature`, `enable_tpi`, `tpi_radii` â€” `config.yaml` ve `archaeo_detect.py` iÃ§inde deneysel kullanÄ±m iÃ§in durur; **kayÄ±tlÄ± 5 kanallÄ± DL ÅŸemasÄ±** eÄŸri/TPIâ€™yi model tensÃ¶rÃ¼ne eklemez (`config.yaml` Ã¼st yorumlarÄ±na bakÄ±n).
-8. **FÃ¼zyon**: Hibrit kombinasyon (`alpha`, â€¦) â€” hem DL hem klasik aÃ§Ä±k olmalÄ±dÄ±r
-9. **YOLO11** (isteÄŸe baÄŸlÄ±): YalnÄ±zca RGB; genelde tile sÄ±nÄ±flandÄ±rma Ã¶n ayarÄ±nda kapalÄ±dÄ±r
-10. **Karo Ä°ÅŸleme**: Bellek ve performans; `tile` / `overlap` belge ile metadata kilitlenmesi
-11. **Normalizasyon**: Veri Ã¶n iÅŸleme
-12. **Maskeleme**: YÃ¼ksek yapÄ±lar (`mask_talls`, `rgb_only`)
-13. **VektÃ¶rleÅŸtirme**: CBS Ã§Ä±ktÄ±sÄ± (`vectorize`, `min_area`, `export_candidate_excel`, â€¦)
+#### Ana Bölümler:
+
+1. **Giriş/Çıkış**: Dosya yolları ve bant seçimi
+2. **Yöntem Seçimi**: `enable_deep_learning`, `enable_classic`, `enable_yolo`, `enable_fusion`
+3. **DL görevi**: `dl_task` — `segmentation` (piksel) veya `tile_classification` (karo skoru → bindirme ile risk haritası)
+4. **Eğitilmiş-tekil mod**: `trained_model_only` — `true` iken tek checkpoint + metadata (`weights`, `training_metadata`); `tile` / `overlap` / `bands` metadata'dan kilitlenir
+5. **Derin öğrenme**: Mimari, encoder, ağırlıklar, `zero_shot_imagenet`, dikkat / bant önem raporu
+6. **Klasik Yöntemler**: RVT, Hessian, Morfoloji parametreleri
+7. **Gelişmiş topografik analiz (legacy / varsayılan preset'te kapalı)**: `enable_curvature`, `enable_tpi`, `tpi_radii` — `config.yaml` ve `archaeo_detect.py` içinde deneysel kullanım için durur; **kayıtlı 5 kanallı DL şeması** eğri/TPI'yi model tensörüne eklemez (`config.yaml` üst yorumlarına bakın).
+8. **Füzyon**: Hibrit kombinasyon (`alpha`, …) — hem DL hem klasik açık olmalıdır
+9. **YOLO11** (isteğe bağlı): Yalnızca RGB; genelde tile sınıflandırma ön ayarında kapalıdır
+10. **Karo İşleme**: Bellek ve performans; `tile` / `overlap` belge ile metadata kilitlenmesi
+11. **Normalizasyon**: Veri ön işleme
+12. **Maskeleme**: Yüksek yapılar (`mask_talls`, `rgb_only`)
+13. **Vektörleştirme**: CBS çıktısı (`vectorize`, `min_area`, `export_candidate_excel`, …)
 14. **Performans**: Cihaz, `half`, `seed`, `verbose`
-15. **Ã–nbellek**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster Ã¶nbellek ayarlarÄ±
+15. **Önbellek**: `cache_derivatives`, `cache_derivatives_mode` (`auto` / `npz` / `raster`), raster önbellek ayarları
 
-#### HÄ±zlÄ± YapÄ±landÄ±rma SenaryolarÄ±:
+#### Hızlı Yapılandırma Senaryoları:
 
-**Senaryo 1: Sadece Derin Ã–ÄŸrenme**
+**Senaryo 1: Sadece Derin Öğrenme**
 ```yaml
 enable_deep_learning: true
 enable_classic: false
@@ -518,7 +762,7 @@ encoder: "resnet34"
 zero_shot_imagenet: true
 ```
 
-**Senaryo 2: Sadece Klasik YÃ¶ntem**
+**Senaryo 2: Sadece Klasik Yöntem**
 ```yaml
 enable_deep_learning: false
 enable_classic: true
@@ -527,7 +771,7 @@ classic_modes: "combo"
 cache_derivatives: true
 ```
 
-**Senaryo 3: Hibrit (En Ä°yi SonuÃ§lar)**
+**Senaryo 3: Hibrit (En İyi Sonuçlar)**
 ```yaml
 enable_deep_learning: true
 enable_classic: true
@@ -537,33 +781,33 @@ encoders: "all"
 cache_derivatives: true
 ```
 
-### Veri HazÄ±rlama
+### Veri Hazırlama
 
-#### GiriÅŸ DosyasÄ± Gereksinimleri:
+#### Giriş Dosyası Gereksinimleri:
 
-âœ… **GeoTIFF formatÄ±** (.tif veya .tiff)  
-âœ… **Ã‡ok bantlÄ±** (en az 3 bant: RGB)  
-âœ… **AynÄ± grid** (tÃ¼m bantlar aynÄ± Ã§Ã¶zÃ¼nÃ¼rlÃ¼k ve kapsam)  
-âœ… **CoÄŸrafi referans** (CRS/EPSG kodu)
+✅ **GeoTIFF formatı** (.tif veya .tiff)
+✅ **Çok bantlı** (en az 3 bant: RGB)
+✅ **Aynı grid** (tüm bantlar aynı çözünürlük ve kapsam)
+✅ **Coğrafi referans** (CRS/EPSG kodu)
 
-#### Ã–nerilen Bant YapÄ±sÄ±:
+#### Önerilen Bant Yapısı:
 
-| Bant # | Ä°Ã§erik | AÃ§Ä±klama |
+| Bant # | İçerik | Açıklama |
 |--------|--------|----------|
-| 1 | KÄ±rmÄ±zÄ± | RGB'nin R bileÅŸeni |
-| 2 | YeÅŸil | RGB'nin G bileÅŸeni |
-| 3 | Mavi | RGB'nin B bileÅŸeni |
-| 4 | DSM | SayÄ±sal YÃ¼zey Modeli (yÃ¼kseklik) |
-| 5 | DTM | SayÄ±sal Arazi Modeli (zemin yÃ¼ksekliÄŸi) |
+| 1 | Kırmızı | RGB'nin R bileşeni |
+| 2 | Yeşil | RGB'nin G bileşeni |
+| 3 | Mavi | RGB'nin B bileşeni |
+| 4 | DSM | Sayısal Yüzey Modeli (yükseklik) |
+| 5 | DTM | Sayısal Arazi Modeli (zemin yüksekliği) |
 
-#### Veri OluÅŸturma Ã–rneÄŸi (GDAL):
+#### Veri Oluşturma Örneği (GDAL):
 
 ```bash
-# AyrÄ± RGB ve yÃ¼kseklik dosyalarÄ±nÄ± birleÅŸtirme
+# Ayrı RGB ve yükseklik dosyalarını birleştirme
 gdal_merge.py -separate -o birlesik.tif \
   kirmizi.tif yesil.tif mavi.tif dsm.tif dtm.tif
 
-# Yeniden Ã¶rnekleme (farklÄ± Ã§Ã¶zÃ¼nÃ¼rlÃ¼kleri eÅŸitleme)
+# Yeniden örnekleme (farklı çözünürlükleri eşitleme)
 gdalwarp -tr 1.0 1.0 -r bilinear giris.tif cikis.tif
 
 # Koordinat sistemi atama
@@ -572,41 +816,41 @@ gdal_edit.py -a_srs EPSG:32635 cikis.tif
 
 ---
 
-## ğŸ“‚ Ã‡Ä±ktÄ± DosyalarÄ±
+## 📂 Çıktı Dosyaları
 
-Sistem Ã§alÄ±ÅŸtÄ±ÄŸÄ±nda aÅŸaÄŸÄ±daki dosyalar oluÅŸturulur:
+Sistem çalıştığında aşağıdaki dosyalar oluşturulur:
 
-TÃ¼m Ã§Ä±ktÄ±lar aÅŸaÄŸÄ±daki kÃ¶ke yazÄ±lÄ±r:
+Tüm çıktılar aşağıdaki köke yazılır:
 
 ```
 workspace/ciktilar/<oturum_klasoru>/<cikti_adi>*
 ```
 
-`<oturum_klasoru>` kÄ±sa bir format kullanÄ±r:
+`<oturum_klasoru>` kısa bir format kullanır:
 `<zaman>_<girdi>_<yontemler>_t<tile>o<overlap>_m-<model>`
-(Ã¶rnek model belirteÃ§leri: `m-<checkpoint>`, `m-zs`, `m-<encoder>`).
+(örnek model belirteçleri: `m-<checkpoint>`, `m-zs`, `m-<encoder>`).
 
-Her oturum klasÃ¶rÃ¼nde ayrÄ±ca ÅŸunlar bulunur:
+Her oturum klasöründe ayrıca şunlar bulunur:
 
 ```
 run_params.txt
 ```
 
-Bu dosya, etkin parametrelerin tamamÄ±nÄ± iÃ§erir (nihai config deÄŸerleri, parse edilen bantlar, CLI argÃ¼manlarÄ± ve cihaz).
+Bu dosya, etkin parametrelerin tamamını içerir (nihai config değerleri, parse edilen bantlar, CLI argümanları ve cihaz).
 
-Etkinse (`save_band_importance: true`), DL koÅŸularÄ± ayrÄ±ca `*_band_importance.txt` ve `*_band_importance.json` dosyalarÄ±nÄ± Ã¼retir.
+Etkinse (`save_band_importance: true`), DL koşuları ayrıca `*_band_importance.txt` ve `*_band_importance.json` dosyalarını üretir.
 
-### ğŸ“Š Raster Ã‡Ä±ktÄ±lar (GeoTIFF)
+### 📊 Raster Çıktılar (GeoTIFF)
 
-#### 1ï¸âƒ£ Derin Ã–ÄŸrenme Ã‡Ä±ktÄ±larÄ±
+#### 1️⃣ Derin Öğrenme Çıktıları
 
-**Tek KodlayÄ±cÄ±:**
+**Tek Kodlayıcı:**
 ```
-kesif_alani_prob.tif     â†’ OlasÄ±lÄ±k haritasÄ± (sÃ¼rekli deÄŸerler 0.0-1.0)
-kesif_alani_mask.tif     â†’ Ä°kili maske (0: arkeolojik deÄŸil, 1: arkeolojik alan)
+kesif_alani_prob.tif     → Olasılık haritası (sürekli değerler 0.0-1.0)
+kesif_alani_mask.tif     → İkili maske (0: arkeolojik değil, 1: arkeolojik alan)
 ```
 
-**Ã‡oklu KodlayÄ±cÄ±:**
+**Çoklu Kodlayıcı:**
 ```
 kesif_alani_resnet34_prob.tif
 kesif_alani_resnet34_mask.tif
@@ -616,220 +860,242 @@ kesif_alani_efficientnet-b3_prob.tif
 kesif_alani_efficientnet-b3_mask.tif
 ```
 
-#### 2ï¸âƒ£ Klasik YÃ¶ntem Ã‡Ä±ktÄ±larÄ±
+#### 2️⃣ Klasik Yöntem Çıktıları
 
 ```
-kesif_alani_classic_prob.tif     â†’ BirleÅŸik klasik olasÄ±lÄ±k
-kesif_alani_classic_mask.tif     â†’ Klasik ikili maske
+kesif_alani_classic_prob.tif     → Birleşik klasik olasılık
+kesif_alani_classic_mask.tif     → Klasik ikili maske
 ```
 
 **Ara Dosyalar (classic_save_intermediate: true):**
 ```
-kesif_alani_classic_rvtlog_prob.tif    â†’ Sadece RVT yÃ¶ntemi
-kesif_alani_classic_hessian_prob.tif   â†’ Sadece Hessian yÃ¶ntemi
-kesif_alani_classic_morph_prob.tif     â†’ Sadece Morfoloji yÃ¶ntemi
+kesif_alani_classic_rvtlog_prob.tif    → Sadece RVT yöntemi
+kesif_alani_classic_hessian_prob.tif   → Sadece Hessian yöntemi
+kesif_alani_classic_morph_prob.tif     → Sadece Morfoloji yöntemi
 ```
 
-#### 3ï¸âƒ£ FÃ¼zyon Ã‡Ä±ktÄ±larÄ±
+#### 3️⃣ Füzyon Çıktıları
 
 ```
 kesif_alani_fused_resnet34_prob.tif
 kesif_alani_fused_resnet34_mask.tif
 ```
 
-### ğŸ“ VektÃ¶r Ã‡Ä±ktÄ±lar (GeoPackage)
+### 📍 Vektör Çıktılar (GeoPackage)
 
 ```
-kesif_alani_mask.gpkg                â†’ DL vektÃ¶r Ã§okgenleri
-kesif_alani_classic_mask.gpkg        â†’ Klasik vektÃ¶r Ã§okgenleri
-kesif_alani_fused_resnet34_mask.gpkg â†’ FÃ¼zyon vektÃ¶r Ã§okgenleri
+kesif_alani_mask.gpkg                → DL vektör çokgenleri
+kesif_alani_classic_mask.gpkg        → Klasik vektör çokgenleri
+kesif_alani_fused_resnet34_mask.gpkg → Füzyon vektör çokgenleri
 ```
 
-`config.yaml` iÃ§inde `export_candidate_excel: true` ise, vektÃ¶r Ã§Ä±ktÄ±larÄ±na eÅŸlik eden aday merkezleri / GPS tarzÄ± tablolar `*_gps.xlsx` dosyalarÄ± olarak Ã¼retilir.
+`config.yaml` içinde `export_candidate_excel: true` ise, vektör çıktılarına eşlik eden aday merkezleri / GPS tarzı tablolar `*_gps.xlsx` dosyaları olarak üretilir.
 
-**GeoPackage Ã–zellikleri:**
-- Ã‡okgen geometrisi
-- Alan bilgisi (mÂ² cinsinden)
+**GeoPackage Özellikleri:**
+- Çokgen geometrisi
+- Alan bilgisi (m² cinsinden)
 - CRS bilgisi korunur
-- QGIS/ArcGIS'te doÄŸrudan aÃ§Ä±labilir
+- QGIS/ArcGIS'te doğrudan açılabilir
 
-### ğŸ’¾ Ã–nbellek DosyalarÄ±
+### VLM / LM Studio Aday Çıktıları
 
-**Ã–nbellek Dizin YapÄ±sÄ±:**
+`vlm_detect.py` ayrı çıktı adları kullanır:
+
+```text
+<ad>_vlm_candidates.jsonl
+<ad>_vlm_candidates.csv
+<ad>_vlm_candidates.xlsx
+<ad>_vlm_candidates.geojson
+<ad>_vlm_stage1_positives.gpkg
+<ad>_vlm_stage2_verified.gpkg
+<ad>_vlm_raw_errors.jsonl
+<ad>_vlm_run_config.json
+<ad>_vlm_parameters_prompts.txt
+```
+
+`batch: true` klasör taramasında birleşik çıktılar `combined_vlm_candidates.*`, `combined_vlm_stage1_positives.gpkg` ve `combined_vlm_stage2_verified.gpkg` adlarıyla yazılır.
+
+### 💾 Önbellek Dosyaları
+
+**Önbellek Dizin Yapısı:**
 ```
 workspace/cache/
-â”œâ”€â”€ kesif_alani.a1b2c3d4e5f6.derivatives.npz    â†’ RVT tÃ¼revleri Ã¶nbelleÄŸi
-â””â”€â”€ karlik_vadi.f6e5d4c3b2a1.derivatives.npz   â†’ RVT tÃ¼revleri Ã¶nbelleÄŸi
+├── kesif_alani.a1b2c3d4e5f6.derivatives.npz    → RVT türevleri önbelleği
+└── karlik_vadi.f6e5d4c3b2a1.derivatives.npz   → RVT türevleri önbelleği
 ```
 
-**Ã–nbellek Sistemi:**
-- RVT hesaplamalarÄ± `.npz` formatÄ±nda Ã¶nbelleÄŸe alÄ±nÄ±r
-- Ã–nbellek dosyalarÄ± `workspace/cache/` dizininde saklanÄ±r (config.yaml'daki `cache_dir` ile yapÄ±landÄ±rÄ±labilir)
-- Ã–nbellek doÄŸrulamasÄ± dosya adÄ± ve deÄŸiÅŸiklik zamanÄ±nÄ± kontrol eder
-- **Ã–nemli:** Proje klasÃ¶rÃ¼ taÅŸÄ±nsa bile Ã¶nbellek dosyalarÄ± yeniden kullanÄ±labilir (dosya adÄ± tabanlÄ± doÄŸrulama)
-- Sonraki Ã§alÄ±ÅŸtÄ±rmalarda 10-100x hÄ±zlanma saÄŸlar
-- Ã–nbellek dosyalarÄ± tipik olarak 10-50 MB'dÄ±r, ancak yÃ¼ksek Ã§Ã¶zÃ¼nÃ¼rlÃ¼klÃ¼ veriler iÃ§in daha bÃ¼yÃ¼k olabilir
+**Önbellek Sistemi:**
+- RVT hesaplamaları `.npz` formatında önbelleğe alınır
+- Önbellek dosyaları `workspace/cache/` dizininde saklanır (config.yaml'daki `cache_dir` ile yapılandırılabilir)
+- Önbellek doğrulaması dosya adı ve değişiklik zamanını kontrol eder
+- **Önemli:** Proje klasörü taşınsa bile önbellek dosyaları yeniden kullanılabilir (dosya adı tabanlı doğrulama)
+- Sonraki çalıştırmalarda 10-100x hızlanma sağlar
+- Önbellek dosyaları tipik olarak 10-50 MB'dır, ancak yüksek çözünürlüklü veriler için daha büyük olabilir
 
-**Ã–nbellek YapÄ±landÄ±rmasÄ±:**
+**Önbellek Yapılandırması:**
 ```yaml
-cache_derivatives: true      # Ã–nbelleÄŸi etkinleÅŸtir
-cache_dir: "workspace/cache/"          # Ã–nbellek dizini (proje kÃ¶kÃ¼ne gÃ¶re)
-recalculate_cache: false     # Ã–nbellek varsa yeniden hesaplama
+cache_derivatives: true      # Önbelleği etkinleştir
+cache_dir: "workspace/cache/"          # Önbellek dizini (proje köküne göre)
+recalculate_cache: false     # Önbellek varsa yeniden hesaplama
 ```
 
-### ğŸ“‹ Dosya AdlandÄ±rma MantÄ±ÄŸÄ±
+### 📋 Dosya Adlandırma Mantığı
 
-Ã‡Ä±ktÄ± dosyalarÄ± aÅŸaÄŸÄ±daki formatta otomatik olarak adlandÄ±rÄ±lÄ±r:
+Çıktı dosyaları aşağıdaki formatta otomatik olarak adlandırılır:
 
 ```
-<Ã¶nek>_[yÃ¶ntem]_[kodlayÄ±cÄ±]_[parametreler]_[tip].ext
+<önek>_[yöntem]_[kodlayıcı]_[parametreler]_[tip].ext
 ```
 
-Ã–rnek:
+Örnek:
 ```
 kesif_alani_fused_resnet34_th0.6_tile1024_alpha0.5_prob.tif
 ```
 
 **Parametreler:**
-- `th`: EÅŸik deÄŸeri
+- `th`: Eşik değeri
 - `tile`: Karo boyutu
-- `alpha`: FÃ¼zyon oranÄ±
+- `alpha`: Füzyon oranı
 - `minarea`: Minimum alan
-- Ve diÄŸerleri...
+- Ve diğerleri...
 
 ---
 
-## ğŸ”¬ NasÄ±l Ã‡alÄ±ÅŸÄ±r
+## 🔬 Nasıl Çalışır
 
-### Ä°ÅŸ AkÄ±ÅŸÄ± Genel BakÄ±ÅŸ
+### İş Akışı Genel Bakış
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚  GeoTIFF GiriÅŸi     â”‚
-â”‚ (RGB, DSM, DTM)     â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-           â”‚
+┌─────────────────────┐
+│  GeoTIFF Girişi     │
+│ (RGB, DSM, DTM)     │
+└──────────┬──────────┘
+           │
            â–¼
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚  Veri Ã–n Ä°ÅŸleme     â”‚
-â”‚  - Bant okuma       â”‚
-â”‚  - Normalizasyon    â”‚
-â”‚  - Maskeleme        â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-           â”‚
-     â”Œâ”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”
+┌─────────────────────┐
+│  Veri Ön İşleme     │
+│  - Bant okuma       │
+│  - Normalizasyon    │
+│  - Maskeleme        │
+└──────────┬──────────┘
+           │
+     ┌─────┴─────┐
      â–¼           â–¼
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â” â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚ Derin   â”‚ â”‚ Klasik   â”‚
-â”‚ Ã–ÄŸrenme â”‚ â”‚ YÃ¶ntemlerâ”‚
-â”‚ (U-Net) â”‚ â”‚ (RVT)    â”‚
-â””â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”˜ â””â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”˜
-     â”‚           â”‚
-     â””â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”˜
+┌─────────┐ ┌──────────┐
+│ Derin   │ │ Klasik   │
+│ Öğrenme │ │ Yöntemler│
+│ (U-Net) │ │ (RVT)    │
+└────┬────┘ └────┬─────┘
+     │           │
+     └─────┬─────┘
            â–¼
-   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-   â”‚    FÃ¼zyon     â”‚
-   â”‚  (BirleÅŸtir)  â”‚
-   â””â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”˜
-           â”‚
+   ┌───────────────┐
+   │    Füzyon     │
+   │  (Birleştir)  │
+   └───────┬───────┘
+           │
            â–¼
-   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-   â”‚  EÅŸikleme     â”‚
-   â”‚  (Olas â†’ Mask)â”‚
-   â””â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”˜
-           â”‚
+   ┌───────────────┐
+   │  Eşikleme     │
+   │  (Olas → Mask)│
+   └───────┬───────┘
+           │
            â–¼
-   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-   â”‚ VektÃ¶rleÅŸtirmeâ”‚
-   â”‚  (GeoPackage) â”‚
-   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+   ┌───────────────┐
+   │ Vektörleştirme│
+   │  (GeoPackage) │
+   └───────────────┘
 ```
 
-### 1ï¸âƒ£ Derin Ã–ÄŸrenme YÃ¶ntemi
+### 1️⃣ Derin Öğrenme Yöntemi
 
-**AdÄ±mlar:**
+**Adımlar:**
 
-1. **5 kanallÄ± DL tensÃ¶rÃ¼nÃ¼ oluÅŸturma**
-   - GeoTIFFâ€™ten **RGB** ve **DSM/DTM** okunur (`config.yaml`â€™daki bant seÃ§imine gÃ¶re)
-   - DoldurulmuÅŸ DTM Ã¼zerinde RVT ile **SVF** ve **SLRM** hesaplanÄ±r (`archaeo_detect.py` iÃ§indeki `compute_derivatives_with_rvt` vb.)
-   - `stack_channels(rgb, svf, slrm)` ile `(5, H, W)` tensÃ¶rÃ¼ Ã¼retilir; kanal sÄ±rasÄ± `MODEL_CHANNEL_NAMES`
+1. **5 kanallı DL tensörünü oluşturma**
+   - GeoTIFF'ten **RGB** ve **DSM/DTM** okunur (`config.yaml`'daki bant seçimine göre)
+   - Doldurulmuş DTM üzerinde RVT ile **SVF** ve **SLRM** hesaplanır (`archaeo_detect.py` içindeki `compute_derivatives_with_rvt` vb.)
+   - `stack_channels(rgb, svf, slrm)` ile `(5, H, W)` tensörü üretilir; kanal sırası `MODEL_CHANNEL_NAMES`
 
-   AÃ§Ä±klÄ±k, eÄŸim vb. diÄŸer RVT Ã§Ä±ktÄ±larÄ± **klasik** veya deneysel yollarda kullanÄ±labilir; bu DL yÄ±ÄŸÄ±nÄ±nda ayrÄ± dÃ¼zlem olarak yer almazlar.
+   Açıklık, eğim vb. diğer RVT çıktıları **klasik** veya deneysel yollarda kullanılabilir; bu DL yığınında ayrı düzlem olarak yer almazlar.
 
 2. **Normalizasyon**
-   - Global veya yerel yÃ¼zdelik tabanlÄ±
-   - %2-%98 aralÄ±ÄŸÄ±na Ã¶lÃ§ekleme
+   - Global veya yerel yüzdelik tabanlı
+   - %2-%98 aralığına ölçekleme
 
-3. **Karo TabanlÄ± Ä°ÅŸleme**
-   - BÃ¼yÃ¼k gÃ¶rÃ¼ntÃ¼ kÃ¼Ã§Ã¼k karolara bÃ¶lÃ¼nÃ¼r
+3. **Karo Tabanlı İşleme**
+   - Büyük görüntü küçük karolara bölünür
    - Her karo U-Net'e beslenir
-   - OlasÄ±lÄ±k haritasÄ± oluÅŸturulur
+   - Olasılık haritası oluşturulur
 
-4. **YumuÅŸatma (Feathering)**
-   - Karolar arasÄ±ndaki geÃ§iÅŸler yumuÅŸatÄ±lÄ±r
-   - Sorunsuz mozaik oluÅŸturulur
+4. **Yumuşatma (Feathering)**
+   - Karolar arasındaki geçişler yumuşatılır
+   - Sorunsuz mozaik oluşturulur
 
-5. **EÅŸikleme**
-   - OlasÄ±lÄ±k > eÅŸik â†’ Maske = 1
-   - OlasÄ±lÄ±k â‰¤ eÅŸik â†’ Maske = 0
+5. **Eşikleme**
+   - Olasılık > eşik → Maske = 1
+   - Olasılık ≤ eşik → Maske = 0
 
-### 2ï¸âƒ£ Klasik GÃ¶rÃ¼ntÃ¼ Ä°ÅŸleme
+### 2️⃣ Klasik Görüntü İşleme
 
-**ÃœÃ§ Alt YÃ¶ntem:**
+**Üç Alt Yöntem:**
 
-**A) RVT (Kabartma GÃ¶rselleÅŸtirme)**
-- SVF, AÃ§Ä±klÄ±k hesaplamalarÄ±
-- Kabartma gÃ¶rselleÅŸtirme
-- TÃ¼mÃ¼lÃ¼s ve hÃ¶yÃ¼kler iÃ§in ideal
+**A) RVT (Kabartma Görselleştirme)**
+- SVF, Açıklık hesaplamaları
+- Kabartma görselleştirme
+- Tümülüs ve höyükler için ideal
 
 **B) Hessian Matrisi**
-- Ä°kinci tÃ¼rev analizi
-- SÄ±rt ve vadi tespiti
-- Duvarlar ve hendekler iÃ§in etkili
+- İkinci türev analizi
+- Sırt ve vadi tespiti
+- Duvarlar ve hendekler için etkili
 
-**C) Morfolojik OperatÃ¶rler**
-- AÃ§ma, kapama
-- Ãœst-ÅŸapka dÃ¶nÃ¼ÅŸÃ¼mleri
-- Yerel doku Ã¶zellikleri
+**C) Morfolojik Operatörler**
+- Açma, kapama
+- Üst-şapka dönüşümleri
+- Yerel doku özellikleri
 
 **Kombinasyon:**
-- Her yÃ¶ntem 0-1 puan Ã¼retir
-- Puanlar ortalamasÄ± alÄ±nÄ±r (combo modu)
-- Otsu veya manuel eÅŸikleme uygulanÄ±r
+- Her yöntem 0-1 puan üretir
+- Puanlar ortalaması alınır (combo modu)
+- Otsu veya manuel eşikleme uygulanır
 
-### 3ï¸âƒ£ FÃ¼zyon (Hibrit Kombinasyon)
+### 3️⃣ Füzyon (Hibrit Kombinasyon)
 
-**FormÃ¼l:**
+**Formül:**
 ```
-P_fused = Î± Ã— P_derin_Ã¶ÄŸrenme + (1 - Î±) Ã— P_klasik
+P_fused = α × P_derin_öğrenme + (1 - α) × P_klasik
 ```
 
 **Avantajlar:**
-- Derin Ã¶ÄŸrenme: KarmaÅŸÄ±k desenler
-- Klasik: GÃ¼venilir yÃ¼kseklik Ã¶zellikleri
-- FÃ¼zyon: Her ikisinin gÃ¼Ã§lÃ¼ yÃ¶nleri
+- Derin öğrenme: Karmaşık desenler
+- Klasik: Güvenilir yükseklik özellikleri
+- Füzyon: Her ikisinin güçlü yönleri
 
-**Ã–rnek:**
-- Î± = 0.5: EÅŸit aÄŸÄ±rlÄ±k
-- Î± = 0.7: DL'ye Ã¶ncelik
-- Î± = 0.3: KlasiÄŸe Ã¶ncelik
+**Örnek:**
+- α = 0.5: Eşit ağırlık
+- α = 0.7: DL'ye öncelik
+- α = 0.3: Klasiğe öncelik
 
 ---
 
-## ğŸ’¡ KullanÄ±m SenaryolarÄ±
+## 💡 Kullanım Senaryoları
 
-### ğŸ“ Senaryo 1: Yeni Alan KeÅŸfi
+### 📍 Senaryo 1: Yeni Alan Keşfi
 
-**Durum:** KeÅŸfedilmemiÅŸ bir alanÄ±n ilk taramasÄ±
+**Durum:** Keşfedilmemiş bir alanın ilk taraması
 
-**Ã–nerilen Ayarlar:**
+**Önerilen Ayarlar:**
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
+  --enable-deep-learning \
+  --zero-shot-imagenet \
   --encoders all \
   --enable-classic \
   --enable-fusion \
   --th 0.5 \
-  --classic-th null \
+  --classic-th 0.3 \
   --alpha 0.5 \
   --min-area 50 \
   --cache-derivatives \
@@ -837,40 +1103,45 @@ python archaeo_detect.py \
 ```
 
 **Neden bu ayarlar?**
-- Ã‡oklu kodlayÄ±cÄ±: Maksimum tespit hassasiyeti
-- DÃ¼ÅŸÃ¼k eÅŸik: TÃ¼m adaylarÄ± yakala
-- DÃ¼ÅŸÃ¼k min_area: KÃ¼Ã§Ã¼k yapÄ±larÄ± kaÃ§Ä±rma
-- Ã–nbellek: Tekrarlanan analiz iÃ§in hÄ±zlanma
+- Çoklu kodlayıcı: Maksimum tespit hassasiyeti
+- Düşük eşik: Tüm adayları yakala
+- Düşük min_area: Küçük yapıları kaçırma
+- Önbellek: Tekrarlanan analiz için hızlanma
 
-### ğŸ¯ Senaryo 2: Bilinen AlanÄ±n DetaylÄ± Analizi
+### 🎯 Senaryo 2: Bilinen Alanın Detaylı Analizi
 
-**Durum:** Daha Ã¶nce tespit edilen bir alanÄ±n detaylÄ± incelemesi
+**Durum:** Daha önce tespit edilen bir alanın detaylı incelemesi
 
-**Ã–nerilen Ayarlar:**
+**Önerilen Ayarlar:**
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
+  --enable-deep-learning \
+  --trained-model-only \
   --encoder efficientnet-b3 \
   --weights models/benim_ayarli_modelim.pth \
+  --training-metadata models/training_metadata.json \
   --th 0.65 \
-  --enable-classic \
-  --alpha 0.6 \
   --min-area 80 \
   --simplify 2.0 \
   -v
 ```
 
 **Neden bu ayarlar?**
-- Ã–zel model: BÃ¶lgeye Ã¶zgÃ¼ eÄŸitilmiÅŸ model
-- YÃ¼ksek eÅŸik: Sadece gÃ¼venilir tespitler
-- Simplify: Temiz Ã§okgenler
+- Özel model: Bölgeye özgü eğitilmiş model
+- Yüksek eşik: Sadece güvenilir tespitler
+- Simplify: Temiz çokgenler
 
-### âš¡ Senaryo 3: HÄ±zlÄ± Ã–n DeÄŸerlendirme
+### ⚡ Senaryo 3: Hızlı Ön Değerlendirme
 
-**Durum:** HÄ±zlÄ±ca fikir edinmek iÃ§in
+**Durum:** Hızlıca fikir edinmek için
 
-**Ã–nerilen Ayarlar:**
+**Önerilen Ayarlar:**
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
   --no-enable-deep-learning \
   --enable-classic \
   --classic-modes rvtlog \
@@ -880,17 +1151,21 @@ python archaeo_detect.py \
 ```
 
 **Neden bu ayarlar?**
-- Sadece klasik: En hÄ±zlÄ± yÃ¶ntem
-- KÃ¼Ã§Ã¼k karolar: Daha az bellek
-- VektÃ¶r yok: Zaman tasarrufu
+- Sadece klasik: En hızlı yöntem
+- Küçük karolar: Daha az bellek
+- Vektör yok: Zaman tasarrufu
 
-### ğŸ”¬ Senaryo 4: AraÅŸtÄ±rma ve KarÅŸÄ±laÅŸtÄ±rma
+### 🔬 Senaryo 4: Araştırma ve Karşılaştırma
 
-**Durum:** FarklÄ± yÃ¶ntemlerin karÅŸÄ±laÅŸtÄ±rmalÄ± analizi
+**Durum:** Farklı yöntemlerin karşılaştırmalı analizi
 
-**Ã–nerilen Ayarlar:**
+**Önerilen Ayarlar:**
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
+  --enable-deep-learning \
+  --zero-shot-imagenet \
   --encoders all \
   --enable-classic \
   --classic-save-intermediate \
@@ -901,40 +1176,40 @@ python archaeo_detect.py \
 ```
 
 **Neden bu ayarlar?**
-- TÃ¼m yÃ¶ntemler aktif
-- Ara dosyalar: Her yÃ¶ntemin katkÄ±sÄ±nÄ± gÃ¶rme
-- TÃ¼m fÃ¼zyon: Her kombinasyonu deneme
+- Tüm yöntemler aktif
+- Ara dosyalar: Her yöntemin katkısını görme
+- Tüm füzyon: Her kombinasyonu deneme
 
 ---
 
-## ğŸ¨ GÃ¶rselleÅŸtirme
+## 🎨 Görselleştirme
 
-### QGIS'te GÃ¶rÃ¼ntÃ¼leme
+### QGIS'te Görüntüleme
 
-#### 1ï¸âƒ£ OlasÄ±lÄ±k HaritalarÄ±nÄ± YÃ¼kleme
-
-```
-Katman â†’ Katman Ekle â†’ Raster Katman Ekle
-```
-
-**Ã–nerilen Renk ÅemasÄ±:**
-- 0.0-0.3: Mavi (DÃ¼ÅŸÃ¼k olasÄ±lÄ±k)
-- 0.3-0.5: SarÄ± (Orta olasÄ±lÄ±k)
-- 0.5-0.7: Turuncu (YÃ¼ksek olasÄ±lÄ±k)
-- 0.7-1.0: KÄ±rmÄ±zÄ± (Ã‡ok yÃ¼ksek olasÄ±lÄ±k)
-
-#### 2ï¸âƒ£ VektÃ¶r Ã‡okgenleri GÃ¶rÃ¼ntÃ¼leme
+#### 1️⃣ Olasılık Haritalarını Yükleme
 
 ```
-Katman â†’ Katman Ekle â†’ VektÃ¶r Katman Ekle â†’ GeoPackage SeÃ§
+Katman → Katman Ekle → Raster Katman Ekle
 ```
 
-**Stil Ã–nerileri:**
-- Dolgu: YarÄ± saydam kÄ±rmÄ±zÄ± (opaklÄ±k: %50)
-- Ã‡izgi: KalÄ±n kÄ±rmÄ±zÄ± (2 piksel)
-- Etiket: Alan deÄŸeri (mÂ²)
+**Önerilen Renk Şeması:**
+- 0.0-0.3: Mavi (Düşük olasılık)
+- 0.3-0.5: Sarı (Orta olasılık)
+- 0.5-0.7: Turuncu (Yüksek olasılık)
+- 0.7-1.0: Kırmızı (Çok yüksek olasılık)
 
-#### 3ï¸âƒ£ Temel Haritayla Bindirme
+#### 2️⃣ Vektör Çokgenleri Görüntüleme
+
+```
+Katman → Katman Ekle → Vektör Katman Ekle → GeoPackage Seç
+```
+
+**Stil Önerileri:**
+- Dolgu: Yarı saydam kırmızı (opaklık: %50)
+- Çizgi: Kalın kırmızı (2 piksel)
+- Etiket: Alan değeri (m²)
+
+#### 3️⃣ Temel Haritayla Bindirme
 
 ```python
 # QGIS Python Konsolu
@@ -944,32 +1219,32 @@ from qgis.core import QgsRasterLayer
 ortho = QgsRasterLayer('kesif_alani.tif', 'Ortofoto')
 QgsProject.instance().addMapLayer(ortho)
 
-# Maske ekle (yarÄ± saydam)
+# Maske ekle (yarı saydam)
 mask = QgsRasterLayer('kesif_alani_mask.tif', 'Tespit')
 QgsProject.instance().addMapLayer(mask)
 mask.renderer().setOpacity(0.6)
 ```
 
-### Python GÃ¶rselleÅŸtirme
+### Python Görselleştirme
 
 ```python
 import rasterio
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-# OlasÄ±lÄ±k haritasÄ±nÄ± oku
+# Olasılık haritasını oku
 with rasterio.open('kesif_alani_prob.tif') as src:
     prob = src.read(1)
 
-# Ã–zel renk paleti
+# Özel renk paleti
 colors = ['blue', 'cyan', 'yellow', 'orange', 'red']
 cmap = LinearSegmentedColormap.from_list('archaeo', colors)
 
-# GÃ¶rselleÅŸtir
+# Görselleştir
 plt.figure(figsize=(12, 10))
 plt.imshow(prob, cmap=cmap, vmin=0, vmax=1)
-plt.colorbar(label='Arkeolojik Alan OlasÄ±lÄ±ÄŸÄ±')
-plt.title('Arkeolojik Alan Tespit SonuÃ§larÄ±')
+plt.colorbar(label='Arkeolojik Alan Olasılığı')
+plt.title('Arkeolojik Alan Tespit Sonuçları')
 plt.xlabel('X (piksel)')
 plt.ylabel('Y (piksel)')
 plt.tight_layout()
@@ -977,24 +1252,24 @@ plt.savefig('sonuc_gorsellestirme.png', dpi=300)
 plt.show()
 ```
 
-### Web TabanlÄ± GÃ¶rselleÅŸtirme
+### Web Tabanlı Görselleştirme
 
 ```python
 import folium
 import geopandas as gpd
 
-# VektÃ¶r oku
+# Vektör oku
 gdf = gpd.read_file('kesif_alani_mask.gpkg')
 
-# Harita oluÅŸtur
+# Harita oluştur
 m = folium.Map(
-    location=[gdf.geometry.centroid.y.mean(), 
+    location=[gdf.geometry.centroid.y.mean(),
               gdf.geometry.centroid.x.mean()],
     zoom_start=14,
     tiles='OpenStreetMap'
 )
 
-# Ã‡okgenleri ekle
+# Çokgenleri ekle
 for idx, row in gdf.iterrows():
     folium.GeoJson(
         row.geometry,
@@ -1004,132 +1279,138 @@ for idx, row in gdf.iterrows():
             'weight': 2,
             'fillOpacity': 0.5
         },
-        tooltip=f"Alan: {row.get('area', 0):.1f} mÂ²"
+        tooltip=f"Alan: {row.get('area', 0):.1f} m²"
     ).add_to(m)
 
 # Kaydet
 m.save('interaktif_harita.html')
-print("Harita oluÅŸturuldu: interaktif_harita.html")
+print("Harita oluşturuldu: interaktif_harita.html")
 ```
 
 ---
 
-## âš¡ Performans Optimizasyonu
+## ⚡ Performans Optimizasyonu
 
-### GPU KullanÄ±mÄ±
+### GPU Kullanımı
 
-#### CUDA KontrolÃ¼
+#### CUDA Kontrolü
 ```python
 import torch
-print(f"CUDA KullanÄ±labilir: {torch.cuda.is_available()}")
+print(f"CUDA Kullanılabilir: {torch.cuda.is_available()}")
 print(f"CUDA Versiyonu: {torch.version.cuda}")
-print(f"GPU SayÄ±sÄ±: {torch.cuda.device_count()}")
+print(f"GPU Sayısı: {torch.cuda.device_count()}")
 if torch.cuda.is_available():
-    print(f"GPU AdÄ±: {torch.cuda.get_device_name(0)}")
+    print(f"GPU Adı: {torch.cuda.get_device_name(0)}")
 ```
 
-#### GPU HÄ±zlandÄ±rma
-```bash
-# Karma hassasiyet (FP16) ile 2x hÄ±zlanma
-python archaeo_detect.py --half
+#### GPU Hızlandırma
+Bu bayrakları aktif bir yöntem komutuna ekleyin; tek başına `python archaeo_detect.py --half` güncel config'te yöntem seçmediği için yeterli değildir.
 
-# GPU'yu bÃ¼yÃ¼k karolarla doldur
-python archaeo_detect.py --tile 2048 --overlap 512
+```bash
+# Karma hassasiyet (FP16) ile 2x hızlanma
+python archaeo_detect.py --enable-deep-learning --zero-shot-imagenet --half
+
+# GPU'yu büyük karolarla doldur
+python archaeo_detect.py --enable-deep-learning --zero-shot-imagenet --tile 2048 --overlap 512
 ```
 
 ### Bellek Optimizasyonu
 
-#### DÃ¼ÅŸÃ¼k Bellek Durumu
+#### Düşük Bellek Durumu
 ```bash
 python archaeo_detect.py \
+  --input veri/combined_5band.tif \
+  --bands 1,2,3,4,5 \
   --tile 512 \
   --overlap 64 \
   --no-enable-deep-learning \
   --enable-classic
 ```
 
-#### YÃ¼ksek Bellek Durumu
+#### Yüksek Bellek Durumu
 ```bash
 python archaeo_detect.py \
+  --enable-deep-learning \
+  --zero-shot-imagenet \
   --tile 4096 \
   --overlap 1024 \
   --half \
   --encoders all
 ```
 
-### Ã–nbellek Stratejisi
+### Önbellek Stratejisi
 
 ```bash
-# Ä°lk Ã§alÄ±ÅŸtÄ±rma: Ã–nbellek oluÅŸtur
-python archaeo_detect.py --cache-derivatives
+# İlk çalıştırma: Önbellek oluştur
+python archaeo_detect.py --enable-classic --input veri/combined_5band.tif --bands 1,2,3,4,5 --cache-derivatives
 
-# Sonraki Ã§alÄ±ÅŸtÄ±rmalar: 10-100x daha hÄ±zlÄ±!
-# Ã–nbellek otomatik olarak kullanÄ±lÄ±r
+# Sonraki çalıştırmalar: 10-100x daha hızlı!
+# Önbellek otomatik olarak kullanılır
 
-# Parametreler deÄŸiÅŸtiÄŸinde Ã¶nbelleÄŸi yeniden hesapla
-python archaeo_detect.py --recalculate-cache
+# Parametreler değiştiğinde önbelleği yeniden hesapla
+python archaeo_detect.py --enable-classic --input veri/combined_5band.tif --bands 1,2,3,4,5 --recalculate-cache
 ```
 
-**Ã–nbellek FaydalarÄ±:**
-- RVT tÃ¼revleri bir kez hesaplanÄ±r ve Ã¶nbelleÄŸe alÄ±nÄ±r
-- Ã–nbellek dosyalarÄ± `workspace/cache/` dizininde saklanÄ±r
-- Ã–nbellek doÄŸrulamasÄ± esnektir: proje klasÃ¶rÃ¼ taÅŸÄ±nsa bile Ã§alÄ±ÅŸÄ±r
-- Dosya adÄ± ve deÄŸiÅŸiklik zamanÄ± doÄŸrulama iÃ§in kontrol edilir
-- Tekrarlanan Ã§alÄ±ÅŸtÄ±rmalarda Ã¶nemli zaman tasarrufu
+**Önbellek Faydaları:**
+- RVT türevleri bir kez hesaplanır ve önbelleğe alınır
+- Önbellek dosyaları `workspace/cache/` dizininde saklanır
+- Önbellek doğrulaması esnektir: proje klasörü taşınsa bile çalışır
+- Dosya adı ve değişiklik zamanı doğrulama için kontrol edilir
+- Tekrarlanan çalıştırmalarda önemli zaman tasarrufu
 
-### Paralel Ä°ÅŸleme
+### Paralel İşleme
 
-Birden fazla alan iÃ§in paralel Ã§alÄ±ÅŸtÄ±rma:
+Birden fazla alan için paralel çalıştırma:
 
 ```bash
-# Bash betiÄŸi
+# Bash betiği
 for file in alan1.tif alan2.tif alan3.tif; do
-  python archaeo_detect.py --input $file &
+  python archaeo_detect.py --enable-yolo --input $file &
 done
 wait
 ```
 
-### Performans KarÅŸÄ±laÅŸtÄ±rmasÄ±
+### Performans Karşılaştırması
 
-| YapÄ±landÄ±rma | Ä°ÅŸleme SÃ¼resi | Bellek KullanÄ±mÄ± | Kalite |
+| Yapılandırma | İşleme Süresi | Bellek Kullanımı | Kalite |
 |--------------|---------------|------------------|--------|
-| **Minimum** (CPU, 512 karo) | ~30 dk | 4 GB | DÃ¼ÅŸÃ¼k |
+| **Minimum** (CPU, 512 karo) | ~30 dk | 4 GB | Düşük |
 | **Dengeli** (GPU, 1024 karo) | ~5 dk | 8 GB | Orta |
-| **Maksimum** (GPU, 2048 karo, topluluk) | ~15 dk | 16 GB | YÃ¼ksek |
+| **Maksimum** (GPU, 2048 karo, topluluk) | ~15 dk | 16 GB | Yüksek |
 
-*10 kmÂ² alan iÃ§in tahmini sÃ¼reler (1m Ã§Ã¶zÃ¼nÃ¼rlÃ¼k)*
+*10 km² alan için tahmini süreler (1m çözünürlük)*
 
 ---
 
-## ğŸ› Sorun Giderme
+## 🐛 Sorun Giderme
 
-### YaygÄ±n Hatalar ve Ã‡Ã¶zÃ¼mler
+### Yaygın Hatalar ve Çözümler
 
-#### âŒ Hata 1: CUDA Bellek YetersizliÄŸi
+#### ❌ Hata 1: CUDA Bellek Yetersizliği
 
 ```
 RuntimeError: CUDA out of memory. Tried to allocate X GB
 ```
 
-**Ã‡Ã¶zÃ¼mler:**
+**Çözümler:**
 ```bash
-# Ã‡Ã¶zÃ¼m 1: Karo boyutunu kÃ¼Ã§Ã¼lt
-python archaeo_detect.py --tile 512
+# Çözüm 1: Karo boyutunu küçült
+python archaeo_detect.py --enable-deep-learning --zero-shot-imagenet --tile 512
 
-# Ã‡Ã¶zÃ¼m 2: Karma hassasiyet kullan
-python archaeo_detect.py --half
+# Çözüm 2: Karma hassasiyet kullan
+python archaeo_detect.py --enable-deep-learning --zero-shot-imagenet --half
 
-# Ã‡Ã¶zÃ¼m 3: CPU kullan
-python archaeo_detect.py --device cpu
+# Çözüm 3: CPU kullan
+python archaeo_detect.py --enable-deep-learning --zero-shot-imagenet --device cpu
 ```
 
-#### âŒ Hata 2: RVT Ä°Ã§e Aktarma HatasÄ±
+#### ❌ Hata 2: RVT İçe Aktarma Hatası
 
 ```
 ModuleNotFoundError: No module named 'rvt'
 ```
 
-**Ã‡Ã¶zÃ¼m:**
+**Çözüm:**
 ```bash
 # Python 3.10
 pip install rvt-py
@@ -1141,134 +1422,134 @@ pip install rvt
 conda install -c conda-forge rvt
 ```
 
-#### âŒ Hata 3: BoÅŸ Ã‡Ä±ktÄ±
+#### ❌ Hata 3: Boş Çıktı
 
 ```
 Warning: No detections found
 ```
 
-**Ã‡Ã¶zÃ¼mler:**
-1. EÅŸik deÄŸerini dÃ¼ÅŸÃ¼r:
+**Çözümler:**
+1. Eşik değerini düşür:
    ```bash
-   python archaeo_detect.py --th 0.3 --classic-th 0.3
+   python archaeo_detect.py --enable-classic --input veri/combined_5band.tif --bands 1,2,3,4,5 --th 0.3 --classic-th 0.3
    ```
 
-2. Minimum alanÄ± dÃ¼ÅŸÃ¼r:
+2. Minimum alanı düşür:
    ```bash
-   python archaeo_detect.py --min-area 20
+   python archaeo_detect.py --enable-yolo --min-area 20
    ```
 
-3. AyrÄ±ntÄ±lÄ± modda kontrol et:
+3. Ayrıntılı modda kontrol et:
    ```bash
-   python archaeo_detect.py -v
+   python archaeo_detect.py --enable-yolo -v
    ```
 
-#### âŒ Hata 4: Klasik YÃ¶ntem Ã‡alÄ±ÅŸmÄ±yor
+#### ❌ Hata 4: Klasik Yöntem Çalışmıyor
 
 ```
 Error: DTM band not found
 ```
 
-**Ã‡Ã¶zÃ¼m:**
-`config.yaml`'da bantlarÄ± kontrol edin:
+**Çözüm:**
+`config.yaml`'da bantları kontrol edin:
 ```yaml
-bands: "1,2,3,4,5"  # Bant 5 DTM olmalÄ±
-# DTM zorunlu (0 geÃ§ersizdir)
-# DTM eksikse Ã¶nce geÃ§erli bir DTM bandÄ± Ã¼retin/saÄŸlayÄ±n.
+bands: "1,2,3,4,5"  # Bant 5 DTM olmalı
+# DTM zorunlu (0 geçersizdir)
+# DTM eksikse önce geçerli bir DTM bandı üretin/sağlayın.
 ```
 
-#### âŒ Hata 5: Karo SÄ±nÄ±rlarÄ±nda Ã‡izgiler
+#### ❌ Hata 5: Karo Sınırlarında Çizgiler
 
-**Ã‡Ã¶zÃ¼m:**
+**Çözüm:**
 ```bash
-# Ã–rtÃ¼ÅŸmeyi artÄ±r ve yumuÅŸatmayÄ± etkinleÅŸtir
-python archaeo_detect.py --overlap 512 --feather
+# Örtüşmeyi artır ve yumuşatmayı etkinleştir
+python archaeo_detect.py --enable-deep-learning --zero-shot-imagenet --overlap 512 --feather
 ```
 
-#### âŒ Hata 6: Ã–nbellek KullanÄ±lmÄ±yor
+#### ❌ Hata 6: Önbellek Kullanılmıyor
 
-**Belirtiler:** Ã–nbellek dosyalarÄ± varken bile sistem RVT tÃ¼revlerini yeniden hesaplÄ±yor
+**Belirtiler:** Önbellek dosyaları varken bile sistem RVT türevlerini yeniden hesaplıyor
 
-**Ã‡Ã¶zÃ¼mler:**
-1. `config.yaml`'da Ã¶nbellek dizini yolunu kontrol edin:
+**Çözümler:**
+1. `config.yaml`'da önbellek dizini yolunu kontrol edin:
    ```yaml
-   cache_dir: "workspace/cache/"  # Ã–nbellek dizininizle eÅŸleÅŸmeli
+   cache_dir: "workspace/cache/"  # Önbellek dizininizle eşleşmeli
    ```
 
-2. Ã–nbellek dosya adlandÄ±rmasÄ±nÄ± doÄŸrulayÄ±n:
-   - NPZ Ã¶nbellek (kÃ¼Ã§Ã¼k/orta rasterlar iÃ§in varsayÄ±lan): `<giriÅŸ_adÄ±>.<cache_hash>.derivatives.npz`
-   - Raster Ã¶nbellek (blok tabanlÄ±; Ã§ok bÃ¼yÃ¼k rasterlar veya `cache_derivatives_mode: "raster"` ile otomatik kullanÄ±lÄ±r):
-     - `<giriÅŸ_adÄ±>.<cache_hash>.derivatives_raster.tif`
-     - `<giriÅŸ_adÄ±>.<cache_hash>.derivatives_raster.json`
-   - `kesif_alani.tif` giriÅŸi iÃ§in Ã¶rnek:
+2. Önbellek dosya adlandırmasını doğrulayın:
+   - NPZ önbellek (küçük/orta rasterlar için varsayılan): `<giriş_adı>.<cache_hash>.derivatives.npz`
+   - Raster önbellek (blok tabanlı; çok büyük rasterlar veya `cache_derivatives_mode: "raster"` ile otomatik kullanılır):
+     - `<giriş_adı>.<cache_hash>.derivatives_raster.tif`
+     - `<giriş_adı>.<cache_hash>.derivatives_raster.json`
+   - `kesif_alani.tif` girişi için örnek:
      - `kesif_alani.a1b2c3d4e5f6.derivatives.npz`
      - `kesif_alani.a1b2c3d4e5f6.derivatives_raster.tif`
 
-3. Ã–nbellek doÄŸrulamasÄ±nÄ± kontrol edin:
-   - Ã–nbellek doÄŸrulamasÄ± dosya adÄ± ve deÄŸiÅŸiklik zamanÄ±nÄ± kontrol eder
-   - GiriÅŸ dosyasÄ± taÅŸÄ±nmÄ±ÅŸsa, Ã¶nbellek yine de Ã§alÄ±ÅŸmalÄ±dÄ±r (dosya adÄ± tabanlÄ± doÄŸrulama)
-   - GiriÅŸ dosyasÄ± deÄŸiÅŸtirilmiÅŸse, Ã¶nbellek yeniden hesaplanÄ±r
+3. Önbellek doğrulamasını kontrol edin:
+   - Önbellek doğrulaması dosya adı ve değişiklik zamanını kontrol eder
+   - Giriş dosyası taşınmışsa, önbellek yine de çalışmalıdır (dosya adı tabanlı doğrulama)
+   - Giriş dosyası değiştirilmişse, önbellek yeniden hesaplanır
 
-4. Ã–nbellek durumunu gÃ¶rmek iÃ§in ayrÄ±ntÄ±lÄ± modu etkinleÅŸtirin:
+4. Önbellek durumunu görmek için ayrıntılı modu etkinleştirin:
    ```bash
-   python archaeo_detect.py --cache-derivatives -v
+   python archaeo_detect.py --enable-classic --input veri/combined_5band.tif --bands 1,2,3,4,5 --cache-derivatives -v
    ```
 
-#### âŒ Hata 7: EÄŸitim BetiÄŸi Ä°Ã§e Aktarma HatalarÄ±
+#### ❌ Hata 7: Eğitim Betiği İçe Aktarma Hataları
 
 **Belirtiler:**
 ```
-HATA: segmentation-models-pytorch kurulu deÄŸil!
-HATA: archaeo_detect.py'den attention modÃ¼lleri import edilemedi.
+HATA: segmentation-models-pytorch kurulu değil!
+HATA: archaeo_detect.py'den attention modülleri import edilemedi.
 ```
 
-**Ã‡Ã¶zÃ¼mler:**
-1. **Eksik paketleri yÃ¼kleyin**:
+**Çözümler:**
+1. **Eksik paketleri yükleyin**:
    ```bash
    pip install segmentation-models-pytorch
    ```
 
-2. **Python yolunu kontrol edin**: `archaeo_detect.py`'nin aynÄ± dizinde veya Python yolunda olduÄŸundan emin olun
+2. **Python yolunu kontrol edin**: `archaeo_detect.py`'nin aynı dizinde veya Python yolunda olduğundan emin olun
 
-3. **Kurulumu doÄŸrulayÄ±n**: `python -c "import segmentation_models_pytorch as smp; print(smp.__version__)"` Ã§alÄ±ÅŸtÄ±rÄ±n
+3. **Kurulumu doğrulayın**: `python -c "import segmentation_models_pytorch as smp; print(smp.__version__)"` çalıştırın
 
-#### âŒ Hata 8: EÄŸitim Verisi Format UyumsuzluÄŸu
+#### ❌ Hata 8: Eğitim Verisi Format Uyumsuzluğu
 
 **Belirtiler:**
 ```
 ValueError: Expected 5 channels but got X
 ```
 
-**Ã‡Ã¶zÃ¼mler:**
-1. **EÄŸitim verisini yeniden oluÅŸturun**: `egitim_verisi_olusturma.py`'yi doÄŸru parametrelerle kullanÄ±n
-2. **metadata.json'u kontrol edin**: `num_channels`'Ä±n gerÃ§ek veriyle eÅŸleÅŸtiÄŸini doÄŸrulayÄ±n
-3. **Dosya formatÄ±nÄ± doÄŸrulayÄ±n**: `.npz` dosyalarÄ±nÄ±n gÃ¼ncel ÅŸemada `(5, H, W)` ÅŸeklinde `image` anahtarÄ± iÃ§erdiÄŸinden emin olun
+**Çözümler:**
+1. **Eğitim verisini yeniden oluşturun**: `egitim_verisi_olusturma.py`'yi doğru parametrelerle kullanın
+2. **metadata.json'u kontrol edin**: `num_channels`'ın gerçek veriyle eşleştiğini doğrulayın
+3. **Dosya formatını doğrulayın**: `.npz` dosyalarının güncel şemada `(5, H, W)` şeklinde `image` anahtarı içerdiğinden emin olun
 
-### Hata AyÄ±klama Modu
+### Hata Ayıklama Modu
 
-DetaylÄ± hata ayÄ±klama iÃ§in:
+Detaylı hata ayıklama için:
 
 ```bash
-python archaeo_detect.py --verbose 2 2>&1 | tee debug_log.txt
+python archaeo_detect.py --enable-yolo -vv 2>&1 | tee debug_log.txt
 ```
 
-Bu komut tÃ¼m hata ayÄ±klama mesajlarÄ±nÄ± hem ekrana hem de `debug_log.txt` dosyasÄ±na yazar.
+Bu komut tüm hata ayıklama mesajlarını hem ekrana hem de `debug_log.txt` dosyasına yazar.
 
-### EÄŸitim BetiÄŸi Hata AyÄ±klama
+### Eğitim Betiği Hata Ayıklama
 
-**EÄŸitim verisini kontrol edin:**
+**Eğitim verisini kontrol edin:**
 ```bash
-# EÄŸitim verisi yapÄ±sÄ±nÄ± doÄŸrulayÄ±n
+# Eğitim verisi yapısını doğrulayın
 ls -R workspace/training_data/
-# GÃ¶stermelidir: train/images/, train/masks/, val/images/, val/masks/
+# Göstermelidir: train/images/, train/masks/, val/images/, val/masks/
 
-# Metadata'yÄ± kontrol edin
+# Metadata'yı kontrol edin
 cat workspace/training_data/metadata.json | python -m json.tool
 ```
 
-**Veri yÃ¼klemesini test edin:**
+**Veri yüklemesini test edin:**
 ```python
-# HÄ±zlÄ± test betiÄŸi
+# Hızlı test betiği
 import numpy as np
 from pathlib import Path
 
@@ -1279,325 +1560,330 @@ if train_images:
     print(f"Anahtarlar: {sample.files}")
     if 'image' in sample.files:
         img = sample['image']
-        print(f"GÃ¶rÃ¼ntÃ¼ ÅŸekli: {img.shape}")
-        print(f"Beklenen: (5, 256, 256), AlÄ±nan: {img.shape}")
+        print(f"Görüntü şekli: {img.shape}")
+        print(f"Beklenen: (5, 256, 256), Alınan: {img.shape}")
 ```
 
-**EÄŸitimi gerÃ§ek zamanlÄ± izleyin:**
+**Eğitimi gerçek zamanlı izleyin:**
 ```bash
-# EÄŸitim geÃ§miÅŸi dosyasÄ±nÄ± izleyin
+# Eğitim geçmişi dosyasını izleyin
 watch -n 5 'tail -20 workspace/checkpoints/training_history.json'
 ```
 
 ---
 
-## â“ SSS
+## ❓ SSS
 
-### ğŸ¤” Genel Sorular
+### 🤔 Genel Sorular
 
-**S: EÄŸitilmiÅŸ modelim yok, yine de kullanabilir miyim?**  
-C: Evet! ImageNet aÄŸÄ±rlÄ±klarÄ±nÄ± kullanmak iÃ§in `zero_shot_imagenet: true` kullanÄ±n. AyrÄ±ca, klasik yÃ¶ntemler model gerektirmez.
+**S: Eğitilmiş modelim yok, yine de kullanabilir miyim?**
+C: Evet! ImageNet ağırlıklarını kullanmak için `zero_shot_imagenet: true` kullanın. Ayrıca, klasik yöntemler model gerektirmez.
 
-**S: GPU'm yok, CPU ile Ã§alÄ±ÅŸÄ±r mÄ±?**  
-C: Evet, ama daha yavaÅŸ olacaktÄ±r. Klasik yÃ¶ntemleri tercih edin veya kÃ¼Ã§Ã¼k karo boyutu kullanÄ±n.
+**S: GPU'm yok, CPU ile çalışır mı?**
+C: Evet, ama daha yavaş olacaktır. Klasik yöntemleri tercih edin veya küçük karo boyutu kullanın.
 
-**S: Hangi yÃ¶ntem en iyi sonuÃ§larÄ± verir?**  
-C: Genellikle **fÃ¼zyon** (DL + Klasik) en iyi sonuÃ§larÄ± verir. Ancak, veri kalitenize ve bÃ¶lgenize gÃ¶re deÄŸiÅŸir.
+**S: Hangi yöntem en iyi sonuçları verir?**
+C: Genellikle **füzyon** (DL + Klasik) en iyi sonuçları verir. Ancak, veri kalitenize ve bölgenize göre değişir.
 
-**S: Ä°HA mÄ± uydu muâ€”hangi kaynakla Ã§alÄ±ÅŸÄ±r?**  
-C: Sistem **Ã¶ncelikli olarak Ä°HA (drone) nadir gÃ¶rÃ¼ntÃ¼leri** iÃ§in tasarlanmÄ±ÅŸtÄ±r (ortofoto, DSM, DTM ve bu depoda Ã¼retilen tÃ¼rev kanallar). **Uydu gÃ¶rÃ¼ntÃ¼leri de desteklenir**â€”uyumlu Ã§ok bantlÄ± bir GeoTIFF (RGB, varsa DSM/DTM) hizalÄ± bir Ä±zgarada saÄŸlandÄ±ÄŸÄ±nda aynÄ± sÃ¼reÃ§ Ã§alÄ±ÅŸÄ±r. LiDAR tabanlÄ± yÃ¼zeyler ve diÄŸer sensÃ¶rler de aynÄ± ÅŸekilde kullanÄ±labilir. Ã–nemli olan platform deÄŸil, tutarlÄ± bant yapÄ±sÄ± ve jeoreferanstÄ±r.
+**S: İHA mı uydu mu—hangi kaynakla çalışır?**
+C: Sistem **öncelikli olarak İHA (drone) nadir görüntüleri** için tasarlanmıştır (ortofoto, DSM, DTM ve bu depoda üretilen türev kanallar). **Uydu görüntüleri de desteklenir**—uyumlu çok bantlı bir GeoTIFF (RGB, varsa DSM/DTM) hizalı bir ızgarada sağlandığında aynı süreç çalışır. LiDAR tabanlı yüzeyler ve diğer sensörler de aynı şekilde kullanılabilir. Önemli olan platform değil, tutarlı bant yapısı ve jeoreferanstır.
 
-### ğŸ”§ Teknik Sorular
+### 🔧 Teknik Sorular
 
-**S: KaÃ§ bant gerekli?**  
-C: Minimum 3 bant (RGB). GÃ¼ncel sÃ¼reÃ§te **5 bant** (RGB + DSM + DTM) kullanÄ±n. **Model tensÃ¶rÃ¼** ise **5 kanaldÄ±r**: R, G, B ve DTM Ã¼zerinden kod iÃ§inde Ã¼retilen **SVF** ile **SLRM** (`archaeo_detect.py` iÃ§indeki `stack_channels`).
+**S: Kaç bant gerekli?**
+C: Minimum 3 bant (RGB). Güncel süreçte **5 bant** (RGB + DSM + DTM) kullanın. **Model tensörü** ise **5 kanaldır**: R, G, B ve DTM üzerinden kod içinde üretilen **SVF** ile **SLRM** (`archaeo_detect.py` içindeki `stack_channels`).
 
-**S: Ã–nbellek dosyalarÄ± ne kadar yer kaplar?**  
-C: Tipik olarak 10-50 MB. GiriÅŸ dosya boyutuna baÄŸlÄ±dÄ±r. YÃ¼ksek Ã§Ã¶zÃ¼nÃ¼rlÃ¼klÃ¼ veriler iÃ§in daha bÃ¼yÃ¼k (birkaÃ§ GB) olabilir.
+**S: Önbellek dosyaları ne kadar yer kaplar?**
+C: Tipik olarak 10-50 MB. Giriş dosya boyutuna bağlıdır. Yüksek çözünürlüklü veriler için daha büyük (birkaç GB) olabilir.
 
-**S: SonuÃ§larÄ± nasÄ±l iyileÅŸtirebilirim?**  
-C: 
-1. Birden fazla kodlayÄ±cÄ± kullanÄ±n (topluluk)
-2. FÃ¼zyonu etkinleÅŸtirin
-3. EÅŸik deÄŸerlerini optimize edin
-4. YÃ¼ksek kaliteli veri kullanÄ±n
+**S: Sonuçları nasıl iyileştirebilirim?**
+C:
+1. Birden fazla kodlayıcı kullanın (topluluk)
+2. Füzyonu etkinleştirin
+3. Eşik değerlerini optimize edin
+4. Yüksek kaliteli veri kullanın
 
-**S: Kendi modelimi nasÄ±l eÄŸitirim?**  
-C: Proje Ã¶zel eÄŸitim betikleri iÃ§erir! `egitim_verisi_olusturma.py` ve `training.py` kullanarak adÄ±m adÄ±m talimatlar iÃ§in aÅŸaÄŸÄ±daki [Model EÄŸitimi KÄ±lavuzu](#-model-eÄŸitimi-kÄ±lavuzu) bÃ¶lÃ¼mÃ¼ne bakÄ±n.
+**S: Kendi modelimi nasıl eğitirim?**
+C: Proje özel eğitim betikleri içerir! `egitim_verisi_olusturma.py` ve `training.py` kullanarak adım adım talimatlar için aşağıdaki [Model Eğitimi Kılavuzu](#-model-eğitimi-kılavuzu) bölümüne bakın.
 
-**S: EÄŸitim betiklerini etkileÅŸimli (dosya seÃ§me penceresiyle) kullanabilir miyim?**  
-C: HayÄ±r. Ya `--input`, `--mask` ve `--output` parametrelerini komut satÄ±rÄ±ndan verin ya da `egitim_verisi_olusturma.py` / `training.py` dosyasÄ±ndaki `CONFIG` sÃ¶zlÃ¼ÄŸÃ¼nde varsayÄ±lan yollarÄ± tanÄ±mlayÄ±p IDEâ€™den Ã§alÄ±ÅŸtÄ±rÄ±n.
+**S: Eğitim betiklerini etkileşimli (dosya seçme penceresiyle) kullanabilir miyim?**
+C: Hayır. Ya `--input`, `--mask` ve `--output` parametrelerini komut satırından verin ya da `egitim_verisi_olusturma.py` / `training.py` dosyasındaki `CONFIG` sözlüğünde varsayılan yolları tanımlayıp IDE'den çalıştırın.
 
-**S: Ground truth maskelerim yoksa ne olur?**  
-C: Yine de sÄ±fÄ±r atÄ±ÅŸ ImageNet aÄŸÄ±rlÄ±klarÄ±yla (`zero_shot_imagenet: true`) veya sadece klasik yÃ¶ntemlerle sistemi kullanabilirsiniz. Ancak, en iyi sonuÃ§lar iÃ§in kendi etiketli verilerinizle Ã¶zel bir model eÄŸitin.
+**S: Ground truth maskelerim yoksa ne olur?**
+C: Yine de sıfır atış ImageNet ağırlıklarıyla (`zero_shot_imagenet: true`) veya sadece klasik yöntemlerle sistemi kullanabilirsiniz. Ancak, en iyi sonuçlar için kendi etiketli verilerinizle özel bir model eğitin.
 
-### ğŸ“Š Veri SorularÄ±
+### 📊 Veri Soruları
 
-**S: Minimum alan Ã§Ã¶zÃ¼nÃ¼rlÃ¼ÄŸÃ¼ nedir?**  
-C: Ã–nerilen: 0.5-2 metre/piksel. Daha dÃ¼ÅŸÃ¼k Ã§Ã¶zÃ¼nÃ¼rlÃ¼kte kÃ¼Ã§Ã¼k yapÄ±lar tespit edilemeyebilir.
+**S: Minimum alan çözünürlüğü nedir?**
+C: Önerilen: 0.5-2 metre/piksel. Daha düşük çözünürlükte küçük yapılar tespit edilemeyebilir.
 
-**S: Maksimum dosya boyutu var mÄ±?**  
-C: HayÄ±r, karo sistemi sayesinde Ã§ok bÃ¼yÃ¼k dosyalar iÅŸlenebilir. Test edilmiÅŸ: 50 GB+
+**S: Maksimum dosya boyutu var mı?**
+C: Hayır, karo sistemi sayesinde çok büyük dosyalar işlenebilir. Test edilmiş: 50 GB+
 
-**S: FarklÄ± CRS'ler destekleniyor mu?**  
-C: Evet, giriÅŸ CRS'i korunur ve Ã§Ä±ktÄ±ya aktarÄ±lÄ±r.
-
----
-
-## ğŸ“ Model EÄŸitimi KÄ±lavuzu
-
-Bu kÄ±lavuz, kendi etiketli verilerinizle Ã¶zel model eÄŸitme sÃ¼recini adÄ±m adÄ±m aÃ§Ä±klar. Ham veriden eÄŸitilmiÅŸ modele kadar tÃ¼m sÃ¼reci kapsar.
+**S: Farklı CRS'ler destekleniyor mu?**
+C: Evet, giriş CRS'i korunur ve çıktıya aktarılır.
 
 ---
 
-### âš¡ HÄ±zlÄ± BaÅŸlangÄ±Ã§ (Ã–zet)
+## 🎓 Model Eğitimi Kılavuzu
 
-Deneyimli kullanÄ±cÄ±lar iÃ§in minimal iÅŸ akÄ±ÅŸÄ±:
+Bu kılavuz, kendi etiketli verilerinizle özel model eğitme sürecini adım adım açıklar. Ham veriden eğitilmiş modele kadar tüm süreci kapsar.
+
+---
+
+### ⚡ Hızlı Başlangıç (Özet)
+
+Deneyimli kullanıcılar için minimal iş akışı:
 
 ```bash
-# 1. Verilerinizi hazÄ±rlayÄ±n (GeoTIFF + ikili maske)
-# 2. EÄŸitim karolarÄ±nÄ± oluÅŸturun
+# 1. Verilerinizi hazırlayın (GeoTIFF + ikili maske)
+# 2. Eğitim karolarını oluşturun
 python egitim_verisi_olusturma.py --input veri.tif --mask maske.tif --output workspace/training_data
 
-# 3. Modeli eÄŸitin
+# 3. Modeli eğitin
 python training.py --data workspace/training_data --task tile_classification --epochs 50
 
-# 4. EÄŸitilmiÅŸ modeli kullanÄ±n
-python archaeo_detect.py --input yeni_alan.tif
+# 4. Eğitilmiş modeli kullanın
+python archaeo_detect.py \
+  --enable-deep-learning \
+  --trained-model-only \
+  --weights workspace/checkpoints/active/model.pth \
+  --training-metadata workspace/checkpoints/active/training_metadata.json \
+  --input yeni_alan.tif
 ```
 
 ---
 
-### ğŸ“‹ Genel BakÄ±ÅŸ
+### 📋 Genel Bakış
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚                         MODEL EÄÄ°TÄ°M Ä°Å AKIÅI                                â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚                                                                              â”‚
-â”‚   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”              â”‚
-â”‚   â”‚  ADIM 1      â”‚      â”‚  ADIM 2      â”‚      â”‚  ADIM 3      â”‚              â”‚
-â”‚   â”‚  Maske       â”‚ â”€â”€â”€â–º â”‚  Karo        â”‚ â”€â”€â”€â–º â”‚  Model       â”‚              â”‚
-â”‚   â”‚  HazÄ±rlama   â”‚      â”‚  OluÅŸturma   â”‚      â”‚  EÄŸitimi     â”‚              â”‚
-â”‚   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜              â”‚
-â”‚         â”‚                     â”‚                     â”‚                        â”‚
-â”‚         â–¼                     â–¼                     â–¼                        â”‚
-â”‚   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”              â”‚
-â”‚   â”‚ GeoTIFF +    â”‚      â”‚ 5 kanallÄ±    â”‚      â”‚ EÄŸitilmiÅŸ    â”‚              â”‚
-â”‚   â”‚ Ä°kili Maske  â”‚      â”‚ NPZ karolar  â”‚      â”‚ .pth model   â”‚              â”‚
-â”‚   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜              â”‚
-â”‚                                                      â”‚                       â”‚
-â”‚                                                      â–¼                       â”‚
-â”‚                                               â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”              â”‚
-â”‚                                               â”‚  ADIM 4      â”‚              â”‚
-â”‚                                               â”‚  Modeli      â”‚              â”‚
-â”‚                                               â”‚  Kullan      â”‚              â”‚
-â”‚                                               â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜              â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         MODEL EĞİTİM İŞ AKIŞI                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐              │
+│   │  ADIM 1      │      │  ADIM 2      │      │  ADIM 3      │              │
+│   │  Maske       │ ───► │  Karo        │ ───► │  Model       │              │
+│   │  Hazırlama   │      │  Oluşturma   │      │  Eğitimi     │              │
+│   └──────────────┘      └──────────────┘      └──────────────┘              │
+│         │                     │                     │                        │
+│         ▼                     ▼                     ▼                        │
+│   ┌──────────────┐      ┌──────────────┐      ┌──────────────┐              │
+│   │ GeoTIFF +    │      │ 5 kanallı    │      │ Eğitilmiş    │              │
+│   │ İkili Maske  │      │ NPZ karolar  │      │ .pth model   │              │
+│   └──────────────┘      └──────────────┘      └──────────────┘              │
+│                                                      │                       │
+│                                                      ▼                       │
+│                                               ┌──────────────┐              │
+│                                               │  ADIM 4      │              │
+│                                               │  Modeli      │              │
+│                                               │  Kullan      │              │
+│                                               └──────────────┘              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Ä°htiyacÄ±nÄ±z olanlar:**
-- RGB + DSM + DTM bantlarÄ± iÃ§eren GeoTIFF dosyasÄ±
-- Ä°kili maske (GeoTIFF): arkeolojik alanlar = 1, arka plan = 0
-- BaÄŸÄ±mlÄ±lÄ±klarÄ± yÃ¼klÃ¼ Python ortamÄ±
-- GPU Ã¶nerilir (CPU da Ã§alÄ±ÅŸÄ±r ama yavaÅŸtÄ±r)
+**İhtiyacınız olanlar:**
+- RGB + DSM + DTM bantları içeren GeoTIFF dosyası
+- İkili maske (GeoTIFF): arkeolojik alanlar = 1, arka plan = 0
+- Bağımlılıkları yüklü Python ortamı
+- GPU önerilir (CPU da çalışır ama yavaştır)
 
 ---
 
-### ğŸ› ï¸ AdÄ±m 1: Ground Truth Maskeleri HazÄ±rlama
+### 🛠️ Adım 1: Ground Truth Maskeleri Hazırlama
 
-Arkeolojik Ã¶zelliklerin **1** (beyaz), diÄŸer her ÅŸeyin **0** (siyah) olarak iÅŸaretlendiÄŸi ikili bir maske oluÅŸturun.
+Arkeolojik özelliklerin **1** (beyaz), diğer her şeyin **0** (siyah) olarak işaretlendiği ikili bir maske oluşturun.
 
-#### QGIS Kullanarak (Ãœcretsiz, aÃ§Ä±k kaynak)
+#### QGIS Kullanarak (Ücretsiz, açık kaynak)
 
-**Ne yapacaksÄ±nÄ±z:** Arkeolojik Ã¶zelliklerin etrafÄ±na Ã§okgenler Ã§izecek, sonra bunlarÄ± arkeolojik alanlar = 1, diÄŸer her yer = 0 olan bir raster gÃ¶rÃ¼ntÃ¼ye dÃ¶nÃ¼ÅŸtÃ¼receksiniz.
+**Ne yapacaksınız:** Arkeolojik özelliklerin etrafına çokgenler çizecek, sonra bunları arkeolojik alanlar = 1, diğer her yer = 0 olan bir raster görüntüye dönüştüreceksiniz.
 
-**AdÄ±m 1: Ortofotoyu aÃ§Ä±n**
+**Adım 1: Ortofotoyu açın**
 ```
-MenÃ¼: Katman â†’ Katman Ekle â†’ Raster Katman Ekle...
-GeoTIFF dosyanÄ±za gidin â†’ "Ekle"ye tÄ±klayÄ±n
+Menü: Katman → Katman Ekle → Raster Katman Ekle...
+GeoTIFF dosyanıza gidin → "Ekle"ye tıklayın
 ```
-GÃ¶rÃ¼ntÃ¼nÃ¼z harita tuvalinde gÃ¶rÃ¼nmelidir. YakÄ±nlaÅŸtÄ±rmak iÃ§in fare tekerleÄŸini, kaydÄ±rmak iÃ§in orta tuÅŸu basÄ±lÄ± tutun.
+Görüntünüz harita tuvalinde görünmelidir. Yakınlaştırmak için fare tekerleğini, kaydırmak için orta tuşu basılı tutun.
 
-**AdÄ±m 2: SayÄ±sallaÅŸtÄ±rma iÃ§in yeni Ã§okgen katmanÄ± oluÅŸturun**
+**Adım 2: Sayısallaştırma için yeni çokgen katmanı oluşturun**
 ```
-MenÃ¼: Katman â†’ Katman OluÅŸtur â†’ Yeni Shapefile KatmanÄ±...
+Menü: Katman → Katman Oluştur → Yeni Shapefile Katmanı...
 ```
-AÃ§Ä±lan pencerede:
-- **Dosya adÄ±:** "..." butonuna tÄ±klayÄ±p kayÄ±t yerini seÃ§in (Ã¶rn. `arkeolojik_maske.shp`)
-- **Geometri tipi:** "Ã‡okgen" seÃ§in
-- **KRS (Koordinat Referans Sistemi):** KÃ¼re ikonuna tÄ±klayÄ±n â†’ rasterinizin koordinat sistemini arayÄ±n (emin deÄŸilseniz raster Ã¶zelliklerinden bakÄ±n)
-- "Tamam"a tÄ±klayÄ±n
+Açılan pencerede:
+- **Dosya adı:** "..." butonuna tıklayıp kayıt yerini seçin (örn. `arkeolojik_maske.shp`)
+- **Geometri tipi:** "Çokgen" seçin
+- **KRS (Koordinat Referans Sistemi):** Küre ikonuna tıklayın → rasterinizin koordinat sistemini arayın (emin değilseniz raster özelliklerinden bakın)
+- "Tamam"a tıklayın
 
-Katmanlar panelinde yeni boÅŸ bir katman gÃ¶rÃ¼nÃ¼r.
+Katmanlar panelinde yeni boş bir katman görünür.
 
-**AdÄ±m 3: SayÄ±sallaÅŸtÄ±rmaya baÅŸlayÄ±n (Ã§okgen Ã§izimi)**
+**Adım 3: Sayısallaştırmaya başlayın (çokgen çizimi)**
 ```
-1. Katmanlar panelinde yeni katmanÄ±nÄ±zÄ± seÃ§in (Ã¼zerine tÄ±klayÄ±n)
-2. MenÃ¼: Katman â†’ Sketching'e GeÃ§ (veya kalem ikonuna tÄ±klayÄ±n)
-3. AraÃ§ Ã§ubuÄŸunda "Ã‡okgen Objesi Ekle" butonunu bulun (+ iÅŸaretli Ã§okgen)
-4. Butona tÄ±klayÄ±n, sonra haritada kÃ¶ÅŸe noktalarÄ± eklemek iÃ§in tÄ±klamaya baÅŸlayÄ±n
-5. Her Ã§okgeni bitirmek iÃ§in saÄŸ tÄ±klayÄ±n
-```
-
-**SayÄ±sallaÅŸtÄ±rma ipuÃ§larÄ±:**
-- Hassasiyet iÃ§in yakÄ±nlaÅŸtÄ±rÄ±n (fare tekerleÄŸi)
-- TÃ¼mÃ¼lÃ¼slerin, duvarlarÄ±n, hendeklerin etrafÄ±nÄ± Ã§izin - arkeolojik olan her ÅŸey
-- Hata yaparsanÄ±z: Ctrl+Z ile geri alÄ±n
-- Her tÄ±klama bir kÃ¶ÅŸe noktasÄ± ekler; saÄŸ tÄ±klama Ã§okgeni kapatÄ±r
-- Ä°htiyaÃ§ kadar Ã§okgen Ã§izin
-
-**AdÄ±m 4: DÃ¼zenlemelerinizi kaydedin**
-```
-MenÃ¼: Katman â†’ Sketching'e GeÃ§ â†’ SorulduÄŸunda "Kaydet"e tÄ±klayÄ±n
-Veya: AraÃ§ Ã§ubuÄŸundaki disket ikonuna tÄ±klayÄ±n
+1. Katmanlar panelinde yeni katmanınızı seçin (üzerine tıklayın)
+2. Menü: Katman → Sketching'e Geç (veya kalem ikonuna tıklayın)
+3. Araç çubuğunda "Çokgen Objesi Ekle" butonunu bulun (+ işaretli çokgen)
+4. Butona tıklayın, sonra haritada köşe noktaları eklemek için tıklamaya başlayın
+5. Her çokgeni bitirmek için sağ tıklayın
 ```
 
-**AdÄ±m 5: Ã‡okgenleri rastera dÃ¶nÃ¼ÅŸtÃ¼rÃ¼n (maske)**
-```
-MenÃ¼: Raster â†’ DÃ¶nÃ¼ÅŸtÃ¼rme â†’ RasterleÅŸtir (VektÃ¶rÃ¼ Rastera)...
-```
-AÃ§Ä±lan pencerede:
-- **GiriÅŸ katmanÄ±:** Ã‡okgen katmanÄ±nÄ±z (`arkeolojik_maske`)
-- **Yakma deÄŸeri iÃ§in kullanÄ±lacak alan:** BoÅŸ bÄ±rakÄ±n (sabit deÄŸer kullanacaÄŸÄ±z)
-- **Yakmak iÃ§in sabit deÄŸer:** `1` girin
-- **Ã‡Ä±ktÄ± raster boyut birimi:** CoÄŸrafi birimler
-- **GeniÅŸlik/Yatay Ã§Ã¶zÃ¼nÃ¼rlÃ¼k:** GiriÅŸ rasterinizle aynÄ± (Ã¶rn. 1m Ã§Ã¶zÃ¼nÃ¼rlÃ¼k iÃ§in `1.0`)
-- **YÃ¼kseklik/Dikey Ã§Ã¶zÃ¼nÃ¼rlÃ¼k:** AynÄ± deÄŸer (Ã¶rn. `1.0`)
-- **Ã‡Ä±ktÄ± kapsamÄ±:** "..." â†’ "Katmandan Hesapla" â†’ GiriÅŸ rasterinizi seÃ§in
-- **RasterleÅŸtirilmiÅŸ:** "..." â†’ Dosyaya Kaydet â†’ `ground_truth.tif` olarak adlandÄ±rÄ±n
-- "Ã‡alÄ±ÅŸtÄ±r"a tÄ±klayÄ±n
+**Sayısallaştırma ipuçları:**
+- Hassasiyet için yakınlaştırın (fare tekerleği)
+- Tümülüslerin, duvarların, hendeklerin etrafını çizin - arkeolojik olan her şey
+- Hata yaparsanız: Ctrl+Z ile geri alın
+- Her tıklama bir köşe noktası ekler; sağ tıklama çokgeni kapatır
+- İhtiyaç kadar çokgen çizin
 
-**AdÄ±m 6: NoData alanlarÄ±nÄ± sÄ±fÄ±rla doldurun**
+**Adım 4: Düzenlemelerinizi kaydedin**
+```
+Menü: Katman → Sketching'e Geç → Sorulduğunda "Kaydet"e tıklayın
+Veya: Araç çubuğundaki disket ikonuna tıklayın
+```
 
-RasterleÅŸtirme aracÄ± Ã§okgen olmayan yerlerde NoData oluÅŸturur. BunlarÄ±n 0 olmasÄ± gerekiyor.
+**Adım 5: Çokgenleri rastera dönüştürün (maske)**
 ```
-MenÃ¼: Raster â†’ Raster Hesap Makinesi...
+Menü: Raster → Dönüştürme → Rasterleştir (Vektörü Rastera)...
 ```
-Bu ifadeyi girin (gerÃ§ek katman adÄ±nÄ±zla deÄŸiÅŸtirin):
+Açılan pencerede:
+- **Giriş katmanı:** Çokgen katmanınız (`arkeolojik_maske`)
+- **Yakma değeri için kullanılacak alan:** Boş bırakın (sabit değer kullanacağız)
+- **Yakmak için sabit değer:** `1` girin
+- **Çıktı raster boyut birimi:** Coğrafi birimler
+- **Genişlik/Yatay çözünürlük:** Giriş rasterinizle aynı (örn. 1m çözünürlük için `1.0`)
+- **Yükseklik/Dikey çözünürlük:** Aynı değer (örn. `1.0`)
+- **Çıktı kapsamı:** "..." → "Katmandan Hesapla" → Giriş rasterinizi seçin
+- **Rasterleştirilmiş:** "..." → Dosyaya Kaydet → `ground_truth.tif` olarak adlandırın
+- "Çalıştır"a tıklayın
+
+**Adım 6: NoData alanlarını sıfırla doldurun**
+
+Rasterleştirme aracı çokgen olmayan yerlerde NoData oluşturur. Bunların 0 olması gerekiyor.
+```
+Menü: Raster → Raster Hesap Makinesi...
+```
+Bu ifadeyi girin (gerçek katman adınızla değiştirin):
 ```
 ("ground_truth@1" >= 1) * 1
 ```
-Veya ÅŸunu kullanÄ±n:
+Veya şunu kullanın:
 ```
-MenÃ¼: Ä°ÅŸleme â†’ AraÃ§ Kutusu â†’ "Fill nodata" arayÄ±n
-"Fill NoData cells" aracÄ±nÄ± dolgu deÄŸeri = 0 ile kullanÄ±n
+Menü: İşleme → Araç Kutusu → "Fill nodata" arayın
+"Fill NoData cells" aracını dolgu değeri = 0 ile kullanın
 ```
 
-**Maskenizi doÄŸrulayÄ±n:**
-- DeÄŸerler sadece 0 ve 1 olmalÄ±
-- Katmana saÄŸ tÄ±klayÄ±n â†’ Ã–zellikler â†’ Sembolloji â†’ min/max deÄŸerlerini kontrol edin
-- Boyutlar giriÅŸ rasterinizle tam olarak eÅŸleÅŸmeli
+**Maskenizi doğrulayın:**
+- Değerler sadece 0 ve 1 olmalı
+- Katmana sağ tıklayın → Özellikler → Sembolloji → min/max değerlerini kontrol edin
+- Boyutlar giriş rasterinizle tam olarak eşleşmeli
 
 ---
 
 #### ArcGIS Pro Kullanarak
 
-**Ne yapacaksÄ±nÄ±z:** Ã‡okgen feature class oluÅŸturacak, arkeolojik Ã¶zellikleri sayÄ±sallaÅŸtÄ±racak, sonra raster maskeye dÃ¶nÃ¼ÅŸtÃ¼receksiniz.
+**Ne yapacaksınız:** Çokgen feature class oluşturacak, arkeolojik özellikleri sayısallaştıracak, sonra raster maskeye dönüştüreceksiniz.
 
-**AdÄ±m 1: Yeni proje oluÅŸturun ve verilerinizi ekleyin**
+**Adım 1: Yeni proje oluşturun ve verilerinizi ekleyin**
 ```
-1. ArcGIS Pro'yu aÃ§Ä±n â†’ New Project â†’ Map
-2. Ä°sim ve konum verin â†’ OK
-3. Map sekmesi â†’ Add Data â†’ GeoTIFF'inize gÃ¶z atÄ±n â†’ Add
+1. ArcGIS Pro'yu açın → New Project → Map
+2. İsim ve konum verin → OK
+3. Map sekmesi → Add Data → GeoTIFF'inize göz atın → Add
 ```
-Ortofotunuz haritada gÃ¶rÃ¼nmelidir. YakÄ±nlaÅŸtÄ±rmak iÃ§in fare tekerleÄŸi, kaydÄ±rmak iÃ§in tekerleÄŸi basÄ±lÄ± tutun.
+Ortofotunuz haritada görünmelidir. Yakınlaştırmak için fare tekerleği, kaydırmak için tekerleği basılı tutun.
 
-**AdÄ±m 2: Rasterinizin Ã¶zelliklerini kontrol edin (sonrasÄ± iÃ§in Ã¶nemli)**
+**Adım 2: Rasterinizin özelliklerini kontrol edin (sonrası için önemli)**
 ```
-1. Contents panelinde rasterinize saÄŸ tÄ±klayÄ±n â†’ Properties
-2. "Source" sekmesine gidin â†’ ÅunlarÄ± not edin:
-   - Cell Size (HÃ¼cre Boyutu, Ã¶rn. 1.0 x 1.0)
-   - Extent (Kapsam - Top, Left, Right, Bottom koordinatlarÄ±)
-   - Spatial Reference (Mekansal Referans, Ã¶rn. EPSG:32635)
+1. Contents panelinde rasterinize sağ tıklayın → Properties
+2. "Source" sekmesine gidin → Şunları not edin:
+   - Cell Size (Hücre Boyutu, örn. 1.0 x 1.0)
+   - Extent (Kapsam - Top, Left, Right, Bottom koordinatları)
+   - Spatial Reference (Mekansal Referans, örn. EPSG:32635)
 ```
-BunlarÄ± yazÄ±n - maskenizi eÅŸleÅŸtirmek iÃ§in gerekecek.
+Bunları yazın - maskenizi eşleştirmek için gerekecek.
 
-**AdÄ±m 3: SayÄ±sallaÅŸtÄ±rma iÃ§in yeni feature class oluÅŸturun**
+**Adım 3: Sayısallaştırma için yeni feature class oluşturun**
 ```
-1. Catalog panelinde projenizin geodatabase'ini (.gdb) geniÅŸletin
-2. Geodatabase'e saÄŸ tÄ±klayÄ±n â†’ New â†’ Feature Class
+1. Catalog panelinde projenizin geodatabase'ini (.gdb) genişletin
+2. Geodatabase'e sağ tıklayın → New → Feature Class
 ```
 Sihirbazda:
 - **Name (Ad):** `arkeolojik_ozellikler`
-- **Alias (Takma Ad):** Arkeolojik Ã–zellikler (isteÄŸe baÄŸlÄ±)
+- **Alias (Takma Ad):** Arkeolojik Özellikler (isteğe bağlı)
 - **Feature Class Type:** Polygon
-- "Next"e tÄ±klayÄ±n
-- **Fields (Alanlar):** AtlayÄ±n (sonra ekleyeceÄŸiz) â†’ "Next"e tÄ±klayÄ±n
-- **Spatial Reference:** KÃ¼reye tÄ±klayÄ±n â†’ Import â†’ Rasterinizi seÃ§in
-- "Finish"e tÄ±klayÄ±n
+- "Next"e tıklayın
+- **Fields (Alanlar):** Atlayın (sonra ekleyeceğiz) → "Next"e tıklayın
+- **Spatial Reference:** Küreye tıklayın → Import → Rasterinizi seçin
+- "Finish"e tıklayın
 
-Yeni boÅŸ katman Contents'te gÃ¶rÃ¼nÃ¼r.
+Yeni boş katman Contents'te görünür.
 
-**AdÄ±m 4: SayÄ±sallaÅŸtÄ±rmaya baÅŸlayÄ±n**
+**Adım 4: Sayısallaştırmaya başlayın**
 ```
-1. Contents'te seÃ§mek iÃ§in yeni katmanÄ±nÄ±za tÄ±klayÄ±n
-2. Edit sekmesi â†’ Create (Create Features panelini aÃ§ar)
-3. Create Features panelinde "arkeolojik_ozellikler"e tÄ±klayÄ±n
-4. "Polygon" aracÄ±nÄ± seÃ§in
-5. KÃ¶ÅŸe noktalarÄ± eklemek iÃ§in haritada tÄ±klayÄ±n, bitirmek iÃ§in Ã§ift tÄ±klayÄ±n
-```
-
-**SayÄ±sallaÅŸtÄ±rma ipuÃ§larÄ±:**
-- Ã‡izerken yakÄ±nlaÅŸtÄ±rmak iÃ§in `Z`, kaydÄ±rmak iÃ§in `C` tuÅŸuna basÄ±n
-- Son kÃ¶ÅŸe noktasÄ±nÄ± geri almak iÃ§in `Ctrl+Z`
-- Her Ã§okgeni bitirmek iÃ§in Ã§ift tÄ±klayÄ±n (veya `F2`)
-- GÃ¶rÃ¼nen tÃ¼m arkeolojik Ã¶zelliklerin etrafÄ±nÄ± Ã§izin
-- MÃ¼mkÃ¼n olduÄŸunca hassas olun - bunlar eÄŸitim etiketleriniz olacak!
-
-**AdÄ±m 5: DÃ¼zenlemelerinizi kaydedin**
-```
-Edit sekmesi â†’ Save â†’ Save Edits
+1. Contents'te seçmek için yeni katmanınıza tıklayın
+2. Edit sekmesi → Create (Create Features panelini açar)
+3. Create Features panelinde "arkeolojik_ozellikler"e tıklayın
+4. "Polygon" aracını seçin
+5. Köşe noktaları eklemek için haritada tıklayın, bitirmek için çift tıklayın
 ```
 
-**AdÄ±m 6: Raster deÄŸeri iÃ§in alan ekleyin**
+**Sayısallaştırma ipuçları:**
+- Çizerken yakınlaştırmak için `Z`, kaydırmak için `C` tuşuna basın
+- Son köşe noktasını geri almak için `Ctrl+Z`
+- Her çokgeni bitirmek için çift tıklayın (veya `F2`)
+- Görünen tüm arkeolojik özelliklerin etrafını çizin
+- Mümkün olduğunca hassas olun - bunlar eğitim etiketleriniz olacak!
+
+**Adım 5: Düzenlemelerinizi kaydedin**
 ```
-1. Contents'te katmanÄ±nÄ±za saÄŸ tÄ±klayÄ±n â†’ Attribute Table
-2. "Add Field" butonuna tÄ±klayÄ±n (tablonun Ã¼stÃ¼nde)
+Edit sekmesi → Save → Save Edits
+```
+
+**Adım 6: Raster değeri için alan ekleyin**
+```
+1. Contents'te katmanınıza sağ tıklayın → Attribute Table
+2. "Add Field" butonuna tıklayın (tablonun üstünde)
 3. Field Name: yakma_degeri
 4. Data Type: Short (Integer)
-5. Fields sekmesinde "Save"e tÄ±klayÄ±n
+5. Fields sekmesinde "Save"e tıklayın
 ```
 
-**AdÄ±m 7: TÃ¼m Ã§okgenlere deÄŸer 1 atayÄ±n**
+**Adım 7: Tüm çokgenlere değer 1 atayın**
 ```
-1. Ã–znitelik tablosunda "yakma_degeri" sÃ¼tun baÅŸlÄ±ÄŸÄ±na saÄŸ tÄ±klayÄ±n
-2. "Calculate Field..." seÃ§in
-3. Expression kutusuna sadece ÅŸunu yazÄ±n: 1
-4. "OK"e tÄ±klayÄ±n
+1. Öznitelik tablosunda "yakma_degeri" sütun başlığına sağ tıklayın
+2. "Calculate Field..." seçin
+3. Expression kutusuna sadece şunu yazın: 1
+4. "OK"e tıklayın
 ```
-TÃ¼m satÄ±rlarda yakma_degeri sÃ¼tununda `1` gÃ¶rÃ¼nmelidir.
+Tüm satırlarda yakma_degeri sütununda `1` görünmelidir.
 
-**AdÄ±m 8: Rastera dÃ¶nÃ¼ÅŸtÃ¼rÃ¼n**
+**Adım 8: Rastera dönüştürün**
 ```
-Analysis sekmesi â†’ Tools â†’ "Polygon to Raster" arayÄ±n
+Analysis sekmesi → Tools → "Polygon to Raster" arayın
 ```
-AraÃ§ penceresinde:
+Araç penceresinde:
 - **Input Features:** arkeolojik_ozellikler
 - **Value field:** yakma_degeri
-- **Output Raster Dataset:** GÃ¶z at â†’ `ground_truth.tif` olarak kaydedin
+- **Output Raster Dataset:** Göz at → `ground_truth.tif` olarak kaydedin
 - **Cell assignment type:** CELL_CENTER
 - **Priority field:** NONE
-- **Cellsize:** GiriÅŸ rasterinizle aynÄ± (Ã¶rn. `1`)
+- **Cellsize:** Giriş rasterinizle aynı (örn. `1`)
 
-**Ã–nemli - Environment AyarlarÄ±:**
+**Önemli - Environment Ayarları:**
 ```
-AracÄ±n altÄ±ndaki "Environments" sekmesine tÄ±klayÄ±n:
-- Snap Raster: GiriÅŸ rasterinizi seÃ§in (hizalamayÄ± garantiler!)
-- Cell Size: GiriÅŸ rasterinizle aynÄ±
-- Extent: GiriÅŸ rasterinizle aynÄ±
+Aracın altındaki "Environments" sekmesine tıklayın:
+- Snap Raster: Giriş rasterinizi seçin (hizalamayı garantiler!)
+- Cell Size: Giriş rasterinizle aynı
+- Extent: Giriş rasterinizle aynı
 ```
-"Run"a tÄ±klayÄ±n
+"Run"a tıklayın
 
-**AdÄ±m 9: NoData'yÄ± 0'a dÃ¶nÃ¼ÅŸtÃ¼rÃ¼n**
+**Adım 9: NoData'yı 0'a dönüştürün**
 
-VarsayÄ±lan olarak, Ã§okgenlerin dÄ±ÅŸÄ±ndaki alanlar NoData olur. BunlarÄ±n 0 olmasÄ± gerekiyor.
+Varsayılan olarak, çokgenlerin dışındaki alanlar NoData olur. Bunların 0 olması gerekiyor.
 ```
-Analysis sekmesi â†’ Tools â†’ "Reclassify" arayÄ±n
+Analysis sekmesi → Tools → "Reclassify" arayın
 ```
-Veya Raster Calculator kullanÄ±n:
+Veya Raster Calculator kullanın:
 ```
-Analysis sekmesi â†’ Tools â†’ "Raster Calculator" arayÄ±n
+Analysis sekmesi → Tools → "Raster Calculator" arayın
 Expression: Con(IsNull("ground_truth.tif"), 0, "ground_truth.tif")
 Output: ground_truth_final.tif
 ```
@@ -1606,25 +1892,25 @@ Reclassify ile alternatif:
 ```
 - Input raster: ground_truth.tif
 - Reclass field: Value
-- Reclassification (Yeniden sÄ±nÄ±flandÄ±rma):
-  - SatÄ±r ekle: Old = NoData, New = 0
+- Reclassification (Yeniden sınıflandırma):
+  - Satır ekle: Old = NoData, New = 0
   - Mevcut: Old = 1, New = 1
 - Output: ground_truth_final.tif
 ```
 
-**AdÄ±m 10: Maskenizi doÄŸrulayÄ±n**
+**Adım 10: Maskenizi doğrulayın**
 ```
-1. Final maskeyi haritanÄ±za ekleyin
-2. SaÄŸ tÄ±klayÄ±n â†’ Properties â†’ Source â†’ Kontrol edin:
-   - HÃ¼cre boyutu giriÅŸle eÅŸleÅŸiyor âœ“
-   - Kapsam giriÅŸle eÅŸleÅŸiyor âœ“
-   - DeÄŸerler sadece 0 ve 1 âœ“
+1. Final maskeyi haritanıza ekleyin
+2. Sağ tıklayın → Properties → Source → Kontrol edin:
+   - Hücre boyutu girişle eşleşiyor ✓
+   - Kapsam girişle eşleşiyor ✓
+   - Değerler sadece 0 ve 1 ✓
 ```
 
-**YaygÄ±n sorunlar:**
-- **Maske kapsamÄ± eÅŸleÅŸmiyor:** Polygon to Raster'Ä± doÄŸru Environment ayarlarÄ±yla yeniden Ã§alÄ±ÅŸtÄ±rÄ±n
-- **Maske yanlÄ±ÅŸ hÃ¼cre boyutunda:** AraÃ§ta ve Environment'ta hÃ¼cre boyutunu aÃ§Ä±kÃ§a ayarlayÄ±n
-- **Maske tamamen NoData:** yakma_degeri alanÄ±nÄ±n 1 deÄŸerine sahip olduÄŸunu kontrol edin
+**Yaygın sorunlar:**
+- **Maske kapsamı eşleşmiyor:** Polygon to Raster'ı doğru Environment ayarlarıyla yeniden çalıştırın
+- **Maske yanlış hücre boyutunda:** Araçta ve Environment'ta hücre boyutunu açıkça ayarlayın
+- **Maske tamamen NoData:** yakma_degeri alanının 1 değerine sahip olduğunu kontrol edin
 
 ---
 
@@ -1634,27 +1920,27 @@ Reclassify ile alternatif:
 import rasterio
 import numpy as np
 
-# Maske dizisi oluÅŸtur (giriÅŸle aynÄ± boyutlarda)
+# Maske dizisi oluştur (girişle aynı boyutlarda)
 mask = np.zeros((height, width), dtype=np.uint8)
 
-# Arkeolojik alanlarÄ± iÅŸaretle (Ã¶rnek: koordinatlardan veya Ã§okgenlerden)
-mask[100:200, 150:250] = 1  # GerÃ§ek alanlarla deÄŸiÅŸtirin
+# Arkeolojik alanları işaretle (örnek: koordinatlardan veya çokgenlerden)
+mask[100:200, 150:250] = 1  # Gerçek alanlarla değiştirin
 
-# GeoTIFF olarak kaydet (giriÅŸ CRS ve transform ile eÅŸleÅŸmeli!)
+# GeoTIFF olarak kaydet (giriş CRS ve transform ile eşleşmeli!)
 with rasterio.open('maske.tif', 'w', driver='GTiff',
-                   height=height, width=width, count=1, 
-                   dtype='uint8', crs=giris_crs, 
+                   height=height, width=width, count=1,
+                   dtype='uint8', crs=giris_crs,
                    transform=giris_transform) as dst:
     dst.write(mask, 1)
 ```
 
-> **Ã–nemli:** Maske boyutlarÄ±, CRS ve Ã§Ã¶zÃ¼nÃ¼rlÃ¼k giriÅŸ GeoTIFF'inizle tam olarak eÅŸleÅŸmelidir!
+> **Önemli:** Maske boyutları, CRS ve çözünürlük giriş GeoTIFF'inizle tam olarak eşleşmelidir!
 
 ---
 
-### ğŸ“¦ AdÄ±m 2: EÄŸitim KarolarÄ± OluÅŸturma
+### 📦 Adım 2: Eğitim Karoları Oluşturma
 
-`egitim_verisi_olusturma.py` betiÄŸi GeoTIFF + maskenizi **5 kanallÄ±** (R, G, B, SVF, SLRM) eÄŸitim karolarÄ±na dÃ¶nÃ¼ÅŸtÃ¼rÃ¼r.
+`egitim_verisi_olusturma.py` betiği GeoTIFF + maskenizi **5 kanallı** (R, G, B, SVF, SLRM) eğitim karolarına dönüştürür.
 
 #### Temel Komut
 
@@ -1667,22 +1953,22 @@ python egitim_verisi_olusturma.py \
 
 #### IDE / CLI
 
-Betik etkileÅŸimli dosya penceresi aÃ§maz. Ya `--input` / `--mask` / `--output` verin ya da betikteki `CONFIG` sÃ¶zlÃ¼ÄŸÃ¼nÃ¼ doldurup IDEâ€™den Ã§alÄ±ÅŸtÄ±rÄ±n.
+Betik etkileşimli dosya penceresi açmaz. Ya `--input` / `--mask` / `--output` verin ya da betikteki `CONFIG` sözlüğünü doldurup IDE'den çalıştırın.
 
-#### Ä°Ã§eride Ne Olur
+#### İçeride Ne Olur
 
 ```
-GiriÅŸ GeoTIFF (5 bant)           Ground Truth Maske
+Giriş GeoTIFF (5 bant)           Ground Truth Maske
        |                                |
        v                                |
 +------------------+                    |
 | RGB + DSM + DTM  |                    |
-| bantlarÄ±nÄ± oku   |                    |
+| bantlarını oku   |                    |
 +--------+---------+                    |
          |                              |
          v                              |
 +------------------+                    |
-| DTM Ã¼zerinde RVT |                    |
+| DTM üzerinde RVT |                    |
 | SVF + SLRM       |                    |
 +--------+---------+                    |
          |                              |
@@ -1704,65 +1990,65 @@ GiriÅŸ GeoTIFF (5 bant)           Ground Truth Maske
 
 #### Temel Parametreler
 
-Tam liste iÃ§in: `python egitim_verisi_olusturma.py --help`. SÄ±k kullanÄ±lanlar:
+Tam liste için: `python egitim_verisi_olusturma.py --help`. Sık kullanılanlar:
 
-| Parametre | VarsayÄ±lan (betikteki `CONFIG`) | AÃ§Ä±klama |
+| Parametre | Varsayılan (betikteki `CONFIG`) | Açıklama |
 |-----------|--------------------------------|----------|
-| `--input` / `-i` | CLI veya `CONFIG` ile zorunlu | Ã‡ok bantlÄ± GeoTIFF (RGB + DSM + DTM) |
-| `--mask` / `-m` | CLI veya `CONFIG` ile zorunlu | Ground truth maske (0 dÄ±ÅŸÄ±ndaki deÄŸerler pozitif sayÄ±lÄ±p ikiliye Ã§evrilir) |
-| `--output` / `-o` | `workspace/training_data` | Ã‡Ä±ktÄ± kÃ¶kÃ¼ (`train/`, `val/`, `metadata.json`, â€¦) |
+| `--input` / `-i` | CLI veya `CONFIG` ile zorunlu | Çok bantlı GeoTIFF (RGB + DSM + DTM) |
+| `--mask` / `-m` | CLI veya `CONFIG` ile zorunlu | Ground truth maske (0 dışındaki değerler pozitif sayılıp ikiliye çevrilir) |
+| `--output` / `-o` | `workspace/training_data` | Çıktı kökü (`train/`, `val/`, `metadata.json`, …) |
 | `--tile-size` / `-t` | `256` | Karo boyutu (piksel) |
-| `--overlap` | `128` | KaydÄ±rmalÄ± pencere Ã¶rtÃ¼ÅŸmesi (eÄŸitim/Ã§Ä±karÄ±mda metadata ile tutarlÄ± kalmalÄ±) |
-| `--bands` / `-b` | `1,2,3,4,5` | 1 tabanlÄ± GeoTIFF bant indeksleri: R, G, B, DSM, DTM |
-| `--min-positive` | `0.0` | Karoda minimum pozitif piksel oranÄ± |
-| `--tile-label-min-positive-ratio` | `CONFIG`â€™ten | Karo sÄ±nÄ±fÄ± etiketi iÃ§in minimum pozitif oran (0 = en az bir pozitif piksel yeter) |
-| `--max-nodata` | `0.3` | Karo baÅŸÄ±na izin verilen maksimum NoData oranÄ± |
-| `--train-ratio` | `0.8` | EÄŸitim oranÄ± |
-| `--train-negative-keep-ratio` | `1.0` | Tamamen negatif **eÄŸitim** karolarÄ±nÄ±n tutulacak kesri (`0` = hepsini at, `1` = hepsini tut) |
-| `--train-negative-max` | `None` | Tutulan negatif eÄŸitim karosu iÃ§in Ã¼st sÄ±nÄ±r |
-| `--split-mode` | `spatial` | `spatial` (Ã¶nerilir) veya `random` train/val bÃ¶lmesi |
-| `--no-normalize` | kapalÄ± | `robust_norm` atlanÄ±r |
+| `--overlap` | `128` | Kaydırmalı pencere örtüşmesi (eğitim/çıkarımda metadata ile tutarlı kalmalı) |
+| `--bands` / `-b` | `1,2,3,4,5` | 1 tabanlı GeoTIFF bant indeksleri: R, G, B, DSM, DTM |
+| `--min-positive` | `0.0` | Karoda minimum pozitif piksel oranı |
+| `--tile-label-min-positive-ratio` | `CONFIG`'ten | Karo sınıfı etiketi için minimum pozitif oran (0 = en az bir pozitif piksel yeter) |
+| `--max-nodata` | `0.3` | Karo başına izin verilen maksimum NoData oranı |
+| `--train-ratio` | `0.8` | Eğitim oranı |
+| `--train-negative-keep-ratio` | `1.0` | Tamamen negatif **eğitim** karolarının tutulacak kesri (`0` = hepsini at, `1` = hepsini tut) |
+| `--train-negative-max` | `None` | Tutulan negatif eğitim karosu için üst sınır |
+| `--split-mode` | `spatial` | `spatial` (önerilir) veya `random` train/val bölmesi |
+| `--no-normalize` | kapalı | `robust_norm` atlanır |
 | `--format` | `npz` | `npz` veya `npy` |
-| `--num-workers` | CPUâ€™ya gÃ¶re | Paralel iÅŸÃ§i sayÄ±sÄ± |
-| `--tile-prefix` | `""` | Ä°steÄŸe baÄŸlÄ± dosya adÄ± Ã¶neki (boÅŸsa otomatik Ã¶nek) |
-| `--append` / `--no-append` | temiz yeniden Ã¼ret | Mevcut karolara ekleme vs tam yeniden oluÅŸturma |
+| `--num-workers` | CPU'ya göre | Paralel işçi sayısı |
+| `--tile-prefix` | `""` | İsteğe bağlı dosya adı öneki (boşsa otomatik önek) |
+| `--append` / `--no-append` | temiz yeniden üret | Mevcut karolara ekleme vs tam yeniden oluşturma |
 
-#### Senaryoya GÃ¶re Ã–nerilen Ayarlar
+#### Senaryoya Göre Önerilen Ayarlar
 
 | Senaryo | Komut |
 |---------|-------|
 | **Standart** | `--tile-size 256 --overlap 64` |
-| **BÃ¼yÃ¼k yapÄ±lar** | `--tile-size 512 --overlap 64` |
+| **Büyük yapılar** | `--tile-size 512 --overlap 64` |
 | **Dengesiz veri** (<%5 arkeolojik) | `--train-negative-keep-ratio 0.2 --min-positive 0.01` |
-| **HÄ±zlÄ± test** | `--tile-size 256 --train-ratio 0.9` |
+| **Hızlı test** | `--tile-size 256 --train-ratio 0.9` |
 
-#### Ã‡Ä±ktÄ±: model tensÃ¶rÃ¼ (5 kanal)
+#### Çıktı: model tensörü (5 kanal)
 
-Kanonik sÄ±ra `archeo_shared/channels.py` â†’ `MODEL_CHANNEL_NAMES`; `archaeo_detect.py` iÃ§indeki `stack_channels()` ile aynÄ±dÄ±r.
+Kanonik sıra `archeo_shared/channels.py` → `MODEL_CHANNEL_NAMES`; `archaeo_detect.py` içindeki `stack_channels()` ile aynıdır.
 
 | # | Kanal | Kaynak |
 |---|-------|--------|
-| 0â€“2 | R, G, B | GeoTIFFâ€™te seÃ§ilen RGB bantlarÄ± |
-| 3 | SVF | DTM Ã¼zerinde RVT Sky-View Factor |
-| 4 | SLRM | DTM Ã¼zerinde RVT Simple Local Relief Model (gerekirse Gaussian yedek) |
+| 0–2 | R, G, B | GeoTIFF'te seçilen RGB bantları |
+| 3 | SVF | DTM üzerinde RVT Sky-View Factor |
+| 4 | SLRM | DTM üzerinde RVT Simple Local Relief Model (gerekirse Gaussian yedek) |
 
-DSM/DTM **bantlarÄ±** maskeleme ve tÃ¼rev hesabÄ± iÃ§in hÃ¢lÃ¢ gereklidir; kaydedilen `image` tensÃ¶rÃ¼nde yalnÄ±zca RGB + iki kabartma kanalÄ± bulunur.
+DSM/DTM **bantları** maskeleme ve türev hesabı için hâlâ gereklidir; kaydedilen `image` tensöründe yalnızca RGB + iki kabartma kanalı bulunur.
 
 ---
 
-### ğŸš€ AdÄ±m 3: Modeli EÄŸitme
+### 🚀 Adım 3: Modeli Eğitme
 
-**5 kanallÄ±** karolarÄ±nÄ±z Ã¼zerinde SMP tabanlÄ± U-Net (ve ilgili baÅŸlÄ±klar) eÄŸitmek iÃ§in `training.py` kullanÄ±n; **CBAM** isteÄŸe baÄŸlÄ±dÄ±r (`CONFIG` iÃ§inde `no_attention`).
+**5 kanallı** karolarınız üzerinde SMP tabanlı U-Net (ve ilgili başlıklar) eğitmek için `training.py` kullanın; **CBAM** isteğe bağlıdır (`CONFIG` içinde `no_attention`).
 
-#### Temel EÄŸitim
+#### Temel Eğitim
 
 ```bash
 python training.py --data workspace/training_data
 ```
 
-KayÄ±tlÄ± `training.py` `CONFIG` deÄŸerlerini kullanÄ±r (Ã¶r. **U-Net**, **ResNet50**, **BCE** kaybÄ±, **patience 20**, **CBAM kapalÄ±** â€” `no_attention: true`, **AMP** genelde aÃ§Ä±k). `publish_active: true` iken en iyi aÄŸÄ±rlÄ±klar `workspace/checkpoints/active/` altÄ±na kopyalanÄ±r.
+Kayıtlı `training.py` `CONFIG` değerlerini kullanır (ör. **U-Net**, **ResNet50**, **BCE** kaybı, **batch size 32**, **patience 15**, **CBAM kapalı** — `no_attention: true`, **AMP** genelde açık). `publish_active: true` iken en iyi ağırlıklar `workspace/checkpoints/active/` altına kopyalanır.
 
-#### TÃ¼m SeÃ§eneklerle Tam Komut
+#### Tüm Seçeneklerle Tam Komut
 
 ```bash
 python training.py \
@@ -1770,177 +2056,180 @@ python training.py \
   --arch Unet \
   --encoder resnet50 \
   --epochs 50 \
-  --batch-size 16 \
+  --batch-size 32 \
   --lr 1e-4 \
   --loss bce \
-  --patience 20
+  --patience 15
 ```
 
 #### Temel Parametreler
 
-| Parametre | VarsayÄ±lan | SeÃ§enekler / Notlar |
+| Parametre | Varsayılan | Seçenekler / Notlar |
 |-----------|------------|---------------------|
-| `--data` | `workspace/training_data` | AdÄ±m 2 Ã§Ä±ktÄ±sÄ±nÄ±n yolu (eÅŸleÅŸtirilmiÅŸ veya Positive/Negative dÃ¼zeni) |
+| `--data` | `workspace/training_data` | Adım 2 çıktısının yolu (eşleştirilmiş veya Positive/Negative düzeni) |
 | `--task` | `tile_classification` | `segmentation` veya `tile_classification` |
 | `--arch` | `Unet` | `Unet`, `UnetPlusPlus`, `DeepLabV3Plus`, `FPN` |
 | `--encoder` | `resnet50` | `resnet34`, `efficientnet-b3`, `densenet121` |
 | `--epochs` | `50` | Daha fazla = potansiyel olarak daha iyi (erken durdurma ile) |
-| `--batch-size` | `16` | GPU belleÄŸi izin veriyorsa artÄ±rÄ±n |
-| `--lr` | `1e-4` | KayÄ±p salÄ±nÄ±yorsa azaltÄ±n |
-| `--loss` | `bce` | `bce` / `focal` (`tile_classification`); `segmentation` iÃ§in ayrÄ±ca `dice` / `combined` |
-| `--balance-mode` | `auto` | `auto`, `manual`, `none` (BCE tarafÄ±) |
-| `--patience` | `20` | N epoch iyileÅŸme yoksa erken durdurma |
-| `--no-attention` | aÃ§Ä±k (`CONFIG` ile) | VarsayÄ±lan **true** â†’ CBAM **kapalÄ±**; aÃ§mak iÃ§in `CONFIG`â€™ta `no_attention: false` |
-| `--no-amp` | kapalÄ± | Karma hassasiyeti (FP16) kapatÄ±r |
+| `--batch-size` | `32` | GPU belleği izin veriyorsa artırın; bellek yetmezse düşürün |
+| `--lr` | `1e-4` | Kayıp salınıyorsa azaltın |
+| `--loss` | `bce` | `bce` / `focal` (`tile_classification`); `segmentation` için ayrıca `dice` / `combined` |
+| `--balance-mode` | `auto` | `auto`, `manual`, `none` (BCE tarafı) |
+| `--patience` | `15` | N epoch iyileşme yoksa erken durdurma |
+| `--no-attention` | açık (`CONFIG` ile) | Varsayılan **true** → CBAM **kapalı**; açmak için `CONFIG`'ta `no_attention: false` |
+| `--no-amp` | kapalı | Karma hassasiyeti (FP16) kapatır |
 
-#### DoÄŸru AyarlarÄ± SeÃ§me
+#### Doğru Ayarları Seçme
 
 **Model Mimarisi:**
 
-| Mimari | HÄ±z | DoÄŸruluk | Ne Zaman KullanÄ±lÄ±r |
+| Mimari | Hız | Doğruluk | Ne Zaman Kullanılır |
 |--------|-----|----------|---------------------|
-| `Unet` | HÄ±zlÄ± | Ä°yi | **Buradan baÅŸlayÄ±n** - gÃ¼venilir temel |
-| `UnetPlusPlus` | Orta | MÃ¼kemmel | Daha yÃ¼ksek doÄŸruluk gerektiÄŸinde |
-| `DeepLabV3Plus` | Orta | MÃ¼kemmel | Ã‡ok Ã¶lÃ§ekli yapÄ±lar |
+| `Unet` | Hızlı | İyi | **Buradan başlayın** - güvenilir temel |
+| `UnetPlusPlus` | Orta | Mükemmel | Daha yüksek doğruluk gerektiğinde |
+| `DeepLabV3Plus` | Orta | Mükemmel | Çok ölçekli yapılar |
 
-**KodlayÄ±cÄ±:**
+**Kodlayıcı:**
 
-| KodlayÄ±cÄ± | HÄ±z | DoÄŸruluk | Bellek |
+| Kodlayıcı | Hız | Doğruluk | Bellek |
 |-----------|-----|----------|--------|
-| `resnet34` | HÄ±zlÄ± | Ä°yi | DÃ¼ÅŸÃ¼k | **Ã–nerilen baÅŸlangÄ±Ã§** |
-| `resnet50` | Orta | Daha iyi | Orta | Daha iyi doÄŸruluk |
-| `efficientnet-b3` | HÄ±zlÄ± | MÃ¼kemmel | DÃ¼ÅŸÃ¼k | En iyi verimlilik |
+| `resnet34` | Hızlı | İyi | Düşük | **Önerilen başlangıç** |
+| `resnet50` | Orta | Daha iyi | Orta | Daha iyi doğruluk |
+| `efficientnet-b3` | Hızlı | Mükemmel | Düşük | En iyi verimlilik |
 
-**KayÄ±p Fonksiyonu:**
+**Kayıp Fonksiyonu:**
 
-| KayÄ±p | Ne Yapar | Ne Zaman KullanÄ±lÄ±r |
+| Kayıp | Ne Yapar | Ne Zaman Kullanılır |
 |-------|----------|----------------------|
-| `bce` | Her pikseli / tile etiketini temel bir binary karar gibi optimize eder; en stabil seÃ§enektir | **BaÅŸlangÄ±Ã§ iÃ§in Ã¶nerilen** seÃ§enek. `tile_classification` iÃ§in en gÃ¼venli varsayÄ±lan. `balance-mode` ve `pos_weight` ile birlikte Ã§alÄ±ÅŸÄ±r |
-| `focal` | Kolay negatiflerin etkisini azaltÄ±r, modeli zor Ã¶rneklere daha Ã§ok odaklar | Pozitiflerin Ã§ok az olduÄŸu, modelin hep negatif tahmin etmeye kaydÄ±ÄŸÄ± kuvvetli sÄ±nÄ±f dengesizliÄŸinde |
-| `dice` | Tahmin ile maskenin Ã§akÄ±ÅŸmasÄ±nÄ± (overlap) doÄŸrudan iyileÅŸtirmeye Ã§alÄ±ÅŸÄ±r | Daha Ã§ok **segmentation** iÃ§in. KÃ¼Ã§Ã¼k veya seyrek pozitif maskelerde yararlÄ± olabilir |
-| `combined` | `BCE + Dice`; hem stabil optimizasyon hem de iyi overlap dengesi verir | **Segmentation** iÃ§in pratik genel tercih. BCE tarafÄ± sayesinde daha stabil, Dice tarafÄ± sayesinde maske kalitesi daha iyi olabilir |
+| `bce` | Her pikseli / tile etiketini temel bir binary karar gibi optimize eder; en stabil seçenektir | **Başlangıç için önerilen** seçenek. `tile_classification` için en güvenli varsayılan. `balance-mode` ve `pos_weight` ile birlikte çalışır |
+| `focal` | Kolay negatiflerin etkisini azaltır, modeli zor örneklere daha çok odaklar | Pozitiflerin çok az olduğu, modelin hep negatif tahmin etmeye kaydığı kuvvetli sınıf dengesizliğinde |
+| `dice` | Tahmin ile maskenin çakışmasını (overlap) doğrudan iyileştirmeye çalışır | Daha çok **segmentation** için. Küçük veya seyrek pozitif maskelerde yararlı olabilir |
+| `combined` | `BCE + Dice`; hem stabil optimizasyon hem de iyi overlap dengesi verir | **Segmentation** için pratik genel tercih. BCE tarafı sayesinde daha stabil, Dice tarafı sayesinde maske kalitesi daha iyi olabilir |
 
-#### EÄŸitim Ã‡Ä±ktÄ±sÄ±
+#### Eğitim Çıktısı
 
 ```
 workspace/checkpoints/
-â”œâ”€â”€ active/model.pth                         â† en iyi aÄŸÄ±rlÄ±klarÄ±n kopyasÄ± (training.py iÃ§indeki publish_active)
-â”œâ”€â”€ active/training_metadata.json           â† trained_model_only iÃ§in tile / overlap / bands (+ ÅŸema)
-â”œâ”€â”€ active/published_from.json              â† kopyanÄ±n kaynak checkpointâ€™e iÅŸaret eden manifest
-â”œâ”€â”€ epochs/                                  â† save_every_epoch aÃ§Ä±ksa (CONFIGâ€™te varsayÄ±lan genelde aÃ§Ä±k) epoch checkpointâ€™leri
-â””â”€â”€ training_history.json                   â† EÄŸitim metrikleri
+├── active/model.pth                         ← en iyi ağırlıkların kopyası (training.py içindeki publish_active)
+├── active/training_metadata.json           ← trained_model_only için tile / overlap / bands (+ şema)
+├── active/published_from.json              ← kopyanın kaynak checkpoint'e işaret eden manifest
+├── epochs/                                  ← save_every_epoch açıksa (CONFIG'te varsayılan genelde açık) epoch checkpoint'leri
+└── training_history.json                   ← Eğitim metrikleri
 ```
 
-`weights` olarak `workspace/checkpoints/active/model.pth` veya `workspace/checkpoints/epochs/` altÄ±ndaki belirli bir Ã§alÄ±ÅŸtÄ±rmayÄ± seÃ§ebilirsiniz; her durumda **`training_metadata.json` aynÄ± mimari, kanal sayÄ±sÄ±, karo boyutu, overlap ve bantlarÄ±** tanÄ±mlamalÄ±dÄ±r.
+`weights` olarak `workspace/checkpoints/active/model.pth` veya `workspace/checkpoints/epochs/` altındaki belirli bir çalıştırmayı seçebilirsiniz; her durumda **`training_metadata.json` aynı mimari, kanal sayısı, karo boyutu, overlap ve bantları** tanımlamalıdır.
 
-`channel_importance_history.json` dosyasÄ± da (etkinse) `workspace/checkpoints/` altÄ±nda Ã¼retilir; epoch bazlÄ± bant Ã¶nem sÄ±ralarÄ±nÄ± iÃ§erir.
+`channel_importance_history.json` dosyası da (etkinse) `workspace/checkpoints/` altında üretilir; epoch bazlı bant önem sıralarını içerir.
 
-#### EÄŸitimi Ä°zleme
+#### Eğitimi İzleme
 
-Konsol Ã§Ä±ktÄ±sÄ±nÄ± izleyin:
+Konsol çıktısını izleyin:
 
 ```
 Epoch  1/50 | Train Loss: 0.45 | Val Loss: 0.39 | Val IoU: 0.62 | LR: 1e-04
-  â†’ En iyi model kaydedildi
+  → En iyi model kaydedildi
 Epoch  2/50 | Train Loss: 0.38 | Val Loss: 0.34 | Val IoU: 0.68 | LR: 1e-04
-  â†’ En iyi model kaydedildi
+  → En iyi model kaydedildi
 ...
 Erken durdurma: En iyi model 15. epoch'ta (Val IoU: 0.79)
 ```
 
-**Metriklerin anlamÄ±:**
-- **Val IoU** (KesiÅŸim/BirleÅŸim): YÃ¼ksek = daha iyi. Hedef: 0.6-0.8
-- **Val Loss**: DÃ¼ÅŸÃ¼k = daha iyi. Zamanla azalmalÄ±
-- **Train Loss**: Val Loss'tan biraz dÃ¼ÅŸÃ¼k olmalÄ± (Ã§ok dÃ¼ÅŸÃ¼kse = aÅŸÄ±rÄ± Ã¶ÄŸrenme)
+**Metriklerin anlamı:**
+- **Val IoU** (Kesişim/Birleşim): Yüksek = daha iyi. Hedef: 0.6-0.8
+- **Val Loss**: Düşük = daha iyi. Zamanla azalmalı
+- **Train Loss**: Val Loss'tan biraz düşük olmalı (çok düşükse = aşırı öğrenme)
 
 ---
 
-### ğŸ“Š AdÄ±m 4: EÄŸitilmiÅŸ Modeli Kullanma
+### 📊 Adım 4: Eğitilmiş Modeli Kullanma
 
-#### Komut SatÄ±rÄ±ndan
+#### Komut Satırından
 
 ```bash
 python archaeo_detect.py \
+  --enable-deep-learning \
+  --trained-model-only \
   --weights workspace/checkpoints/active/model.pth \
   --training-metadata workspace/checkpoints/active/training_metadata.json \
   --input yeni_alan.tif \
   --th 0.6
 ```
 
-#### config.yaml Ãœzerinden
+#### config.yaml Üzerinden
 
 ```yaml
 weights: "workspace/checkpoints/active/model.pth"
 training_metadata: "workspace/checkpoints/active/training_metadata.json"
+enable_deep_learning: true
 zero_shot_imagenet: false
 trained_model_only: true
 ```
 
-Sonra sadece Ã§alÄ±ÅŸtÄ±rÄ±n:
+Sonra sadece çalıştırın:
 ```bash
 python archaeo_detect.py
 ```
 
 ---
 
-### ğŸ”§ Sorun Giderme
+### 🔧 Sorun Giderme
 
-#### Veri HazÄ±rlama SorunlarÄ±
+#### Veri Hazırlama Sorunları
 
-| Sorun | Neden | Ã‡Ã¶zÃ¼m |
+| Sorun | Neden | Çözüm |
 |-------|-------|-------|
-| "Maske boyutlarÄ± eÅŸleÅŸmiyor" | FarklÄ± Ã§Ã¶zÃ¼nÃ¼rlÃ¼k/kapsam | Maskeyi yeniden Ã¶rnekle: `gdalwarp -tr 1.0 1.0 -r nearest maske.tif maske_duzeltilmis.tif` |
-| "GeÃ§erli karo bulunamadÄ±" | `--min-positive` Ã§ok yÃ¼ksek | `0.0` veya `0.01`'e dÃ¼ÅŸÃ¼rÃ¼n |
-| "Bellek hatasÄ±" | BÃ¼yÃ¼k giriÅŸ dosyasÄ± | `--tile-size`'Ä± 128'e dÃ¼ÅŸÃ¼rÃ¼n |
+| "Maske boyutları eşleşmiyor" | Farklı çözünürlük/kapsam | Maskeyi yeniden örnekle: `gdalwarp -tr 1.0 1.0 -r nearest maske.tif maske_duzeltilmis.tif` |
+| "Geçerli karo bulunamadı" | `--min-positive` çok yüksek | `0.0` veya `0.01`'e düşürün |
+| "Bellek hatası" | Büyük giriş dosyası | `--tile-size`'ı 128'e düşürün |
 
-#### EÄŸitim SorunlarÄ±
+#### Eğitim Sorunları
 
-| Sorun | Neden | Ã‡Ã¶zÃ¼m |
+| Sorun | Neden | Çözüm |
 |-------|-------|-------|
-| KayÄ±p dÃ¼ÅŸmÃ¼yor | Ã–ÄŸrenme oranÄ± Ã§ok yÃ¼ksek | `--lr 5e-5` veya `1e-5` kullanÄ±n |
-| GPU bellek yetersiz | Batch boyutu Ã§ok bÃ¼yÃ¼k | `--batch-size 4` veya `--no-amp` kullanÄ±n |
-| AÅŸÄ±rÄ± Ã¶ÄŸrenme (train << val loss) | Ã‡ok az veri | Daha fazla karo ekleyin veya `--loss focal` kullanÄ±n |
-| TÃ¼m tahminler = 0 | SÄ±nÄ±f dengesizliÄŸi | `--loss focal` kullanÄ±n, veri hazÄ±rlamada negatif eÄŸitim karolarÄ±nÄ± azaltÄ±n (Ã¶rn. `--train-negative-keep-ratio 0.2`) |
-| EÄŸitim Ã§ok yavaÅŸ | GPU yok / kÃ¼Ã§Ã¼k batch | GPU kullanÄ±n, `--batch-size` artÄ±rÄ±n, AMP etkinleÅŸtirin |
+| Kayıp düşmüyor | Öğrenme oranı çok yüksek | `--lr 5e-5` veya `1e-5` kullanın |
+| GPU bellek yetersiz | Batch boyutu çok büyük | `--batch-size 4` veya `--no-amp` kullanın |
+| Aşırı öğrenme (train << val loss) | Çok az veri | Daha fazla karo ekleyin veya `--loss focal` kullanın |
+| Tüm tahminler = 0 | Sınıf dengesizliği | `--loss focal` kullanın, veri hazırlamada negatif eğitim karolarını azaltın (örn. `--train-negative-keep-ratio 0.2`) |
+| Eğitim çok yavaş | GPU yok / küçük batch | GPU kullanın, `--batch-size` artırın, AMP etkinleştirin |
 
-#### HÄ±zlÄ± TanÄ± KomutlarÄ±
+#### Hızlı Tanı Komutları
 
 ```bash
-# EÄŸitim verisi yapÄ±sÄ±nÄ± kontrol et
+# Eğitim verisi yapısını kontrol et
 ls -R workspace/training_data/
 
-# Metadata'yÄ± gÃ¶rÃ¼ntÃ¼le
+# Metadata'yı görüntüle
 cat workspace/training_data/metadata.json | python -m json.tool
 
-# Veri yÃ¼klemeyi test et
+# Veri yüklemeyi test et
 python -c "import numpy as np; d=np.load('workspace/training_data/train/images/tile_00000_00000.npz'); print(d['image'].shape)"
 # Beklenen: (5, 256, 256)
 ```
 
 ---
 
-### ğŸ’¡ En Ä°yi Uygulamalar
+### 💡 En İyi Uygulamalar
 
 #### Veri Kalitesi Kontrol Listesi
 
-- [ ] Maskeler doÄŸru (kesin sÄ±nÄ±rlar)
-- [ ] TÃ¼m arkeolojik Ã¶zellikler tutarlÄ± ÅŸekilde etiketlenmiÅŸ
-- [ ] Dengeli veri kÃ¼mesi (%30-50 pozitif karo)
-- [ ] Negatiflerde Ã§eÅŸitli arazi tÃ¼rleri
-- [ ] Minimum 1000 karo (2000-5000 Ã¶nerilir)
+- [ ] Maskeler doğru (kesin sınırlar)
+- [ ] Tüm arkeolojik özellikler tutarlı şekilde etiketlenmiş
+- [ ] Dengeli veri kümesi (%30-50 pozitif karo)
+- [ ] Negatiflerde çeşitli arazi türleri
+- [ ] Minimum 1000 karo (2000-5000 önerilir)
 
-#### EÄŸitim Ä°ÅŸ AkÄ±ÅŸÄ±
+#### Eğitim İş Akışı
 
 ```
-1. HÄ±zlÄ± test (5 epoch)      â†’ Her ÅŸeyin Ã§alÄ±ÅŸtÄ±ÄŸÄ±nÄ± doÄŸrula
-2. Temel (50 epoch)          â†’ BaÅŸlangÄ±Ã§ noktasÄ± belirle
-3. Optimize et (daha iyi kodlayÄ±cÄ±/mimari dene)
-4. Ä°nce ayar (gerekirse LR dÃ¼ÅŸÃ¼r)
+1. Hızlı test (5 epoch)      → Her şeyin çalıştığını doğrula
+2. Temel (50 epoch)          → Başlangıç noktası belirle
+3. Optimize et (daha iyi kodlayıcı/mimari dene)
+4. İnce ayar (gerekirse LR düşür)
 ```
 
 #### Performans Beklentileri
 
-| Veri KÃ¼mesi Boyutu | Beklenen Val IoU | EÄŸitim SÃ¼resi (GPU) |
+| Veri Kümesi Boyutu | Beklenen Val IoU | Eğitim Süresi (GPU) |
 |--------------------|------------------|---------------------|
 | 500-1000 karo | 0.55-0.65 | 30-60 dk |
 | 1000-3000 karo | 0.65-0.75 | 1-2 saat |
@@ -1949,10 +2238,10 @@ python -c "import numpy as np; d=np.load('workspace/training_data/train/images/t
 
 ---
 
-### ğŸ“š Tam Ã–rnek: UÃ§tan Uca
+### 📚 Tam Örnek: Uçtan Uca
 
 ```bash
-# 1. EÄŸitim verisini oluÅŸtur (tek dengeleme mekanizmasÄ±: train-negatif filtreleme)
+# 1. Eğitim verisini oluştur (tek dengeleme mekanizması: train-negatif filtreleme)
 python egitim_verisi_olusturma.py \
   --input kesif_alani.tif \
   --mask ground_truth.tif \
@@ -1960,72 +2249,77 @@ python egitim_verisi_olusturma.py \
   --tile-size 256 \
   --train-negative-keep-ratio 0.3
 
-# 2. Modeli eÄŸit
+# 2. Modeli eğit
 python training.py \
   --data workspace/training_data \
   --arch Unet \
   --encoder resnet50 \
   --epochs 50 \
-  --batch-size 16 \
+  --batch-size 32 \
   --loss bce
 
-# 3. Yeni alanda Ã§Ä±karÄ±m yap
+# 3. Yeni alanda çıkarım yap
 python archaeo_detect.py \
+  --enable-deep-learning \
+  --trained-model-only \
   --weights workspace/checkpoints/active/model.pth \
   --training-metadata workspace/checkpoints/active/training_metadata.json \
   --input yeni_alan.tif \
-  --th 0.6 \
-  --enable-fusion
+  --th 0.6
 ```
 
-**Beklenen sonuÃ§lar:**
-- ~1000-2000 eÄŸitim karosu
+**Beklenen sonuçlar:**
+- ~1000-2000 eğitim karosu
 - Val IoU: 0.65-0.75
-- EÄŸitim sÃ¼resi: 1-2 saat (GPU)
-- Model dosyasÄ±: ~70 MB
+- Eğitim süresi: 1-2 saat (GPU)
+- Model dosyası: ~70 MB
 
 ---
 
-## ğŸ”¬ GeliÅŸmiÅŸ Ã–zellikler
+## 🔬 Gelişmiş Özellikler
 
-### Ã–zel Model EÄŸitimi
+### Özel Model Eğitimi
 
-> **ğŸ“– DetaylÄ± eÄŸitim kÄ±lavuzu iÃ§in yukarÄ±daki [Model EÄŸitimi KÄ±lavuzu](#-model-eÄŸitimi-kÄ±lavuzu) bÃ¶lÃ¼mÃ¼ne bakÄ±n.**
+> **📖 Detaylı eğitim kılavuzu için yukarıdaki [Model Eğitimi Kılavuzu](#-model-eğitimi-kılavuzu) bölümüne bakın.**
 
-Proje, Ã¶zel modeller eÄŸitmek iÃ§in iki Ã¶zel betik iÃ§erir:
+Proje, özel modeller eğitmek için iki özel betik içerir:
 
-- **`egitim_verisi_olusturma.py`**: GeoTIFF + ground truth maskelerinden **5 kanallÄ±** eÄŸitim karolarÄ± oluÅŸturur
-- **`training.py`**: SMP U-Net ailesinde eÄŸitim; **CBAM** isteÄŸe baÄŸlÄ± (`no_attention` / `CONFIG`)
+- **`egitim_verisi_olusturma.py`**: GeoTIFF + ground truth maskelerinden **5 kanallı** eğitim karoları oluşturur
+- **`training.py`**: SMP U-Net ailesinde eğitim; **CBAM** isteğe bağlı (`no_attention` / `CONFIG`)
 
-**HÄ±zlÄ± BaÅŸlangÄ±Ã§:**
+**Hızlı Başlangıç:**
 
 ```bash
-# 1. EÄŸitim verisi oluÅŸtur
+# 1. Eğitim verisi oluştur
 python egitim_verisi_olusturma.py --input alan.tif --mask maske.tif --output workspace/training_data
 
-# 2. Model eÄŸit
+# 2. Model eğit
 python training.py --data workspace/training_data --task tile_classification --epochs 50
 
-# 3. EÄŸitilmiÅŸ modeli kullan
-python archaeo_detect.py
+# 3. Eğitilmiş modeli kullan
+python archaeo_detect.py \
+  --enable-deep-learning \
+  --trained-model-only \
+  --weights workspace/checkpoints/active/model.pth \
+  --training-metadata workspace/checkpoints/active/training_metadata.json
 ```
 
-**Temel Ã–zellikler:**
-- âœ… 5 kanallÄ± giriÅŸ (R, G, B, SVF, SLRM) â€” Ã§Ä±karÄ±mla uyumlu
-- âœ… Ä°steÄŸe baÄŸlÄ± CBAM dikkat (`training.py`)
-- âœ… KayÄ±plar: **BCE / Focal** (`tile_classification`); **BCE / Dice / Combined / Focal** (`segmentation`)
-- âœ… Karma hassasiyet eÄŸitimi
-- âœ… Erken durdurma ve checkpoint kaydetme
+**Temel Özellikler:**
+- ✅ 5 kanallı giriş (R, G, B, SVF, SLRM) — çıkarımla uyumlu
+- ✅ İsteğe bağlı CBAM dikkat (`training.py`)
+- ✅ Kayıplar: **BCE / Focal** (`tile_classification`); **BCE / Dice / Combined / Focal** (`segmentation`)
+- ✅ Karma hassasiyet eğitimi
+- ✅ Erken durdurma ve checkpoint kaydetme
 
-Tam dokÃ¼mantasyon, Ã¶rnekler ve sorun giderme iÃ§in [Model EÄŸitimi KÄ±lavuzu](#-model-eÄŸitimi-kÄ±lavuzu) bÃ¶lÃ¼mÃ¼ne bakÄ±n.
+Tam dokümantasyon, örnekler ve sorun giderme için [Model Eğitimi Kılavuzu](#-model-eğitimi-kılavuzu) bölümüne bakın.
 
-### KodlayÄ±cÄ± seÃ§imi
+### Kodlayıcı seçimi
 
-KodlayÄ±cÄ±lar **Segmentation Models PyTorch** omurga adlarÄ±dÄ±r (`resnet34`, `resnet50`, `efficientnet-b3`, â€¦). `config.yaml` iÃ§indeki `encoder` / `encoders` veya CLI bayraklarÄ±yla seÃ§in. YÃ¼klÃ¼ `segmentation-models-pytorch` sÃ¼rÃ¼mÃ¼nÃ¼zÃ¼n desteklediÄŸi ve checkpointâ€™inizle eÅŸleÅŸen adlarÄ± kullanÄ±n.
+Kodlayıcılar **Segmentation Models PyTorch** omurga adlarıdır (`resnet34`, `resnet50`, `efficientnet-b3`, …). `config.yaml` içindeki `encoder` / `encoders` veya CLI bayraklarıyla seçin. Yüklü `segmentation-models-pytorch` sürümünüzün desteklediği ve checkpoint'inizle eşleşen adları kullanın.
 
-### API KullanÄ±mÄ±
+### API Kullanımı
 
-Python kodundan betiÄŸi Ã§aÄŸÄ±rma:
+Python kodundan betiği çağırma:
 
 ```python
 import subprocess
@@ -2033,8 +2327,8 @@ import subprocess
 result = subprocess.run([
     'python', 'archaeo_detect.py',
     '--input', 'benim_alanim.tif',
-    '--th', '0.7',
-    '--enable-fusion'
+    '--enable-yolo',
+    '--th', '0.7'
 ], capture_output=True, text=True)
 
 print(result.stdout)
@@ -2042,9 +2336,9 @@ if result.returncode != 0:
     print("Hata:", result.stderr)
 ```
 
-### Toplu Ä°ÅŸleme
+### Toplu İşleme
 
-Birden fazla dosyayÄ± iÅŸlemek iÃ§in betik:
+Birden fazla dosyayı işlemek için betik:
 
 ```python
 import os
@@ -2056,51 +2350,58 @@ output_dir = Path('sonuclar')
 output_dir.mkdir(exist_ok=True)
 
 for tif_file in input_dir.glob('*.tif'):
-    print(f"Ä°ÅŸleniyor: {tif_file.name}")
-    
+    print(f"İşleniyor: {tif_file.name}")
+
     subprocess.run([
         'python', 'archaeo_detect.py',
         '--input', str(tif_file),
         '--out-prefix', str(output_dir / tif_file.stem),
-        '--enable-fusion',
+        '--enable-yolo',
         '--cache-derivatives',
         '-v'
     ])
-    
-print("TÃ¼m dosyalar iÅŸlendi!")
+
+print("Tüm dosyalar işlendi!")
 ```
 
 ### Performans Profili
 
-Ä°ÅŸleme sÃ¼relerini analiz etme:
+İşleme sürelerini analiz etme:
 
 ```bash
-python -m cProfile -o profile.stats archaeo_detect.py
+python -m cProfile -o profile.stats archaeo_detect.py --enable-yolo
 
-# SonuÃ§larÄ± gÃ¶rÃ¼ntÃ¼le
+# Sonuçları görüntüle
 python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumulative'); p.print_stats(20)"
 ```
 
 ---
 
-## ğŸ“š Teknik Detaylar
+## 📚 Teknik Detaylar
 
-### Proje Yapisi
+### Proje Yapısı
 
 ```text
 arkeolojik_alan_tespit/
-├── archaeo_detect.py                  # Ana tespit akisi
-├── archeo_shared/                     # Ortak kanal ve model yardimcilari
-├── egitim_verisi_olusturma.py         # Egitim verisi olusturma
+├── archaeo_detect.py                  # Ana tespit akışı
+├── archeo_shared/                     # Ortak kanal ve model yardımcıları
+├── egitim_verisi_olusturma.py         # Paired eğitim verisi oluşturma
 ├── prepare_tile_classification_dataset.py
-├── training.py                        # Model egitimi
-├── evaluation.py                      # Degerlendirme metrikleri
-├── config.yaml                        # Paylasilan repo konfigu
-├── configs/                           # Ornek profiller
-├── docs/                              # Ek dokumantasyon
+├── training.py                        # Model eğitimi
+├── evaluation.py                      # Değerlendirme metrikleri
+├── veri_birlestir_rgb_dsm_dtm.py      # RGB + DSM + DTM birleştirme
+├── dtm_uret.py                        # DSM/LAS -> DTM üretimi
+├── ground_truth_kare_etiketleme_qt.py # Qt tabanlı etiketleme aracı
+├── vlm_detect.py                      # Bağımsız VLM / LM Studio taraması
+├── vlm_lmstudio_detector.py           # VLM çekirdek tarama ve çıktı yazımı
+├── config.yaml                        # Paylaşılan repo konfigürasyonu
+├── config_vlm.yaml                    # VLM-only konfigürasyon
+├── configs/                           # Örnek profiller
+├── docs/                              # Ek dokümantasyon
+├── prompts/                           # VLM prompt dosyaları
 ├── tests/                             # Testler
-├── tools/                             # Bakim ve inceleme yardimcilari
-└── workspace/                         # Repo-ici veri ve artifact alani
+├── tools/                             # Bakım ve inceleme yardımcıları
+└── workspace/                         # Repo içi veri ve artifact alanı
     ├── on_veri/
     ├── training_data/
     ├── training_data_classification/
@@ -2109,71 +2410,94 @@ arkeolojik_alan_tespit/
     ├── ciktilar/
     └── assets/
 ```
-### Kullanilan Kutuphaneler
 
-| KÃ¼tÃ¼phane | Versiyon | AmaÃ§ |
+### Kullanılan Kütüphaneler
+
+| Kütüphane | Versiyon | Amaç |
 |-----------|----------|------|
-| PyTorch | 2.0+ | Derin Ã¶ÄŸrenme Ã§erÃ§evesi |
+| PyTorch | 2.0+ | Derin öğrenme çerçevesi |
 | SMP | 0.3.2+ | Segmentasyon modelleri |
 | Rasterio | 1.3+ | Raster veri I/O |
-| GeoPandas | 0.12+ | VektÃ¶r veri iÅŸleme |
-| OpenCV | 4.7+ | GÃ¶rÃ¼ntÃ¼ iÅŸleme |
-| scikit-image | 0.20+ | GeliÅŸmiÅŸ gÃ¶rÃ¼ntÃ¼ iÅŸleme |
-| RVT-py | 1.2+ (Python < 3.11) veya RVT 2.0+ (Python >= 3.11) | Kabartma gÃ¶rselleÅŸtirme |
-| NumPy | 1.24+ | SayÄ±sal iÅŸlemler |
+| GeoPandas | 0.12+ | Vektör veri işleme |
+| OpenCV | 4.7+ | Görüntü işleme |
+| scikit-image | 0.20+ | Gelişmiş görüntü işleme |
+| RVT-py | 1.2+ (Python < 3.11) veya RVT 2.0+ (Python >= 3.11) | Kabartma görselleştirme |
+| NumPy | 1.24+ | Sayısal işlemler |
 | SciPy | 1.10+ | Bilimsel hesaplama |
 
+### Kanal Mimarisi
+
+Kanonik kanal adları `archeo_shared/channels.py` içinde tanımlıdır:
+
+| Mod | Model tensor kanalları | Kaynak bant beklentisi |
+|-----|------------------------|------------------------|
+| `rgb3` | R, G, B | 3 bant RGB |
+| `topo5` | R, G, B, SVF, SLRM | 5 bant RGB, DSM, DTM |
+| `topo7` | R, G, B, SVF, SLRM, Slope, nDSM | 5 bant RGB, DSM, DTM |
+
+`MODEL_CHANNEL_NAMES` güncel kodda topo5 geriye uyumluluk varsayılanıdır: **R, G, B, SVF, SLRM**. `feature_mode: auto`, checkpoint metadata'sı varsa şemayı metadata'dan çözer; metadata yoksa seçilen bantlar ve açık modlara göre karar verir. `trained_model_only` modunda metadata şeması, tile, overlap ve bant değerleriyle birlikte bağlayıcıdır.
+
+### Algoritma Detayları
+
+**RVT türevleri:** SVF ve SLRM DTM üzerinden hesaplanır; SLRM için RVT sınırları uygun değilse kod Gaussian tabanlı yedeğe düşebilir.
+
+**nDSM:** `topo7` modunda `nDSM = DSM - DTM` olarak üretilir ve ham DSM/DTM yerine model tensorüne türetilmiş kanal olarak girer.
+
+**Füzyon:** `enable_fusion` yalnızca hem `enable_deep_learning` hem de `enable_classic` açık olduğunda etkin sonuç üretir; aksi durumda kod kullanıcıyı uyarır ve füzyonu atlar.
+
+**VLM:** `vlm_detect.py` iki aşamalı VLM aday taraması yapar; ilk aşama aday üretir, ikinci aşama eşik üstü adayları doğrular ve ayrı GIS/tablo çıktıları yazar.
+
 ---
 
-## ğŸ¤ KatkÄ±da Bulunma
+## 🤝 Katkıda Bulunma
 
-Projeye katkÄ±da bulunmak iÃ§in:
+Projeye katkıda bulunmak için:
 
 1. Depoyu **fork** edin
-2. Ã–zellik dalÄ± oluÅŸturun (`git checkout -b feature/yeni-ozellik`)
-3. DeÄŸiÅŸikliklerinizi commit edin (`git commit -m 'Yeni Ã¶zellik: ...'`)
-4. DalÄ±nÄ±zÄ± push edin (`git push origin feature/yeni-ozellik`)
-5. **Pull Request** aÃ§Ä±n
+2. Özellik dalı oluşturun (`git checkout -b feature/yeni-ozellik`)
+3. Değişikliklerinizi commit edin (`git commit -m 'Yeni özellik: ...'`)
+4. Dalınızı push edin (`git push origin feature/yeni-ozellik`)
+5. **Pull Request** açın
 
-### KatkÄ± AlanlarÄ±
+### Katkı Alanları
 
-- ğŸ› Hata dÃ¼zeltmeleri
-- âœ¨ Yeni Ã¶zellikler
-- ğŸ“ DokÃ¼mantasyon iyileÅŸtirmeleri
-- ğŸŒ Ã‡eviriler (i18n)
-- ğŸ§ª Test senaryolarÄ±
-- ğŸ¨ GÃ¶rselleÅŸtirme araÃ§larÄ±
-
----
-
-## ğŸ“„ Lisans
-
-Bu proje [MIT LisansÄ±](LICENSE) altÄ±nda lisanslanmÄ±ÅŸtÄ±r.
-
-```
-MIT LisansÄ±
-
-Telif HakkÄ± (c) 2025 [Ahmet ErtuÄŸrul ArÄ±k]
-
-Bu yazÄ±lÄ±mÄ±n ve iliÅŸkili dokÃ¼mantasyon dosyalarÄ±nÄ±n ("YazÄ±lÄ±m") bir kopyasÄ±nÄ± 
-alan herhangi bir kiÅŸiye, YazÄ±lÄ±mÄ± kÄ±sÄ±tlama olmaksÄ±zÄ±n kullanma, kopyalama, 
-deÄŸiÅŸtirme, birleÅŸtirme, yayÄ±nlama, daÄŸÄ±tma, alt lisanslama ve/veya satma 
-haklarÄ±nÄ± Ã¼cretsiz olarak verilir...
-```
+- 🐛 Hata düzeltmeleri
+- ✨ Yeni özellikler
+- 📝 Dokümantasyon iyileştirmeleri
+- 🌍 Çeviriler (i18n)
+- 🧪 Test senaryoları
+- 🎨 Görselleştirme araçları
 
 ---
 
-## ğŸ“§ Ä°letiÅŸim ve Destek
+## 📄 Lisans
+
+Bu proje [MIT Lisansı](LICENSE) altında lisanslanmıştır.
+
+```
+MIT Lisansı
+
+Telif Hakkı (c) 2025 [Ahmet Ertuğrul Arık]
+
+Bu yazılımın ve ilişkili dokümantasyon dosyalarının ("Yazılım") bir kopyasını
+alan herhangi bir kişiye, Yazılımı kısıtlama olmaksızın kullanma, kopyalama,
+değiştirme, birleştirme, yayınlama, dağıtma, alt lisanslama ve/veya satma
+haklarını ücretsiz olarak verilir...
+```
+
+---
+
+## 📧 İletişim ve Destek
 
 - **Sorunlar**: [GitHub Issues](https://github.com/elestirmen/archaeological-site-detection/issues)
 - **E-posta**: ertugrularik@hotmail.com
-- **DokÃ¼mantasyon**: [Wiki](https://github.com/elestirmen/archaeological-site-detection/wiki)
+- **Dokümantasyon**: [Wiki](https://github.com/elestirmen/archaeological-site-detection/wiki)
 
 ---
 
-## ğŸ™ TeÅŸekkÃ¼rler
+## 🙏 Teşekkürler
 
-Bu proje aÅŸaÄŸÄ±daki aÃ§Ä±k kaynak projelerden faydalanmaktadÄ±r:
+Bu proje aşağıdaki açık kaynak projelerden faydalanmaktadır:
 
 - [Segmentation Models PyTorch](https://github.com/qubvel/segmentation_models.pytorch)
 - [RVT-py](https://github.com/EarthObservation/RVT_py)
@@ -2183,14 +2507,14 @@ Bu proje aÅŸaÄŸÄ±daki aÃ§Ä±k kaynak projelerden faydalanmaktadÄ±r:
 
 ---
 
-## ğŸ“– AtÄ±f
+## 📖 Atıf
 
-Bu projeyi akademik Ã§alÄ±ÅŸmanÄ±zda kullanÄ±rsanÄ±z, lÃ¼tfen ÅŸu ÅŸekilde atÄ±f yapÄ±n:
+Bu projeyi akademik çalışmanızda kullanırsanız, lütfen şu şekilde atıf yapın:
 
 ```bibtex
 @software{archaeological_site_detection,
-  title = {Arkeolojik Alan Tespiti: Derin Ã–ÄŸrenme ve Klasik GÃ¶rÃ¼ntÃ¼ Ä°ÅŸleme},
-  author = {Ahmet ErtuÄŸrul ArÄ±k},
+  title = {Arkeolojik Alan Tespiti: Derin Öğrenme ve Klasik Görüntü İşleme},
+  author = {Ahmet Ertuğrul Arık},
   year = {2025},
   url = {https://github.com/elestirmen/archaeological-site-detection}
 }
@@ -2198,7 +2522,7 @@ Bu projeyi akademik Ã§alÄ±ÅŸmanÄ±zda kullanÄ±rsanÄ±z, lÃ¼tfen ÅŸ
 
 ---
 
-## ğŸ“Š Proje Ä°statistikleri
+## 📊 Proje İstatistikleri
 
 ![GitHub stars](https://img.shields.io/github/stars/elestirmen/archaeological-site-detection?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/elestirmen/archaeological-site-detection?style=social)
@@ -2207,10 +2531,7 @@ Bu projeyi akademik Ã§alÄ±ÅŸmanÄ±zda kullanÄ±rsanÄ±z, lÃ¼tfen ÅŸ
 
 <div align="center">
 
-GeliÅŸtirici: Ahmet ErtuÄŸrul ArÄ±k  
-Son gÃ¼ncelleme: Nisan 2026
+Geliştirici: Ahmet Ertuğrul Arık
+Son güncelleme: Nisan 2026
 
 </div>
-
-
-
