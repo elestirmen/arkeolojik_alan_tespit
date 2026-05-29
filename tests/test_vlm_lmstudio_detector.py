@@ -64,6 +64,14 @@ def test_lmstudio_native_api_base_url_is_derived_from_openai_base_url():
     assert vlm._lmstudio_native_api_base_url("http://127.0.0.1:8081/api/v1") == "http://127.0.0.1:8081/api/v1"
 
 
+def test_model_not_loaded_errors_stop_scan_and_resume_later():
+    message = "No models loaded. Please load a model in the developer page or use the 'lms load' command."
+
+    assert vlm._classify_exception(RuntimeError(message)) == "model_not_loaded"
+    assert vlm._should_stop_scan_after_error("model_not_loaded", message) is True
+    assert vlm._is_retryable_error_record("api_error", message) is True
+
+
 def test_lmstudio_reload_unloads_then_loads_model(monkeypatch):
     calls = []
 
@@ -1443,3 +1451,106 @@ def test_resume_skips_tiles_already_present_in_jsonl(tmp_path: Path, monkeypatch
     assert len(summary.paths.jsonl.read_text(encoding="utf-8").strip().splitlines()) == 2
     assert summary.paths.csv.exists()
     assert summary.paths.xlsx.exists()
+
+
+def test_resume_retries_lmstudio_model_unloaded_api_errors(tmp_path: Path, monkeypatch):
+    tif_path = tmp_path / "rgb_two_tiles_model_unloaded.tif"
+    data = np.ones((3, 8, 16), dtype=np.uint8) * 120
+    with rasterio.open(
+        tif_path,
+        "w",
+        driver="GTiff",
+        width=16,
+        height=8,
+        count=3,
+        dtype="uint8",
+        transform=from_origin(0, 8, 1, 1),
+    ) as dst:
+        dst.write(data)
+
+    prompt_fingerprint = vlm._prompt_fingerprint(None, None)
+    resume_tile1 = {
+        "tile_index": 1,
+        "tile_row": 0,
+        "tile_col": 0,
+        "tile_width": 8,
+        "tile_height": 8,
+        "used_views": ["rgb"],
+        "has_rgb": True,
+        "has_dsm": False,
+        "has_dtm": False,
+        "analysis_mode": "rgb_only",
+        "prompt_fingerprint": prompt_fingerprint,
+        "candidate": False,
+        "confidence": 0.0,
+        "candidate_type": "none",
+        "bbox_xyxy": None,
+        "bbox_global_xyxy": None,
+        "bbox_crs_xyxy": None,
+        "center_x": None,
+        "center_y": None,
+        "gps_lon": None,
+        "gps_lat": None,
+        "google_maps_url": "",
+        "visual_evidence": "",
+        "possible_false_positive": "",
+        "recommended_check": "rgb",
+        "status": "ok",
+        "error_type": None,
+        "error_message": None,
+        "geometry": None,
+    }
+    resume_tile2 = {
+        **resume_tile1,
+        "tile_index": 2,
+        "tile_col": 8,
+        "status": "error",
+        "error_type": "api_error",
+        "error_message": (
+            "Error code: 400 - {'error': {'message': \"No models loaded. "
+            "Please load a model in the developer page or use the 'lms load' command.\"}}"
+        ),
+    }
+    resume_path = tmp_path / "previous_vlm_candidates.jsonl"
+    resume_path.write_text(json.dumps(resume_tile1) + "\n" + json.dumps(resume_tile2) + "\n", encoding="utf-8")
+
+    calls = {"count": 0}
+
+    def fake_request(**kwargs):
+        calls["count"] += 1
+        return (
+            '{"candidate":false,"confidence":0,"candidate_type":"none","bbox_xyxy":null,'
+            '"visual_evidence":"","possible_false_positive":"","recommended_check":"rgb"}',
+            True,
+        )
+
+    monkeypatch.setattr(vlm, "_make_openai_client", lambda config: object())
+    monkeypatch.setattr(vlm, "_resolve_lmstudio_model", lambda client, config, logger: "loaded-vision-model")
+    monkeypatch.setattr(vlm, "_request_vlm_json", fake_request)
+
+    summary = vlm.run_vlm_lmstudio_detection(
+        input_path=tif_path,
+        out_prefix=tmp_path / "out" / "rgb",
+        config=vlm.VlmLmStudioConfig(
+            tile=8,
+            overlap=0,
+            max_tiles=2,
+            export_every=0,
+            resume=True,
+            resume_jsonl_path=resume_path,
+            featureless_std_threshold=0.0,
+        ),
+    )
+
+    output_records = [
+        json.loads(line)
+        for line in summary.paths.jsonl.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert calls["count"] == 1
+    assert summary.processed_tiles == 2
+    assert summary.resumed_tiles == 1
+    assert summary.error_count == 0
+    assert [record["tile_index"] for record in output_records] == [1, 2]
+    assert {record["status"] for record in output_records} == {"ok"}

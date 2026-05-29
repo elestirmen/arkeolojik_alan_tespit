@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +125,74 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
     assert config.max_candidates_per_tile == 4
     assert config.prompt_stage1_path == str((Path.cwd() / "cli_stage1.txt").resolve(strict=False))
     assert config.prompt_stage2_path == str((Path.cwd() / "cli_stage2.txt").resolve(strict=False))
+
+
+def test_batch_folder_name_uses_input_folder_stem(monkeypatch):
+    monkeypatch.setattr(vlm_detect, "SESSION_RUN_ID", "20260526_120000")
+
+    assert (
+        vlm_detect.build_vlm_batch_folder_name(Path("E:/maps/cappadocia set"))
+        == "20260526_120000_cappadocia_set_merged_batch"
+    )
+
+
+def test_find_latest_vlm_batch_folder_uses_matching_resume_jsonl(tmp_path: Path):
+    input_dir = tmp_path / "kapadokya"
+    input_dir.mkdir()
+    output_root = tmp_path / "out"
+    older = output_root / "20260523_212418_kapadokya_merged_batch"
+    newer = output_root / "20260525_081500_kapadokya_merged_batch"
+    other_input = output_root / "20260525_081500_other_merged_batch"
+    empty = output_root / "20260526_081500_kapadokya_merged_batch"
+    for folder in (older, newer, other_input, empty):
+        folder.mkdir(parents=True)
+    older_jsonl = older / "kapadokya_bing_map_1-4_vlm_candidates.jsonl"
+    newer_jsonl = newer / "kapadokya_bing_map_1-4_vlm_candidates.jsonl"
+    other_jsonl = other_input / "tile_vlm_candidates.jsonl"
+    empty_jsonl = empty / "kapadokya_bing_map_1-4_vlm_candidates.jsonl"
+    older_jsonl.write_text('{"tile_index":1}\n', encoding="utf-8")
+    newer_jsonl.write_text('{"tile_index":2}\n', encoding="utf-8")
+    other_jsonl.write_text('{"tile_index":1}\n', encoding="utf-8")
+    empty_jsonl.write_text("", encoding="utf-8")
+    os.utime(older_jsonl, (100.0, 100.0))
+    os.utime(newer_jsonl, (200.0, 200.0))
+    os.utime(other_jsonl, (300.0, 300.0))
+    os.utime(empty_jsonl, (400.0, 400.0))
+    os.utime(older, (100.0, 100.0))
+    os.utime(newer, (100.0, 100.0))
+    os.utime(other_input, (300.0, 300.0))
+    os.utime(empty, (400.0, 400.0))
+
+    assert vlm_detect.find_latest_vlm_batch_folder(input_dir, output_root) == newer
+
+
+def test_resolve_batch_output_folder_reuses_latest_when_resume_enabled(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(vlm_detect, "SESSION_RUN_ID", "20260526_120000")
+    input_dir = tmp_path / "kapadokya"
+    input_dir.mkdir()
+    output_root = tmp_path / "out"
+    resume_folder = output_root / "20260523_212418_kapadokya_merged_batch"
+    resume_folder.mkdir(parents=True)
+    (resume_folder / "kapadokya_bing_map_1-4_vlm_candidates.jsonl").write_text('{"tile_index":1}\n', encoding="utf-8")
+    config = vlm_detect.StandaloneVlmConfig(
+        input=str(input_dir),
+        output_root=str(output_root),
+        resume=True,
+        batch=True,
+    )
+
+    assert vlm_detect.resolve_batch_output_folder(input_dir, config) == resume_folder
+
+    fresh_config = vlm_detect.StandaloneVlmConfig(
+        input=str(input_dir),
+        output_root=str(output_root),
+        resume=False,
+        batch=True,
+    )
+    assert (
+        vlm_detect.resolve_batch_output_folder(input_dir, fresh_config)
+        == output_root / "20260526_120000_kapadokya_merged_batch"
+    )
 
 
 def test_run_info_txt_includes_parameters_and_prompt_text(tmp_path: Path):

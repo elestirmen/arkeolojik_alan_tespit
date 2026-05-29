@@ -661,6 +661,13 @@ def run_vlm_lmstudio_detection(
                                 message,
                             )
                             break_after_tile = True
+                        elif _should_stop_scan_after_error(error_type, message):
+                            log.error(
+                                "VLM taramasi gecici LM Studio hatasi nedeniyle durduruluyor; "
+                                "model/sunucu duzeldikten sonra resume ile devam edin: %s",
+                                message,
+                            )
+                            break_after_tile = True
                         log.warning("VLM tile %s hata ile atlandi: %s", tile_index, message)
 
                     for record in tile_records:
@@ -1334,7 +1341,7 @@ def _load_resume_records(
         logger.info("VLM resume JSONL icinde %d tekrarli tile/aday kaydi bulundu; son kayit kullanildi.", duplicate_count)
     if retryable_error_count:
         logger.info(
-            "VLM resume JSONL icinde %d invalid_json tile tekrar denenmek uzere islenmemis sayildi.",
+            "VLM resume JSONL icinde %d gecici hatali tile tekrar denenmek uzere islenmemis sayildi.",
             retryable_error_count,
         )
 
@@ -1354,10 +1361,25 @@ def _resume_candidate_index(record: Dict[str, Any]) -> Optional[int]:
 
 
 def _is_retryable_resume_error(record: Dict[str, Any]) -> bool:
-    return (
-        str(record.get("status") or "").strip().lower() == "error"
-        and str(record.get("error_type") or "").strip().lower() == "invalid_json"
-    )
+    if str(record.get("status") or "").strip().lower() != "error":
+        return False
+    return _is_retryable_error_record(record.get("error_type"), record.get("error_message"))
+
+
+def _is_retryable_error_record(error_type: Any, message: Any) -> bool:
+    kind = str(error_type or "").strip().lower()
+    if kind in {"invalid_json", "connection_failed", "model_not_loaded"}:
+        return True
+    if kind == "api_error" and _looks_like_transient_api_message(message):
+        return True
+    return False
+
+
+def _should_stop_scan_after_error(error_type: Any, message: Any) -> bool:
+    kind = str(error_type or "").strip().lower()
+    if kind in {"connection_failed", "model_not_loaded"}:
+        return True
+    return kind == "api_error" and _looks_like_model_not_loaded_message(message)
 
 
 def _resume_record_matches_plan(
@@ -3092,6 +3114,8 @@ def _classify_exception(exc: Exception) -> str:
     text = str(exc).lower()
     if _looks_like_connection_error(exc):
         return "connection_failed"
+    if _looks_like_model_not_loaded_message(text):
+        return "model_not_loaded"
     if "model" in text and ("not found" in text or "does not exist" in text):
         return "model_not_found"
     if any(token in text for token in ("vision", "image_url", "image input", "does not support image", "multimodal")):
@@ -3111,11 +3135,50 @@ def _friendly_exception_message(exc: Exception, config: VlmLmStudioConfig) -> st
             f"Model goruntu girdisini desteklemiyor olabilir ({config.model}). "
             "LM Studio'da vision/multimodal destekli bir model yukleyin."
         )
+    if error_type == "model_not_loaded":
+        return (
+            f"LM Studio'da yuklu/aktif model bulunamadi ({config.model}). "
+            "Vision destekli modeli yukleyin; resume acikken tarama kaldigi yerden devam eder."
+        )
     if error_type == "model_not_found":
         return f"Model bulunamadi: {config.model}. LM Studio'da yuklu model adini kontrol edin."
     if error_type == "invalid_json":
         return f"Model strict JSON dondurmedi: {str(exc)[:500]}"
     return str(exc)[:1000]
+
+
+def _looks_like_model_not_loaded_message(value: Any) -> bool:
+    text = str(value or "").lower()
+    return (
+        "no models loaded" in text
+        or "model is not loaded" in text
+        or ("load a model" in text and ("developer page" in text or "lms load" in text))
+    )
+
+
+def _looks_like_transient_api_message(value: Any) -> bool:
+    text = str(value or "").lower()
+    if _looks_like_model_not_loaded_message(text):
+        return True
+    return any(
+        token in text
+        for token in (
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "service unavailable",
+            "internal server error",
+            "bad gateway",
+            "gateway timeout",
+            "connection",
+            "rate limit",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+        )
+    )
 
 
 def _looks_like_connection_error(exc: Exception) -> bool:

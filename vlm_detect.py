@@ -316,6 +316,11 @@ def build_vlm_session_folder_name(input_path: Path, config: StandaloneVlmConfig)
     return f"{SESSION_RUN_ID}_{stem}_vlm_{tile_part}{overlap_part}"
 
 
+def build_vlm_batch_folder_name(input_path: Path) -> str:
+    stem = _safe_token(input_path.stem)[:28].rstrip("_-") or "input"
+    return f"{SESSION_RUN_ID}_{stem}_merged_batch"
+
+
 def resolve_out_prefix(input_path: Path, config: StandaloneVlmConfig) -> Path:
     fallback_name = _output_base_path(input_path).name
     if config.out_prefix:
@@ -350,6 +355,52 @@ def find_latest_vlm_resume_jsonl(out_prefix: Path, output_root: Path) -> Optiona
     except Exception as exc:
         LOGGER.warning("VLM resume JSONL aranirken hata olustu: %s", exc)
         return None
+
+
+def _latest_vlm_resume_jsonl_mtime(folder: Path) -> Optional[float]:
+    try:
+        mtimes = [
+            path.stat().st_mtime
+            for path in folder.glob("*_vlm_candidates.jsonl")
+            if path.is_file() and path.stat().st_size > 0
+        ]
+    except OSError:
+        return None
+    if not mtimes:
+        return None
+    return max(mtimes)
+
+
+def find_latest_vlm_batch_folder(input_path: Path, output_root: Path) -> Optional[Path]:
+    stem = _safe_token(input_path.stem)[:28].rstrip("_-") or "input"
+    pattern = f"*_{stem}_merged_batch"
+    try:
+        candidates = []
+        for path in output_root.glob(pattern):
+            if not path.is_dir():
+                continue
+            latest_jsonl_mtime = _latest_vlm_resume_jsonl_mtime(path)
+            if latest_jsonl_mtime is not None:
+                candidates.append((latest_jsonl_mtime, path.stat().st_mtime, path))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda candidate: (candidate[0], candidate[1]))[2]
+    except Exception as exc:
+        LOGGER.warning("VLM batch resume klasoru aranirken hata olustu: %s", exc)
+        return None
+
+
+def resolve_batch_output_folder(input_path: Path, config: StandaloneVlmConfig) -> Path:
+    output_root = Path(config.output_root)
+    if config.out_prefix:
+        requested = _output_base_path(Path(config.out_prefix))
+        return requested
+    if config.resume:
+        resume_folder = find_latest_vlm_batch_folder(input_path, output_root)
+        if resume_folder is not None:
+            LOGGER.info("VLM batch resume klasoru bulundu: %s", resume_folder)
+            return resume_folder
+    return output_root / build_vlm_batch_folder_name(input_path)
 
 
 def parse_manual_band_indexes(band_string: str) -> Tuple[int, ...]:
@@ -522,8 +573,7 @@ def run_batch(config: StandaloneVlmConfig) -> int:
     for idx, path in enumerate(tif_paths, 1):
         LOGGER.info("  %d. %s", idx, path.name)
 
-    output_root = Path(config.output_root)
-    combined_folder = output_root / f"{SESSION_RUN_ID}_kapadokya_merged_batch"
+    combined_folder = resolve_batch_output_folder(input_dir, config)
     combined_folder.mkdir(parents=True, exist_ok=True)
 
     combined_paths = VlmOutputPaths(
