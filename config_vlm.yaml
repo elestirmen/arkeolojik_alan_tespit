@@ -1,50 +1,46 @@
-# VLM-only config.
+# Tek VLM config. Hem LM Studio hem llama-server icin.
 # Calistirma:
-#   python vlm_detect.py --config config_vlm.yaml
+#   python vlm_detect.py                         # asagidaki 'backend' kullanilir
+#   python vlm_detect.py --backend llama         # backend'i CLI'dan ez
+#   python vlm_detect.py --backend lmstudio
 #
-# Bu dosya sadece LM Studio / VLM taramasi icindir. Eski DL/classic/YOLO
-# pipeline icin config.yaml ve archaeo_detect.py kullanilmaya devam eder.
+# Backend secimi SADECE asagidaki 'backend' alani (veya --backend) ile yapilir.
+# Secilen profilin alanlari (base_url, api_key, reload_every_tiles) ortak
+# ayarlarin uzerine yazilir. Backend tipini ayri belirtmeye gerek yok; pipeline
+# her ikisiyle de OpenAI-uyumlu API uzerinden konusur.
 
-#input: "C:/d_surucusu/arkeoloji/arkeolojik_alan_tespit/workspace/on_veri/karlik_dag_set/karlik_dag_dsm_hillshade.tif"
-#input: "C:/d_surucusu/arkeoloji/arkeolojik_alan_tespit/workspace/on_veri/karlik_vadi_set/karlik_vadi_rgb_dsm_dtm_5band.tif"
-#input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya_bing_map_3-3.tif"
-# Klasor verirseniz ayni alana ait GeoTIFF'ler otomatik bulunur:
-# RGB/ortho referans secilir; hillshade, SLRM, SVF, slope, DSM/DTM ek view olarak gonderilir.
-#input: "C:/d_surucusu/arkeoloji/arkeolojik_alan_tespit/workspace/on_veri/karlik_vadi_set/topo_haritalar"
-#input: "C:/d_surucusu/arkeoloji/arkeolojik_alan_tespit/workspace/on_veri/karlik_vadi_set/topo_haritalar"
+backend: lmstudio          # secenekler: llama | lmstudio
+
+backends:
+  lmstudio:
+    base_url: "http://127.0.0.1:8081"
+    api_key: "lm-studio"
+    reload_every_tiles: 100      # LM Studio native unload/load (VRAM sismesini onler)
+  llama:
+    base_url: "http://127.0.0.1:8080"
+    api_key: "llama-server"
+    reload_every_tiles: 0        # llama-server'da native reload API yok
+
+# ===================== ORTAK AYARLAR =====================
 
 input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya"
-batch: true # <-- Bu parametre klasördeki tüm dosyaları ayrı ayrı tarayıp birleştirir
+batch: true                      # klasordeki tum GeoTIFF'leri ayri tarayip birlestirir
 
 out_prefix: null
 output_root: "workspace/ciktilar"
 
-# "auto":
-# - 1 bant hillshade: ayni bandi 1,1,1 olarak RGB gibi verir.
-# - 3 bant raster: VLM otomatik RGB kullanir.
-# - 5+ bant raster: VLM otomatik RGB + DSM/DTM varsayimini kullanir.
 bands: "auto"
-
-base_url: "http://127.0.0.1:8081"
-api_key: "lm-studio"
-model: "auto"
+model: "auto"                    # base_url'deki sunucudan yuklu modeli otomatik secer
 
 tile: 1024
 overlap: 256
 views: "auto"
-
-# auto: dosya adi/bant sayisi/view durumuna gore promptu uyarlar.
-# Tek bant hillshade icin "hillshade" sabitlemek en net secimdir.
-# SLRM/SVF/slope gibi turevler icin auto genelde yeterlidir; gerekirse elle sabitleyin.
-# Secenekler: auto, rgb, hillshade, slrm, svf, slope, single_band, dsm, dtm, mixed_topo, terrain_derivative
 source_kind: "auto"
 
-# Karar rehberi promptlari. Kod; goruntu tipi, olcek, JSON semasi ve
-# bbox zorunluluklarini bu metinlerin etrafina otomatik ekler.
 prompt_stage1_path: "prompts/cappadocia_stage1.txt"
 prompt_stage2_path: "prompts/cappadocia_stage2_review.txt"
 
-gsd_m: 0
+gsd_m: 0.3
 
 confidence_threshold: 0.75
 max_candidates_per_tile: 3
@@ -52,20 +48,10 @@ max_tiles: 0
 export_every: 150
 resume: true
 
-# Uzun calismalarda LM Studio VRAM sisiyorsa modeli periyodik reload eder.
-# 0 kapatir.
-reload_every_tiles: 100
 reload_pause_seconds: 5
-
-timeout: 120
+timeout: 240
 temperature: 0.0
 log_level: "INFO"
 
-# Tekdüze/boş tile filtresi: tüm RGB kanalları bu std eşiğinin altındaysa tile VLM'e gönderilmez.
-# Artırırsanız daha fazla tile atlanır; azaltırsanız daha az atlanır. (0 = devre dışı)
 featureless_std_threshold: 4.0
-
-# Çapraz-tile deduplication: export çıktılarında (CSV/GeoJSON/GPKG) tile sınırındaki
-# tekrar tespitleri birleştirir. Ham JSONL kayıtları değişmez.
-# Değeri 0.0 yaparsanız deduplication kapatılır; 1.0 tüm örtüşmeleri birleştirir.
 cross_tile_iou_threshold: 0.5

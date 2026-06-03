@@ -1,0 +1,44 @@
+# VLM-only config for llama.cpp llama-server.
+# Start the server first:
+#   powershell -ExecutionPolicy Bypass -File scripts/start_llama_server_gemma4.ps1
+# Then run:
+#   python vlm_detect.py --config config_vlm_llama.yaml
+
+input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya"
+batch: true
+
+out_prefix: null
+output_root: "workspace/ciktilar"
+
+bands: "auto"
+
+base_url: "http://127.0.0.1:8080"
+api_key: "llama-server"
+model: "auto"
+
+tile: 768
+overlap: 192
+views: "auto"
+source_kind: "auto"
+
+prompt_stage1_path: "prompts/cappadocia_stage1.txt"
+prompt_stage2_path: "prompts/cappadocia_stage2_review.txt"
+
+gsd_m: 0
+
+confidence_threshold: 0.75
+max_candidates_per_tile: 3
+max_tiles: 0
+export_every: 150
+resume: true
+
+# llama-server does not expose LM Studio's native unload/load API.
+reload_every_tiles: 0
+reload_pause_seconds: 0
+
+timeout: 240
+temperature: 0.0
+log_level: "INFO"
+
+featureless_std_threshold: 4.0
+cross_tile_iou_threshold: 0.5

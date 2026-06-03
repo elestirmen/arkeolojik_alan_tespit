@@ -1,6 +1,7 @@
-# LM Studio VLM Taramasi
+# LM Studio / llama-server VLM Taramasi
 
-Bu entegrasyon, LM Studio uzerinden OpenAI uyumlu bir vision-language model ile
+Bu entegrasyon, LM Studio veya llama.cpp llama-server uzerinden OpenAI uyumlu
+bir vision-language model ile
 GeoTIFF tile taramasi yapar. VLM sonucu mevcut DL, classic, YOLO veya fusion
 maskelerine karistirilmaz; ayri aday dosyalari olarak yazilir.
 
@@ -71,6 +72,45 @@ vlm_model: "qwen2.5-vl-7b-instruct"
 LM Studio arayuzundeki adres `http://127.0.0.1:8081` gibi `/v1` olmadan
 gorunuyorsa config'e bu adresi yazabilirsiniz; entegrasyon OpenAI base URL icin
 gerekirse `/v1` ekler.
+
+## llama.cpp llama-server alternatifi
+
+llama-server kullanmak icin once CUDA destekli llama.cpp paketini hazirlayin.
+Windows NVIDIA icin resmi release paketlerinde Windows x64 CUDA 13 ve CUDA
+13.3 DLL paketleri bulunur. Kurulumdan sonra su kontrol kritik:
+
+```powershell
+cd C:\llama
+.\llama-server.exe --help | findstr image
+```
+
+Yardim ciktisinda `--image-min-tokens` ve `--image-max-tokens` gorunmelidir.
+Bu repo icin hazir baslatma scripti:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_llama_server_gemma4.ps1
+```
+
+Script varsayilan olarak LM Studio model klasorundeki
+`lmstudio-community/gemma-4-26B-A4B-it-GGUF` modelini ve mmproj dosyasini
+kullanir, llama-server'i `http://127.0.0.1:8080/v1` adresinde baslatir ve
+goruntu token sayisini sabitler:
+
+```text
+--image-min-tokens 1120
+--image-max-tokens 1120
+```
+
+Sonra VLM taramasini llama-server config'i ile calistirin:
+
+```powershell
+python vlm_detect.py --config config_vlm_llama.yaml
+```
+
+Not: LM Studio'da model yukluyse VRAM dolu olabilir. llama-server'i baslatmadan
+once LM Studio modelini unload etmek veya LM Studio'yu kapatmak gerekebilir.
+`config_vlm_llama.yaml` icinde `reload_every_tiles: 0` tutulur; periyodik
+unload/load yalnizca LM Studio native API icin desteklenir.
 
 ## `vlm_views: auto`
 

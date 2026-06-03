@@ -117,6 +117,7 @@ class StandaloneVlmConfig:
     featureless_std_threshold: float = 4.0
     cross_tile_iou_threshold: float = 0.5
     batch: bool = False
+    backend: str = "lmstudio"
 
 
 def default_config_path() -> str:
@@ -152,6 +153,43 @@ def normalize_config_keys(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _apply_backend_profile(raw_config: Dict[str, Any], cli_backend: Optional[str] = None) -> Dict[str, Any]:
+    """Tek config icinde backend profili (orn. lmstudio / llama) secimi.
+
+    ``backends:`` (veya ``profiles:``) altindaki secili profilin alanlari ortak
+    ayarlarin uzerine yazilir. Profil bolumu yoksa config oldugu gibi kullanilir
+    (eski duz configlerle geriye donuk uyumlu). CLI ``--backend`` config'teki
+    ``backend`` degerini ezer.
+    """
+    raw = dict(raw_config)
+    profiles = raw.pop("backends", None)
+    if profiles is None:
+        profiles = raw.pop("profiles", None)
+
+    backend = cli_backend or raw.get("backend")
+
+    if profiles:
+        if not isinstance(profiles, dict):
+            raise ValueError("config 'backends' bir sozluk olmali.")
+        if not backend:
+            raise ValueError(
+                f"Config 'backends' iceriyor ancak 'backend' secili degil. "
+                f"Secenekler: {sorted(profiles)} (config'te 'backend:' yazin veya --backend verin)."
+            )
+        profile = profiles.get(str(backend))
+        if profile is None:
+            raise ValueError(
+                f"backend='{backend}' icin profil bulunamadi. Mevcut profiller: {sorted(profiles)}."
+            )
+        if not isinstance(profile, dict):
+            raise ValueError(f"'{backend}' backend profili bir sozluk olmali.")
+        raw.update(profile)  # profil, ortak degerleri ezer
+
+    if backend is not None:
+        raw["backend"] = backend
+    return raw
+
+
 def _resolve_path_value(raw: Any, base_dir: Path) -> Any:
     if raw is None:
         return None
@@ -170,6 +208,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", default=default_config_path(), help="VLM YAML config path.")
+    parser.add_argument(
+        "--backend",
+        dest="backend",
+        help="Backend profili sec: config 'backends' bolumundeki bir anahtar (orn. lmstudio, llama).",
+    )
     parser.add_argument("--input", dest="input", help="Input GeoTIFF path.")
     parser.add_argument("--out-prefix", dest="out_prefix", help="Output base name or prefix.")
     parser.add_argument("--output-root", dest="output_root", help="Root output directory.")
@@ -257,6 +300,7 @@ def build_config_from_args(args: argparse.Namespace) -> StandaloneVlmConfig:
     if args.config:
         yaml_path = Path(args.config)
         raw_config = load_yaml_config(yaml_path)
+        raw_config = _apply_backend_profile(raw_config, getattr(args, "backend", None))
         yaml_values = normalize_config_keys(raw_config)
         values.update(yaml_values)
         yaml_fields = set(yaml_values)
