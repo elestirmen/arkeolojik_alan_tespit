@@ -86,6 +86,10 @@ VLM_KEY_ALIASES = {
     "vlm_cross_tile_iou_threshold": "cross_tile_iou_threshold",
     "vlm_batch": "batch",
     "vlm_max_tokens": "max_tokens",
+    "vlm_reasoning_mode": "reasoning_mode",
+    "vlm_thinking_mode": "reasoning_mode",
+    "thinking_mode": "reasoning_mode",
+    "vlm_fail_on_reasoning_only": "fail_on_reasoning_only",
 }
 
 
@@ -120,7 +124,9 @@ class StandaloneVlmConfig:
     cross_tile_iou_threshold: float = 0.5
     batch: bool = False
     backend: str = "lmstudio"
-    max_tokens: int = 512
+    max_tokens: Optional[int] = None
+    reasoning_mode: str = "off"
+    fail_on_reasoning_only: bool = True
 
 
 def default_config_path() -> str:
@@ -292,6 +298,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", "--vlm-timeout", dest="timeout", type=int, help="API timeout seconds.")
     parser.add_argument("--temperature", "--vlm-temperature", dest="temperature", type=float, help="Chat temperature.")
     parser.add_argument("--max-tokens", "--vlm-max-tokens", dest="max_tokens", type=int, help="Maximum output tokens for each VLM response.")
+    parser.add_argument(
+        "--reasoning-mode",
+        "--thinking-mode",
+        "--vlm-reasoning-mode",
+        dest="reasoning_mode",
+        choices=("auto", "off", "on"),
+        help="Reasoning/thinking mode hint for local VLM backends.",
+    )
+    parser.add_argument(
+        "--fail-on-reasoning-only",
+        dest="fail_on_reasoning_only",
+        action="store_true",
+        default=None,
+        help="Stop if the backend returns reasoning/thinking text but no final JSON content.",
+    )
+    parser.add_argument(
+        "--no-fail-on-reasoning-only",
+        dest="fail_on_reasoning_only",
+        action="store_false",
+        default=None,
+        help="Do not stop immediately on reasoning-only backend responses.",
+    )
     parser.add_argument("--log-level", dest="log_level", help="Logging level.")
     return parser
 
@@ -678,6 +706,8 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                 timeout=config.timeout,
                 temperature=config.temperature,
                 max_tokens=config.max_tokens,
+                reasoning_mode=config.reasoning_mode,
+                fail_on_reasoning_only=config.fail_on_reasoning_only,
                 log_level=config.log_level,
                 featureless_std_threshold=config.featureless_std_threshold,
                 cross_tile_iou_threshold=config.cross_tile_iou_threshold,
@@ -709,6 +739,8 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                     timeout=tile_config.timeout,
                     temperature=tile_config.temperature,
                     max_tokens=tile_config.max_tokens,
+                    reasoning_mode=tile_config.reasoning_mode,
+                    fail_on_reasoning_only=tile_config.fail_on_reasoning_only,
                     export_every=tile_config.export_every,
                     resume=tile_config.resume,
                     resume_jsonl_path=sub_out_prefix.parent / f"{sub_out_prefix.name}_vlm_candidates.jsonl",
@@ -838,6 +870,8 @@ def run(config: StandaloneVlmConfig) -> int:
             timeout=config.timeout,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
+            reasoning_mode=config.reasoning_mode,
+            fail_on_reasoning_only=config.fail_on_reasoning_only,
             export_every=config.export_every,
             resume=config.resume,
             resume_jsonl_path=resume_jsonl_path,

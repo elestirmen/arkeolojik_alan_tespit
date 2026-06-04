@@ -162,6 +162,10 @@ class VlmConnectionError(RuntimeError):
     """Raised when the configured OpenAI-compatible VLM backend cannot be reached."""
 
 
+class VlmReasoningOnlyError(RuntimeError):
+    """Raised when the backend returns reasoning/thinking text but no final answer."""
+
+
 @dataclass(frozen=True)
 class VlmLmStudioConfig:
     base_url: str = "http://localhost:1234/v1"
@@ -188,7 +192,9 @@ class VlmLmStudioConfig:
     cross_tile_iou_threshold: float = 0.5
     retry_max_attempts: int = 3
     retry_base_delay_seconds: float = 1.0
-    max_tokens: int = 512
+    max_tokens: Optional[int] = None
+    reasoning_mode: str = "off"
+    fail_on_reasoning_only: bool = True
     backend: str = "lmstudio"
 
 
@@ -207,6 +213,41 @@ def _backend_label(config: VlmLmStudioConfig) -> str:
     if backend in {"llama", "llama-server", "llama_server"}:
         return "llama-server"
     return "OpenAI-compatible VLM backend"
+
+
+def _normalize_reasoning_mode(value: Any) -> str:
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    mode = str(value or "auto").strip().lower().replace("_", "-")
+    aliases = {
+        "0": "off",
+        "false": "off",
+        "no": "off",
+        "none": "off",
+        "disable": "off",
+        "disabled": "off",
+        "1": "on",
+        "true": "on",
+        "yes": "on",
+        "enable": "on",
+        "enabled": "on",
+    }
+    return aliases.get(mode, mode)
+
+
+def _apply_reasoning_request_options(kwargs: Dict[str, Any], config: VlmLmStudioConfig) -> None:
+    mode = _normalize_reasoning_mode(config.reasoning_mode)
+    if mode == "auto":
+        return
+    enabled = mode == "on"
+    extra_body = dict(kwargs.get("extra_body") or {})
+    extra_body["reasoning"] = enabled
+    extra_body["enable_thinking"] = enabled
+    extra_body["think"] = enabled
+    template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+    template_kwargs["enable_thinking"] = enabled
+    extra_body["chat_template_kwargs"] = template_kwargs
+    kwargs["extra_body"] = extra_body
 
 
 @dataclass(frozen=True)
@@ -892,6 +933,9 @@ def _validate_config(config: VlmLmStudioConfig) -> None:
         raise ValueError("vlm_confidence_threshold 0-1 arasinda olmali.")
     if config.timeout <= 0:
         raise ValueError("vlm_timeout pozitif olmali.")
+    reasoning_mode = _normalize_reasoning_mode(config.reasoning_mode)
+    if reasoning_mode not in {"auto", "off", "on"}:
+        raise ValueError("vlm_reasoning_mode gecersiz. Gecerli degerler: auto, off, on.")
     if config.gsd_m is not None and float(config.gsd_m) < 0:
         raise ValueError("vlm_gsd_m negatif olamaz.")
     if not str(config.base_url or "").strip():
@@ -1394,6 +1438,8 @@ def _is_retryable_resume_error(record: Dict[str, Any]) -> bool:
 
 def _is_retryable_error_record(error_type: Any, message: Any) -> bool:
     kind = str(error_type or "").strip().lower()
+    if kind == "reasoning_only":
+        return False
     if kind in {"invalid_json", "connection_failed", "model_not_loaded"}:
         return True
     if kind == "api_error" and _looks_like_transient_api_message(message):
@@ -1403,7 +1449,7 @@ def _is_retryable_error_record(error_type: Any, message: Any) -> bool:
 
 def _should_stop_scan_after_error(error_type: Any, message: Any) -> bool:
     kind = str(error_type or "").strip().lower()
-    if kind in {"connection_failed", "model_not_loaded"}:
+    if kind in {"connection_failed", "model_not_loaded", "reasoning_only"}:
         return True
     return kind == "api_error" and _looks_like_model_not_loaded_message(message)
 
@@ -2172,8 +2218,10 @@ def _request_vlm_json(
             {"role": "user", "content": content},
         ],
         "temperature": float(config.temperature),
-        "max_tokens": int(config.max_tokens),
     }
+    if config.max_tokens is not None:
+        kwargs["max_tokens"] = int(config.max_tokens)
+    _apply_reasoning_request_options(kwargs, config)
     if use_response_format:
         kwargs["response_format"] = {"type": "json_object"}
 
@@ -2189,10 +2237,31 @@ def _request_vlm_json(
             raise
 
     message = response.choices[0].message
-    return _message_content_to_text(message.content), use_response_format
+    response_text = _message_content_to_text(_message_field(message, "content", ""))
+    reasoning_text = _message_reasoning_to_text(message)
+    if config.fail_on_reasoning_only and not response_text.strip() and reasoning_text.strip():
+        raise VlmReasoningOnlyError(
+            "Backend sadece reasoning/thinking icerigi dondurdu; final JSON content bos. "
+            "LM Studio'da Reasoning/Thinking modunu kapatin veya config'te reasoning_mode: \"off\" kullanin."
+        )
+    return response_text, use_response_format
+
+
+def _message_field(message: Any, field_name: str, default: Any = None) -> Any:
+    if isinstance(message, dict):
+        return message.get(field_name, default)
+    value = getattr(message, field_name, default)
+    if value is not default:
+        return value
+    extra = getattr(message, "model_extra", None)
+    if isinstance(extra, dict):
+        return extra.get(field_name, default)
+    return default
 
 
 def _message_content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -2206,6 +2275,14 @@ def _message_content_to_text(content: Any) -> str:
                 parts.append(str(item))
         return "\n".join(parts)
     return str(content)
+
+
+def _message_reasoning_to_text(message: Any) -> str:
+    for field_name in ("reasoning_content", "reasoning"):
+        value = _message_field(message, field_name, None)
+        if value:
+            return _message_content_to_text(value)
+    return ""
 
 
 def _is_retryable_api_exception(exc: Exception) -> bool:
@@ -3142,6 +3219,8 @@ def _is_exportable_candidate(record: Dict[str, Any], threshold: float) -> bool:
 
 
 def _classify_exception(exc: Exception) -> str:
+    if isinstance(exc, VlmReasoningOnlyError):
+        return "reasoning_only"
     if isinstance(exc, json.JSONDecodeError) or "json" in str(exc).lower():
         return "invalid_json"
     text = str(exc).lower()
@@ -3176,6 +3255,11 @@ def _friendly_exception_message(exc: Exception, config: VlmLmStudioConfig) -> st
         )
     if error_type == "model_not_found":
         return f"Model bulunamadi: {config.model}. {backend_label} model adini kontrol edin."
+    if error_type == "reasoning_only":
+        return (
+            f"{backend_label} final JSON yerine sadece reasoning/thinking icerigi dondurdu. "
+            "Reasoning/Thinking modunu kapatin veya config_vlm.yaml icinde reasoning_mode: \"off\" kullanin."
+        )
     if error_type == "invalid_json":
         return f"Model strict JSON dondurmedi: {str(exc)[:500]}"
     return str(exc)[:1000]

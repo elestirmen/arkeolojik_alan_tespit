@@ -58,7 +58,9 @@ export_every: 150
 resume: true
 
 temperature: 0.0
-max_tokens: 512                  # modelin uretecegi azami cikti token'i; model durmazsa keser (LM Studio + llama'da ortak)
+max_tokens: 512                  # LM Studio'da uzun dusunmeyi sinirlar; eski davranisi denemek icin null yazilabilir
+reasoning_mode: "off"            # reasoning/thinking icin niyet: off | on | auto
+fail_on_reasoning_only: true     # content bos, reasoning dolu gelirse taramayi erken durdur
 log_level: "INFO"
 
 featureless_std_threshold: 4.0

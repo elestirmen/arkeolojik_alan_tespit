@@ -4,6 +4,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import numpy as np
+import pytest
 import rasterio
 from rasterio.crs import CRS
 from rasterio.enums import ColorInterp
@@ -64,12 +65,133 @@ def test_lmstudio_native_api_base_url_is_derived_from_openai_base_url():
     assert vlm._lmstudio_native_api_base_url("http://127.0.0.1:8081/api/v1") == "http://127.0.0.1:8081/api/v1"
 
 
+def test_request_omits_max_tokens_when_configured_none():
+    calls = []
+
+    class Message:
+        content = '{"candidates":[]}'
+
+    class Choice:
+        message = Message()
+
+    class Response:
+        choices = [Choice()]
+
+    class Completions:
+        @staticmethod
+        def create(**kwargs):
+            calls.append(kwargs)
+            return Response()
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+    response_text, use_response_format = vlm._request_vlm_json(
+        client=Client(),
+        config=vlm.VlmLmStudioConfig(max_tokens=None),
+        prompt="Return JSON.",
+        rendered_views=[],
+        use_response_format=False,
+        logger=vlm.LOGGER,
+    )
+
+    assert response_text == '{"candidates":[]}'
+    assert use_response_format is False
+    assert "max_tokens" not in calls[0]
+    assert calls[0]["extra_body"]["reasoning"] is False
+    assert calls[0]["extra_body"]["enable_thinking"] is False
+    assert calls[0]["extra_body"]["think"] is False
+    assert calls[0]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_request_does_not_send_reasoning_hints_when_auto():
+    calls = []
+
+    class Message:
+        content = '{"candidates":[]}'
+
+    class Choice:
+        message = Message()
+
+    class Response:
+        choices = [Choice()]
+
+    class Completions:
+        @staticmethod
+        def create(**kwargs):
+            calls.append(kwargs)
+            return Response()
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+    response_text, use_response_format = vlm._request_vlm_json(
+        client=Client(),
+        config=vlm.VlmLmStudioConfig(reasoning_mode="auto"),
+        prompt="Return JSON.",
+        rendered_views=[],
+        use_response_format=False,
+        logger=vlm.LOGGER,
+    )
+
+    assert response_text == '{"candidates":[]}'
+    assert use_response_format is False
+    assert "extra_body" not in calls[0]
+
+
+def test_request_fails_on_reasoning_only_response():
+    class Message:
+        content = ""
+        reasoning_content = "Thinking about the image."
+
+    class Choice:
+        message = Message()
+
+    class Response:
+        choices = [Choice()]
+
+    class Completions:
+        @staticmethod
+        def create(**kwargs):
+            return Response()
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+    with pytest.raises(vlm.VlmReasoningOnlyError):
+        vlm._request_vlm_json(
+            client=Client(),
+            config=vlm.VlmLmStudioConfig(fail_on_reasoning_only=True),
+            prompt="Return JSON.",
+            rendered_views=[],
+            use_response_format=False,
+            logger=vlm.LOGGER,
+        )
+
+
 def test_model_not_loaded_errors_stop_scan_and_resume_later():
     message = "No models loaded. Please load a model in the developer page or use the 'lms load' command."
 
     assert vlm._classify_exception(RuntimeError(message)) == "model_not_loaded"
     assert vlm._should_stop_scan_after_error("model_not_loaded", message) is True
     assert vlm._is_retryable_error_record("api_error", message) is True
+
+
+def test_reasoning_only_errors_stop_scan_without_resume_retry():
+    exc = vlm.VlmReasoningOnlyError("reasoning only")
+
+    assert vlm._classify_exception(exc) == "reasoning_only"
+    assert vlm._should_stop_scan_after_error("reasoning_only", str(exc)) is True
+    assert vlm._is_retryable_error_record("reasoning_only", str(exc)) is False
 
 
 def test_lmstudio_reload_unloads_then_loads_model(monkeypatch):

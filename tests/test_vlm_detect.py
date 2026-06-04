@@ -166,6 +166,27 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
     assert config.prompt_stage2_path == str((Path.cwd() / "cli_stage2.txt").resolve(strict=False))
 
 
+def test_yaml_null_max_tokens_preserves_omitted_request_behavior(tmp_path: Path):
+    cfg_path = tmp_path / "config_vlm.yaml"
+    cfg_path.write_text("max_tokens: null\n", encoding="utf-8")
+
+    args = vlm_detect.build_arg_parser().parse_args(["--config", str(cfg_path)])
+    config = vlm_detect.build_config_from_args(args)
+
+    assert config.max_tokens is None
+
+
+def test_yaml_reasoning_options_are_loaded(tmp_path: Path):
+    cfg_path = tmp_path / "config_vlm.yaml"
+    cfg_path.write_text('reasoning_mode: "off"\nfail_on_reasoning_only: false\n', encoding="utf-8")
+
+    args = vlm_detect.build_arg_parser().parse_args(["--config", str(cfg_path)])
+    config = vlm_detect.build_config_from_args(args)
+
+    assert config.reasoning_mode == "off"
+    assert config.fail_on_reasoning_only is False
+
+
 def test_startup_precondition_uses_normalized_openai_models_url(tmp_path: Path, monkeypatch):
     input_path = tmp_path / "input.tif"
     input_path.write_bytes(b"placeholder")
