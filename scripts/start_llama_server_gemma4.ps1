@@ -9,7 +9,7 @@ param(
     [int]$UBatchSize = 2048,
     [int]$Parallel = 1,
     [string]$HostAddress = "127.0.0.1",
-    [int]$Port = 8080,
+    [int]$Port = 18080,
     [string]$Alias = "gemma-4-26b-a4b-it-uncensored-heretic",
     [switch]$NoFlashAttn
 )
@@ -29,6 +29,19 @@ if ($helpText -notmatch "--image-max-tokens" -or $helpText -notmatch "--image-mi
     throw "Bu llama-server surumu --image-min-tokens/--image-max-tokens desteklemiyor. Daha yeni llama.cpp paketi kurun."
 }
 
+$existingListeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+if ($existingListeners.Count -gt 0) {
+    $owners = foreach ($listener in $existingListeners) {
+        $proc = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+        if ($proc) {
+            "$($proc.ProcessName) pid=$($proc.Id)"
+        } else {
+            "pid=$($listener.OwningProcess)"
+        }
+    }
+    throw "Port zaten kullanimda: $Port ($($owners -join ', ')). Baska port secin veya once o uygulamayi kapatin."
+}
+
 $serverArgs = @(
     "-m", $ModelPath,
     "--ctx-size", $CtxSize,
@@ -38,6 +51,8 @@ $serverArgs = @(
     "--batch-size", $BatchSize,
     "--ubatch-size", $UBatchSize,
     "--parallel", $Parallel,
+    "--reasoning", "off",
+    "--reasoning-budget", "0",
     "--alias", $Alias,
     "--host", $HostAddress,
     "--port", $Port

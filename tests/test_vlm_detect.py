@@ -82,6 +82,42 @@ def test_legacy_vlm_prefixed_config_keys_are_accepted(tmp_path: Path):
     assert config.resume is False
 
 
+def test_backend_profile_override_keeps_llama_values_isolated(tmp_path: Path):
+    cfg_path = tmp_path / "config_vlm.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                'input: "data/sample.tif"',
+                'backend: "lmstudio"',
+                'model: "lmstudio-model"',
+                "tile: 1024",
+                "reload_every_tiles: 100",
+                "backends:",
+                "  lmstudio:",
+                '    base_url: "http://127.0.0.1:1234"',
+                '    api_key: "lm-studio"',
+                "  llama:",
+                '    base_url: "http://127.0.0.1:18080"',
+                '    api_key: "llama-server"',
+                '    model: "llama-model"',
+                "    tile: 768",
+                "    reload_every_tiles: 0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    args = vlm_detect.build_arg_parser().parse_args(["--config", str(cfg_path), "--backend", "llama"])
+    config = vlm_detect.build_config_from_args(args)
+
+    assert config.backend == "llama"
+    assert config.base_url == "http://127.0.0.1:18080"
+    assert config.api_key == "llama-server"
+    assert config.model == "llama-model"
+    assert config.tile == 768
+    assert config.reload_every_tiles == 0
+
+
 def test_cli_overrides_vlm_config_values(tmp_path: Path):
     cfg_path = tmp_path / "config_vlm.yaml"
     cfg_path.write_text(
@@ -115,6 +151,8 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
             "cli_stage2.txt",
             "--max-candidates-per-tile",
             "4",
+            "--max-tokens",
+            "256",
         ]
     )
     config = vlm_detect.build_config_from_args(args)
@@ -123,8 +161,34 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
     assert config.overlap == 256
     assert config.source_kind == "hillshade"
     assert config.max_candidates_per_tile == 4
+    assert config.max_tokens == 256
     assert config.prompt_stage1_path == str((Path.cwd() / "cli_stage1.txt").resolve(strict=False))
     assert config.prompt_stage2_path == str((Path.cwd() / "cli_stage2.txt").resolve(strict=False))
+
+
+def test_startup_precondition_uses_normalized_openai_models_url(tmp_path: Path, monkeypatch):
+    input_path = tmp_path / "input.tif"
+    input_path.write_bytes(b"placeholder")
+    seen_urls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(request, timeout):
+        seen_urls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(vlm_detect.urllib.request, "urlopen", fake_urlopen)
+
+    config = vlm_detect.StandaloneVlmConfig(input=str(input_path), base_url="http://127.0.0.1:18080/v1")
+    vlm_detect._validate_startup_preconditions(input_path, config)
+
+    assert seen_urls == ["http://127.0.0.1:18080/v1/models"]
+
 
 
 def test_batch_folder_name_uses_input_folder_stem(monkeypatch):

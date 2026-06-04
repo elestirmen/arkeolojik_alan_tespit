@@ -1,9 +1,21 @@
 # LM Studio / llama-server VLM Taramasi
 
-Bu entegrasyon, LM Studio veya llama.cpp llama-server uzerinden OpenAI uyumlu
+Bu entegrasyon, LM Studio veya standalone llama.cpp llama-server uzerinden OpenAI uyumlu
 bir vision-language model ile
 GeoTIFF tile taramasi yapar. VLM sonucu mevcut DL, classic, YOLO veya fusion
 maskelerine karistirilmaz; ayri aday dosyalari olarak yazilir.
+
+LM Studio ve standalone llama-server'i ayni anda aktif tutmayin. Ikisi de ayni
+GPU/VRAM icin yaristiginda hiz ve stabilite bozulabilir. Hangi backend'in
+kullanilacagini `config_vlm.yaml` icindeki `backend: lmstudio` veya
+`backend: llama` satiri belirler. Secilen backend'i gercekten acmak/kapatmak
+icin tek giris noktasi:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/use_vlm_backend.ps1 -Backend status
+powershell -ExecutionPolicy Bypass -File scripts/use_vlm_backend.ps1 -Backend lmstudio
+powershell -ExecutionPolicy Bypass -File scripts/use_vlm_backend.ps1 -Backend llama
+```
 
 ## LM Studio Hazirligi
 
@@ -20,53 +32,50 @@ http://localhost:1234/v1
 Model vision desteklemiyorsa VLM taramasi goruntu girdisi hatasi kaydeder ve
 kullaniciya log ile bildirir.
 
-## Ornek Config
+## VLM-only Config
 
-`config.local.yaml` varsa `python archaeo_detect.py` onu kullanir; yoksa
-`config.yaml` kullanilir. VLM varsayilan olarak kapali gelir.
+`vlm_detect.py` IDE'den argumansiz calistirilirsa once `config_vlm.local.yaml`,
+yoksa `config_vlm.yaml` dosyasini okur. Bu repo icin onerilen VLM-only akista
+backend secimi tek dosyadadir:
 
 ```yaml
-enable_vlm: true
-vlm_base_url: "http://localhost:1234/v1"
-vlm_api_key: "lm-studio"
-vlm_model: "auto"
-vlm_tile: 1024
-vlm_overlap: 256
-vlm_views: "auto"
-vlm_gsd_m: 0.30
-vlm_confidence_threshold: 0.60
-vlm_max_tiles: 30
-vlm_export_every: 50
-vlm_resume: true
-vlm_timeout: 120
-vlm_temperature: 0.0
+backend: lmstudio   # lmstudio | llama
+
+backends:
+  lmstudio:
+    base_url: "http://127.0.0.1:1234"
+    api_key: "lm-studio"
+    tile: 1024
+    overlap: 256
+  llama:
+    base_url: "http://127.0.0.1:18080"
+    api_key: "llama-server"
+    tile: 768
+    overlap: 192
 ```
 
-Kucuk deneme icin `vlm_max_tiles: 30` kullanin. Tum raster icin `0` sinirsiz
-anlamina gelir.
+Kucuk deneme icin `max_tiles: 30` kullanin. Tum raster icin `0` sinirsiz
+anlamina gelir. `--backend llama` CLI argumani config'teki `backend` secimini
+gecici olarak ezebilir.
 
 ## Ornek CLI
 
 ```bash
-python archaeo_detect.py \
-  --enable-vlm \
-  --vlm-model auto \
-  --vlm-views auto \
-  --vlm-max-tiles 30 \
-  --vlm-export-every 50 \
-  --vlm-resume
+python vlm_detect.py --config config_vlm.yaml --max-tiles 30
 ```
 
 CLI argumanlari YAML degerlerini override eder. CLI argumani vermek zorunlu
-degildir; YAML icinde `enable_vlm: true` yeterlidir.
+degildir; YAML icinde `backend` ve ilgili profil yeterlidir.
 
-`vlm_model: "auto"` LM Studio `/v1/models` listesinden o an yuklu modeli alir.
+`model: "auto"` OpenAI uyumlu `/v1/models` listesinden uygun modeli alir.
 Tek model yukluyse dogrudan onu kullanir. Birden fazla model yukluyse ilk modeli
 secer ve log'a uyari yazar. Belirli bir modele sabitlemek icin model adini acik
 yazin:
 
 ```yaml
-vlm_model: "qwen2.5-vl-7b-instruct"
+backends:
+  lmstudio:
+    model: "qwen2.5-vl-7b-instruct"
 ```
 
 LM Studio arayuzundeki adres `http://127.0.0.1:8081` gibi `/v1` olmadan
@@ -91,26 +100,26 @@ Bu repo icin hazir baslatma scripti:
 powershell -ExecutionPolicy Bypass -File scripts/start_llama_server_gemma4.ps1
 ```
 
-Script varsayilan olarak LM Studio model klasorundeki
-`lmstudio-community/gemma-4-26B-A4B-it-GGUF` modelini ve mmproj dosyasini
-kullanir, llama-server'i `http://127.0.0.1:8080/v1` adresinde baslatir ve
-goruntu token sayisini sabitler:
+Script varsayilan olarak LM Studio model klasorundeki Gemma 4 GGUF ve mmproj
+dosyalarina isaret eder; gerekirse `-ModelPath` ve `-MmprojPath` ile ezebilirsiniz.
+llama-server'i `http://127.0.0.1:18080/v1` adresinde baslatir ve goruntu token
+sayisini sabitler:
 
 ```text
 --image-min-tokens 1120
 --image-max-tokens 1120
 ```
 
-Sonra VLM taramasini llama-server config'i ile calistirin:
+Sonra `config_vlm.yaml` icinde `backend: llama` yapip VLM taramasini calistirin:
 
 ```powershell
-python vlm_detect.py --config config_vlm_llama.yaml
+python vlm_detect.py --config config_vlm.yaml
 ```
 
 Not: LM Studio'da model yukluyse VRAM dolu olabilir. llama-server'i baslatmadan
 once LM Studio modelini unload etmek veya LM Studio'yu kapatmak gerekebilir.
-`config_vlm_llama.yaml` icinde `reload_every_tiles: 0` tutulur; periyodik
-unload/load yalnizca LM Studio native API icin desteklenir.
+`config_vlm.yaml` icindeki `backends.llama.reload_every_tiles: 0` tutulur;
+periyodik unload/load yalnizca LM Studio native API icin desteklenir.
 
 ## `vlm_views: auto`
 

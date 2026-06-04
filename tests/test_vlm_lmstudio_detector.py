@@ -98,6 +98,26 @@ def test_lmstudio_reload_unloads_then_loads_model(monkeypatch):
     ]
 
 
+def test_non_lmstudio_backend_does_not_call_native_reload(monkeypatch):
+    calls = []
+
+    def fake_post(config, endpoint, payload):
+        calls.append((endpoint, payload))
+        raise AssertionError("native LM Studio API should not be called")
+
+    monkeypatch.setattr(vlm, "_post_lmstudio_native_json", fake_post)
+
+    config = vlm.VlmLmStudioConfig(
+        backend="llama",
+        base_url="http://127.0.0.1:18080/v1",
+        model="vision-model",
+        reload_every_tiles=1,
+    )
+
+    assert vlm._reload_lmstudio_model(config, logger=vlm.LOGGER) is None
+    assert calls == []
+
+
 def test_prompt_includes_configured_gsd_scale():
     prompt = vlm._build_prompt(
         "rgb_only",

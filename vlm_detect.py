@@ -35,6 +35,7 @@ from vlm_lmstudio_detector import (
     VlmOutputPaths,
     _default_stage1_guidance,
     _default_stage2_guidance,
+    _normalize_openai_base_url,
     run_vlm_lmstudio_detection,
     _write_candidate_outputs,
     _candidate_record_lists,
@@ -84,6 +85,7 @@ VLM_KEY_ALIASES = {
     "vlm_featureless_std_threshold": "featureless_std_threshold",
     "vlm_cross_tile_iou_threshold": "cross_tile_iou_threshold",
     "vlm_batch": "batch",
+    "vlm_max_tokens": "max_tokens",
 }
 
 
@@ -118,6 +120,7 @@ class StandaloneVlmConfig:
     cross_tile_iou_threshold: float = 0.5
     batch: bool = False
     backend: str = "lmstudio"
+    max_tokens: int = 512
 
 
 def default_config_path() -> str:
@@ -204,7 +207,7 @@ def _resolve_path_value(raw: Any, base_dir: Path) -> Any:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="VLM-only archaeological candidate scan with LM Studio.",
+        description="VLM-only archaeological candidate scan with an OpenAI-compatible local VLM backend.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--config", default=default_config_path(), help="VLM YAML config path.")
@@ -217,9 +220,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-prefix", dest="out_prefix", help="Output base name or prefix.")
     parser.add_argument("--output-root", dest="output_root", help="Root output directory.")
     parser.add_argument("--bands", dest="bands", help="Band spec: auto, 1,2,3, or 1,2,3,4,5.")
-    parser.add_argument("--base-url", "--vlm-base-url", dest="base_url", help="LM Studio base URL.")
-    parser.add_argument("--api-key", "--vlm-api-key", dest="api_key", help="LM Studio API key.")
-    parser.add_argument("--model", "--vlm-model", dest="model", help="LM Studio model name or auto.")
+    parser.add_argument("--base-url", "--vlm-base-url", dest="base_url", help="OpenAI-compatible VLM base URL.")
+    parser.add_argument("--api-key", "--vlm-api-key", dest="api_key", help="OpenAI-compatible VLM API key.")
+    parser.add_argument("--model", "--vlm-model", dest="model", help="VLM model name or auto.")
     parser.add_argument("--tile", "--vlm-tile", dest="tile", type=int, help="Tile size in pixels.")
     parser.add_argument("--overlap", "--vlm-overlap", dest="overlap", type=int, help="Tile overlap in pixels.")
     parser.add_argument("--views", "--vlm-views", dest="views", help="VLM views: auto or CSV.")
@@ -277,7 +280,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--vlm-reload-every-tiles",
         dest="reload_every_tiles",
         type=int,
-        help="Unload/load LM Studio model every N new tiles; 0 disabled.",
+        help="Unload/load LM Studio model every N new tiles; ignored for non-LM Studio backends; 0 disabled.",
     )
     parser.add_argument(
         "--reload-pause-seconds",
@@ -288,6 +291,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout", "--vlm-timeout", dest="timeout", type=int, help="API timeout seconds.")
     parser.add_argument("--temperature", "--vlm-temperature", dest="temperature", type=float, help="Chat temperature.")
+    parser.add_argument("--max-tokens", "--vlm-max-tokens", dest="max_tokens", type=int, help="Maximum output tokens for each VLM response.")
     parser.add_argument("--log-level", dest="log_level", help="Logging level.")
     return parser
 
@@ -517,13 +521,15 @@ def _validate_startup_preconditions(input_path: Path, config: StandaloneVlmConfi
             f"vlm_base_url gecerli bir HTTP/HTTPS URL olmali, alindi: {config.base_url!r}"
         )
 
-    models_url = str(config.base_url).rstrip("/") + "/v1/models"
+    models_url = _normalize_openai_base_url(config.base_url).rstrip("/") + "/models"
     try:
         req = urllib.request.Request(models_url, headers={"Accept": "application/json"})
         urllib.request.urlopen(req, timeout=3)
     except Exception as exc:
+        backend_label = str(config.backend or "openai-compatible")
         LOGGER.warning(
-            "LM Studio sunucusuna erisilemedi (%s): %s — sunucu hazir degil mi?",
+            "%s VLM sunucusuna erisilemedi (%s): %s — sunucu hazir degil mi?",
+            backend_label,
             models_url,
             exc,
         )
@@ -653,6 +659,7 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                 base_url=config.base_url,
                 api_key=config.api_key,
                 model=config.model,
+                backend=config.backend,
                 tile=config.tile,
                 overlap=config.overlap,
                 views=config.views,
@@ -670,6 +677,7 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                 reload_pause_seconds=config.reload_pause_seconds,
                 timeout=config.timeout,
                 temperature=config.temperature,
+                max_tokens=config.max_tokens,
                 log_level=config.log_level,
                 featureless_std_threshold=config.featureless_std_threshold,
                 cross_tile_iou_threshold=config.cross_tile_iou_threshold,
@@ -690,6 +698,7 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                     base_url=tile_config.base_url,
                     api_key=tile_config.api_key,
                     model=tile_config.model,
+                    backend=tile_config.backend,
                     tile=tile_config.tile,
                     overlap=tile_config.overlap,
                     views=tile_config.views,
@@ -699,6 +708,7 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                     max_tiles=tile_config.max_tiles,
                     timeout=tile_config.timeout,
                     temperature=tile_config.temperature,
+                    max_tokens=tile_config.max_tokens,
                     export_every=tile_config.export_every,
                     resume=tile_config.resume,
                     resume_jsonl_path=sub_out_prefix.parent / f"{sub_out_prefix.name}_vlm_candidates.jsonl",
@@ -817,6 +827,7 @@ def run(config: StandaloneVlmConfig) -> int:
             base_url=config.base_url,
             api_key=config.api_key,
             model=config.model,
+            backend=config.backend,
             tile=config.tile,
             overlap=config.overlap,
             views=config.views,
@@ -826,6 +837,7 @@ def run(config: StandaloneVlmConfig) -> int:
             max_tiles=config.max_tiles,
             timeout=config.timeout,
             temperature=config.temperature,
+            max_tokens=config.max_tokens,
             export_every=config.export_every,
             resume=config.resume,
             resume_jsonl_path=resume_jsonl_path,

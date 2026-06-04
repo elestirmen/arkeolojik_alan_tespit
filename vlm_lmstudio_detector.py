@@ -159,7 +159,7 @@ REVIEW_SCHEMA_TEXT = """{
 
 
 class VlmConnectionError(RuntimeError):
-    """Raised when the LM Studio server cannot be reached."""
+    """Raised when the configured OpenAI-compatible VLM backend cannot be reached."""
 
 
 @dataclass(frozen=True)
@@ -188,6 +188,25 @@ class VlmLmStudioConfig:
     cross_tile_iou_threshold: float = 0.5
     retry_max_attempts: int = 3
     retry_base_delay_seconds: float = 1.0
+    max_tokens: int = 512
+    backend: str = "lmstudio"
+
+
+def _backend_name(config: VlmLmStudioConfig) -> str:
+    return str(getattr(config, "backend", "") or "openai").strip().lower()
+
+
+def _is_lmstudio_backend(config: VlmLmStudioConfig) -> bool:
+    return _backend_name(config) in {"lmstudio", "lm-studio", "lm_studio"}
+
+
+def _backend_label(config: VlmLmStudioConfig) -> str:
+    backend = _backend_name(config)
+    if backend in {"lmstudio", "lm-studio", "lm_studio"}:
+        return "LM Studio"
+    if backend in {"llama", "llama-server", "llama_server"}:
+        return "llama-server"
+    return "OpenAI-compatible VLM backend"
 
 
 @dataclass(frozen=True)
@@ -406,7 +425,7 @@ def run_vlm_lmstudio_detection(
                 cross_tile_iou_threshold=config.cross_tile_iou_threshold,
                 logger=log,
             )
-            log.info("VLM resume tum hedef tile'lari kapsiyor; LM Studio'ya yeni istek gonderilmedi.")
+            log.info("VLM resume tum hedef tile'lari kapsiyor; %s backend'ine yeni istek gonderilmedi.", _backend_label(config))
             return VlmDetectionSummary(
                 paths=paths,
                 total_tiles=total_tiles,
@@ -447,11 +466,17 @@ def run_vlm_lmstudio_detection(
             raise
 
         log.info("VLM modeli: %s", config.model)
-        if config.reload_every_tiles > 0:
+        lmstudio_reload_enabled = _is_lmstudio_backend(config) and config.reload_every_tiles > 0
+        if lmstudio_reload_enabled:
             log.info(
                 "VLM LM Studio model reload aktif: her %d yeni tile, pause=%.1fs",
                 config.reload_every_tiles,
                 float(config.reload_pause_seconds or 0.0),
+            )
+        elif config.reload_every_tiles > 0:
+            log.info(
+                "VLM model reload atlandi: backend=%s LM Studio native reload desteklemez.",
+                _backend_label(config),
             )
 
         with paths.jsonl.open("w", encoding="utf-8") as jsonl_fh, paths.raw_errors_jsonl.open(
@@ -663,8 +688,9 @@ def run_vlm_lmstudio_detection(
                             break_after_tile = True
                         elif _should_stop_scan_after_error(error_type, message):
                             log.error(
-                                "VLM taramasi gecici LM Studio hatasi nedeniyle durduruluyor; "
+                                "VLM taramasi gecici %s hatasi nedeniyle durduruluyor; "
                                 "model/sunucu duzeldikten sonra resume ile devam edin: %s",
+                                _backend_label(config),
                                 message,
                             )
                             break_after_tile = True
@@ -719,7 +745,7 @@ def run_vlm_lmstudio_detection(
                             paths.xlsx,
                         )
                     if (
-                        config.reload_every_tiles > 0
+                        lmstudio_reload_enabled
                         and tiles_since_reload >= int(config.reload_every_tiles)
                         and len(processed_tile_indexes) < total_tiles
                     ):
@@ -2032,6 +2058,9 @@ def _post_lmstudio_native_json(
 
 def _reload_lmstudio_model(config: VlmLmStudioConfig, *, logger: logging.Logger) -> Optional[str]:
     """Best-effort LM Studio native unload/load cycle. Returns the active instance id if successful."""
+    if not _is_lmstudio_backend(config):
+        logger.info("LM Studio native reload atlandi; backend=%s.", _backend_label(config))
+        return None
     model_id = str(config.model or "").strip()
     if not model_id or model_id.lower() in AUTO_MODEL_TOKENS:
         logger.warning("LM Studio model reload atlandi; cozulmus model adi yok: %r", config.model)
@@ -2063,19 +2092,20 @@ def _reload_lmstudio_model(config: VlmLmStudioConfig, *, logger: logging.Logger)
 def _resolve_lmstudio_model(client: Any, config: VlmLmStudioConfig, *, logger: logging.Logger) -> str:
     requested_model = str(config.model or "").strip()
     auto_model = requested_model.lower() in AUTO_MODEL_TOKENS
+    backend_label = _backend_label(config)
     try:
         models = client.models.list()
     except Exception as exc:
         if _looks_like_connection_error(exc):
             raise VlmConnectionError(
-                f"LM Studio sunucusuna baglanilamadi ({_normalize_openai_base_url(config.base_url)}). "
-                "LM Studio'da Local Server'i baslatin ve base URL'yi kontrol edin."
+                f"{backend_label} sunucusuna baglanilamadi ({_normalize_openai_base_url(config.base_url)}). "
+                "Backend'i baslatin ve base URL/port ayarini kontrol edin."
             ) from exc
         if auto_model:
             raise RuntimeError(
-                f"vlm_model={requested_model!r} icin LM Studio model listesi okunamadi: {exc}"
+                f"vlm_model={requested_model!r} icin {backend_label} model listesi okunamadi: {exc}"
             ) from exc
-        logger.warning("LM Studio model listesi okunamadi, verilen modelle devam edilecek: %s", exc)
+        logger.warning("%s model listesi okunamadi, verilen modelle devam edilecek: %s", backend_label, exc)
         return requested_model
 
     try:
@@ -2086,22 +2116,24 @@ def _resolve_lmstudio_model(client: Any, config: VlmLmStudioConfig, *, logger: l
     if auto_model:
         if not model_ids:
             raise RuntimeError(
-                "vlm_model='auto' icin LM Studio'da yuklu model bulunamadi. "
-                "Once vision destekli bir modeli Load Model ile yukleyin."
+                f"vlm_model='auto' icin {backend_label} model listesi bos. "
+                "Vision destekli backend/model yukleyin ve tekrar deneyin."
             )
         if len(model_ids) > 1:
             logger.warning(
-                "LM Studio birden fazla yuklu model dondurdu; ilk model kullanilacak: %s. Tum modeller: %s",
+                "%s birden fazla model dondurdu; ilk model kullanilacak: %s. Tum modeller: %s",
+                backend_label,
                 model_ids[0],
                 ", ".join(model_ids),
             )
         else:
-            logger.info("LM Studio aktif/yuklu modeli otomatik secildi: %s", model_ids[0])
+            logger.info("%s modeli otomatik secildi: %s", backend_label, model_ids[0])
         return model_ids[0]
 
     if model_ids and requested_model not in model_ids:
         logger.warning(
-            "VLM modeli LM Studio model listesinde gorunmedi: %s. Yuklu modeller: %s",
+            "VLM modeli %s model listesinde gorunmedi: %s. Modeller: %s",
+            backend_label,
             requested_model,
             ", ".join(model_ids),
         )
@@ -2140,6 +2172,7 @@ def _request_vlm_json(
             {"role": "user", "content": content},
         ],
         "temperature": float(config.temperature),
+        "max_tokens": int(config.max_tokens),
     }
     if use_response_format:
         kwargs["response_format"] = {"type": "json_object"}
@@ -2148,7 +2181,7 @@ def _request_vlm_json(
         response = client.chat.completions.create(**kwargs)
     except Exception as exc:
         if use_response_format and _looks_like_response_format_error(exc):
-            logger.warning("LM Studio response_format=json_object desteklemedi; prompt-only JSON ile tekrar deneniyor.")
+            logger.warning("%s response_format=json_object desteklemedi; prompt-only JSON ile tekrar deneniyor.", _backend_label(config))
             kwargs.pop("response_format", None)
             response = client.chat.completions.create(**kwargs)
             use_response_format = False
@@ -3125,23 +3158,24 @@ def _classify_exception(exc: Exception) -> str:
 
 def _friendly_exception_message(exc: Exception, config: VlmLmStudioConfig) -> str:
     error_type = _classify_exception(exc)
+    backend_label = _backend_label(config)
     if error_type == "connection_failed":
         return (
-            f"LM Studio sunucusuna baglanilamadi ({config.base_url}). "
-            "Local Server acik mi ve port dogru mu kontrol edin."
+            f"{backend_label} sunucusuna baglanilamadi ({config.base_url}). "
+            "Backend acik mi ve port dogru mu kontrol edin."
         )
     if error_type == "vision_unsupported":
         return (
             f"Model goruntu girdisini desteklemiyor olabilir ({config.model}). "
-            "LM Studio'da vision/multimodal destekli bir model yukleyin."
+            "Vision/multimodal destekli bir model yukleyin."
         )
     if error_type == "model_not_loaded":
         return (
-            f"LM Studio'da yuklu/aktif model bulunamadi ({config.model}). "
+            f"{backend_label} tarafinda yuklu/aktif model bulunamadi ({config.model}). "
             "Vision destekli modeli yukleyin; resume acikken tarama kaldigi yerden devam eder."
         )
     if error_type == "model_not_found":
-        return f"Model bulunamadi: {config.model}. LM Studio'da yuklu model adini kontrol edin."
+        return f"Model bulunamadi: {config.model}. {backend_label} model adini kontrol edin."
     if error_type == "invalid_json":
         return f"Model strict JSON dondurmedi: {str(exc)[:500]}"
     return str(exc)[:1000]

@@ -64,12 +64,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--max-tokens", type=int, default=512)
     p.add_argument("--runs", type=int, default=2, help="olculecek kosu sayisi (ilk isinma haric)")
     p.add_argument("--label", default="", help="ciktiyi etiketlemek icin (orn. ngl99)")
+    p.add_argument("--model", default="", help="model id; bos ise /v1/models'tan auto-resolve")
     args = p.parse_args(argv)
 
     base_url = args.base_url.rstrip("/")
     if not base_url.endswith("/v1"):
         base_url += "/v1"
-    model = _resolve_model(base_url, args.api_key)
+    model = args.model.strip() or _resolve_model(base_url, args.api_key)
 
     prompt_text = "Analyze this tile for archaeological features. Return strict JSON."
     pf = Path(args.prompt_file)

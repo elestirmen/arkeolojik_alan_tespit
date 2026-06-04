@@ -1,8 +1,15 @@
-# VLM-only config for llama.cpp llama-server.
+# Eski uyumluluk dosyasi: ana/onerilen yol artik config_vlm.yaml icinde
+# backend: llama secmektir. Bu dosya dogrudan llama-server profiliyle calismak
+# isteyen eski komutlari kirmamak icin tutulur.
+#
+# VLM-only config for standalone llama.cpp llama-server.
 # Start the server first:
 #   powershell -ExecutionPolicy Bypass -File scripts/start_llama_server_gemma4.ps1
 # Then run:
 #   python vlm_detect.py --config config_vlm_llama.yaml
+#
+# LM Studio'yu ayni anda acik tutmayin; iki backend ayni GPU/VRAM icin
+# yaristiginda hiz ve stabilite bozulur.
 
 input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya"
 batch: true
@@ -12,9 +19,10 @@ output_root: "workspace/ciktilar"
 
 bands: "auto"
 
-base_url: "http://127.0.0.1:8080"
+backend: llama
+base_url: "http://127.0.0.1:18080"
 api_key: "llama-server"
-model: "auto"
+model: "gemma-4-26b-a4b-it-uncensored-heretic"
 
 tile: 768
 overlap: 192
@@ -36,8 +44,9 @@ resume: true
 reload_every_tiles: 0
 reload_pause_seconds: 0
 
-timeout: 240
+timeout: 900
 temperature: 0.0
+max_tokens: 512
 log_level: "INFO"
 
 featureless_std_threshold: 4.0
