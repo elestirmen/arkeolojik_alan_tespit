@@ -50,6 +50,9 @@ backends:
   llama:
     base_url: "http://127.0.0.1:18080"
     api_key: "llama-server"
+    image_tokens: 1120
+    auto_start_backend: true
+    backend_startup_timeout_seconds: 180
     tile: 768
     overlap: 192
 ```
@@ -102,15 +105,21 @@ powershell -ExecutionPolicy Bypass -File scripts/start_llama_server_gemma4.ps1
 
 Script varsayilan olarak LM Studio model klasorundeki Gemma 4 GGUF ve mmproj
 dosyalarina isaret eder; gerekirse `-ModelPath` ve `-MmprojPath` ile ezebilirsiniz.
-llama-server'i `http://127.0.0.1:18080/v1` adresinde baslatir ve goruntu token
-sayisini sabitler:
+`use_vlm_backend.ps1 -Backend llama`, `config_vlm.yaml` icindeki
+`backends.llama.image_tokens` degerini okuyup baslatma scriptine `-ImageTokens`
+olarak gecirir. llama-server'i `http://127.0.0.1:18080/v1` adresinde baslatir
+ve goruntu token sayisini su flag'lere yazar:
 
 ```text
 --image-min-tokens 1120
 --image-max-tokens 1120
 ```
 
-Sonra `config_vlm.yaml` icinde `backend: llama` yapip VLM taramasini calistirin:
+`image_tokens` degerini `1536` veya `2048` gibi daha yuksek bir degere almak
+daha ayrintili gorsel tokenization ister; view sayisi, context ve VRAM maliyeti
+artar. `auto_start_backend: true` iken `vlm_detect.py`, `backend: llama`
+seciliyse ve `http://127.0.0.1:18080/v1/models` kapaliysa llama-server'i ayri
+bir PowerShell penceresinde otomatik baslatir. Sonra VLM taramasini calistirin:
 
 ```powershell
 python vlm_detect.py --config config_vlm.yaml

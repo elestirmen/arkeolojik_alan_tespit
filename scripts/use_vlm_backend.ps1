@@ -6,10 +6,20 @@ param(
     [switch]$AllowOtherBackend,
     [int]$LmStudioPort = 1234,
     [int]$LlamaPort = 18080,
-    [string]$LlamaDir = "C:\llama"
+    [string]$LlamaDir = "C:\llama",
+    [string]$ConfigPath = "",
+    [int]$ImageTokens = 0
 )
 
 $ErrorActionPreference = "Stop"
+$ScriptDir = $PSScriptRoot
+if (-not $ScriptDir) {
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+$RepoRoot = Split-Path -Parent $ScriptDir
+if (-not $ConfigPath) {
+    $ConfigPath = Join-Path $RepoRoot "config_vlm.yaml"
+}
 
 function Get-VlmProcesses {
     $items = @()
@@ -81,6 +91,67 @@ function Show-VlmStatus {
             Write-Host "$($entry.Name): not reachable $($entry.Url)"
         }
     }
+
+    $configImageTokens = Get-LlamaImageTokensFromConfig -Path $ConfigPath
+    if ($null -ne $configImageTokens) {
+        Write-Host "config_vlm llama image_tokens: $configImageTokens ($ConfigPath)"
+    } else {
+        Write-Host "config_vlm llama image_tokens: not set ($ConfigPath)"
+    }
+}
+
+function Get-LlamaImageTokensFromConfig {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    $lines = Get-Content -LiteralPath $Path
+    $inBackends = $false
+    $inLlamaProfile = $false
+    $rootValue = $null
+
+    foreach ($line in $lines) {
+        $clean = ($line -replace "\s+#.*$", "").TrimEnd()
+
+        if (-not $inBackends -and $clean -match "^\s*image_tokens\s*:\s*['""]?([0-9]+)['""]?\s*$") {
+            $rootValue = [int]$Matches[1]
+            continue
+        }
+
+        if ($clean -match "^backends\s*:") {
+            $inBackends = $true
+            $inLlamaProfile = $false
+            continue
+        }
+
+        if (-not $inBackends) {
+            continue
+        }
+
+        if ($clean -match "^\S") {
+            $inBackends = $false
+            $inLlamaProfile = $false
+            continue
+        }
+
+        if ($clean -match "^\s{2}llama\s*:") {
+            $inLlamaProfile = $true
+            continue
+        }
+
+        if ($clean -match "^\s{2}\S[^:]*:") {
+            $inLlamaProfile = $false
+            continue
+        }
+
+        if ($inLlamaProfile -and $clean -match "^\s{4}image_tokens\s*:\s*['""]?([0-9]+)['""]?\s*$") {
+            return [int]$Matches[1]
+        }
+    }
+
+    return $rootValue
 }
 
 function Start-LmStudioServer {
@@ -102,12 +173,26 @@ function Start-LmStudioServer {
 }
 
 function Start-StandaloneLlama {
-    $script = Join-Path $PSScriptRoot "start_llama_server_gemma4.ps1"
+    $script = Join-Path $ScriptDir "start_llama_server_gemma4.ps1"
     if (-not (Test-Path -LiteralPath $script)) {
         throw "Launcher bulunamadi: $script"
     }
+
+    $resolvedImageTokens = $ImageTokens
+    if ($resolvedImageTokens -le 0) {
+        $configImageTokens = Get-LlamaImageTokensFromConfig -Path $ConfigPath
+        if ($null -ne $configImageTokens -and [int]$configImageTokens -gt 0) {
+            $resolvedImageTokens = [int]$configImageTokens
+        }
+    }
+
     Write-Host "Starting standalone llama-server on port $LlamaPort..."
-    & $script -LlamaDir $LlamaDir -Port $LlamaPort
+    if ($resolvedImageTokens -gt 0) {
+        Write-Host "Using image_tokens=$resolvedImageTokens from $(if ($ImageTokens -gt 0) { 'CLI' } else { $ConfigPath })"
+        & $script -LlamaDir $LlamaDir -Port $LlamaPort -ImageTokens $resolvedImageTokens
+    } else {
+        & $script -LlamaDir $LlamaDir -Port $LlamaPort
+    }
 }
 
 switch ($Backend) {

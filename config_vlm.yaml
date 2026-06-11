@@ -5,14 +5,15 @@
 #
 # IDE'den argumansiz calistirinca vlm_detect.py bu dosyayi okur.
 # Backend degistirmek icin sadece asagidaki satiri lmstudio veya llama yapin.
-# Sonra ayni backend'i gercekten acmak/kapatmak icin:
+# llama profilinde auto_start_backend true ise vlm_detect.py server kapaliysa acar.
+# Manuel durum/acma/kapatma icin:
 #   powershell -ExecutionPolicy Bypass -File scripts/use_vlm_backend.ps1 -Backend status
 #   powershell -ExecutionPolicy Bypass -File scripts/use_vlm_backend.ps1 -Backend lmstudio
 #   powershell -ExecutionPolicy Bypass -File scripts/use_vlm_backend.ps1 -Backend llama
 #
 # Iki backend'i ayni anda acik tutmak VRAM/performans sorunlarina yol acabilir.
 
-backend: lmstudio
+backend: llama
 
 backends:
   lmstudio:
@@ -29,6 +30,9 @@ backends:
     base_url: "http://127.0.0.1:18080"     # scripts/start_llama_server_gemma4.ps1 varsayilani
     api_key: "llama-server"
     model: "gemma-4-26b-a4b-it-uncensored-heretic"
+    image_tokens: 1120                     # llama-server --image-min/max-tokens; use_vlm_backend.ps1 okur
+    auto_start_backend: true               # vlm_detect.py calisinca llama-server kapaliysa otomatik acar
+    backend_startup_timeout_seconds: 180
     tile: 768
     overlap: 192
     timeout: 900

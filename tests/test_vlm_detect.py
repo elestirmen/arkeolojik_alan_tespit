@@ -100,6 +100,9 @@ def test_backend_profile_override_keeps_llama_values_isolated(tmp_path: Path):
                 '    base_url: "http://127.0.0.1:18080"',
                 '    api_key: "llama-server"',
                 '    model: "llama-model"',
+                "    image_tokens: 1536",
+                "    auto_start_backend: true",
+                "    backend_startup_timeout_seconds: 180",
                 "    tile: 768",
                 "    reload_every_tiles: 0",
                 "    reload_timeout_seconds: 9",
@@ -115,6 +118,9 @@ def test_backend_profile_override_keeps_llama_values_isolated(tmp_path: Path):
     assert config.base_url == "http://127.0.0.1:18080"
     assert config.api_key == "llama-server"
     assert config.model == "llama-model"
+    assert config.image_tokens == 1536
+    assert config.auto_start_backend is True
+    assert config.backend_startup_timeout_seconds == 180
     assert config.tile == 768
     assert config.reload_every_tiles == 0
     assert config.reload_timeout_seconds == 9
@@ -132,6 +138,7 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
                 'prompt_stage1_path: "prompts/from_yaml_stage1.txt"',
                 'prompt_stage2_path: "prompts/from_yaml_stage2.txt"',
                 "max_candidates_per_tile: 2",
+                "image_tokens: 1120",
             ]
         ),
         encoding="utf-8",
@@ -155,6 +162,11 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
             "4",
             "--max-tokens",
             "256",
+            "--image-tokens",
+            "2048",
+            "--auto-start-backend",
+            "--backend-startup-timeout-seconds",
+            "240",
         ]
     )
     config = vlm_detect.build_config_from_args(args)
@@ -164,6 +176,9 @@ def test_cli_overrides_vlm_config_values(tmp_path: Path):
     assert config.source_kind == "hillshade"
     assert config.max_candidates_per_tile == 4
     assert config.max_tokens == 256
+    assert config.image_tokens == 2048
+    assert config.auto_start_backend is True
+    assert config.backend_startup_timeout_seconds == 240
     assert config.prompt_stage1_path == str((Path.cwd() / "cli_stage1.txt").resolve(strict=False))
     assert config.prompt_stage2_path == str((Path.cwd() / "cli_stage2.txt").resolve(strict=False))
 
@@ -176,6 +191,16 @@ def test_yaml_null_max_tokens_preserves_omitted_request_behavior(tmp_path: Path)
     config = vlm_detect.build_config_from_args(args)
 
     assert config.max_tokens is None
+
+
+def test_legacy_vlm_image_tokens_key_is_accepted(tmp_path: Path):
+    cfg_path = tmp_path / "config_vlm.yaml"
+    cfg_path.write_text("vlm_image_tokens: 1536\n", encoding="utf-8")
+
+    args = vlm_detect.build_arg_parser().parse_args(["--config", str(cfg_path)])
+    config = vlm_detect.build_config_from_args(args)
+
+    assert config.image_tokens == 1536
 
 
 def test_yaml_reasoning_options_are_loaded(tmp_path: Path):
@@ -211,6 +236,43 @@ def test_startup_precondition_uses_normalized_openai_models_url(tmp_path: Path, 
     vlm_detect._validate_startup_preconditions(input_path, config)
 
     assert seen_urls == ["http://127.0.0.1:18080/v1/models"]
+
+
+def test_auto_start_llama_backend_waits_until_models_endpoint_is_ready(monkeypatch):
+    calls: list[str] = []
+    popen_calls: list[list[str]] = []
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            popen_calls.append(list(command))
+
+    def fake_probe(models_url, *, timeout=3.0):
+        calls.append(models_url)
+        if len(calls) == 1:
+            return RuntimeError("connection refused")
+        return None
+
+    monkeypatch.setattr(vlm_detect, "_probe_models_endpoint", fake_probe)
+    monkeypatch.setattr(vlm_detect.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(vlm_detect.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(vlm_detect, "_repo_root", lambda: Path.cwd())
+
+    config = vlm_detect.StandaloneVlmConfig(
+        backend="llama",
+        base_url="http://127.0.0.1:18080",
+        image_tokens=1536,
+        auto_start_backend=True,
+        config_path="config_vlm.yaml",
+    )
+
+    vlm_detect._ensure_backend_ready(config)
+
+    assert calls == ["http://127.0.0.1:18080/v1/models", "http://127.0.0.1:18080/v1/models"]
+    assert popen_calls
+    assert "-Backend" in popen_calls[0]
+    assert "llama" in popen_calls[0]
+    assert "-ImageTokens" in popen_calls[0]
+    assert "1536" in popen_calls[0]
 
 
 

@@ -11,7 +11,9 @@ import argparse
 import json
 import logging
 import re
+import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, fields
@@ -87,6 +89,7 @@ VLM_KEY_ALIASES = {
     "vlm_cross_tile_iou_threshold": "cross_tile_iou_threshold",
     "vlm_batch": "batch",
     "vlm_max_tokens": "max_tokens",
+    "vlm_image_tokens": "image_tokens",
     "vlm_reasoning_mode": "reasoning_mode",
     "vlm_thinking_mode": "reasoning_mode",
     "thinking_mode": "reasoning_mode",
@@ -127,6 +130,10 @@ class StandaloneVlmConfig:
     batch: bool = False
     backend: str = "lmstudio"
     max_tokens: Optional[int] = None
+    image_tokens: Optional[int] = None
+    auto_start_backend: bool = False
+    backend_startup_timeout_seconds: float = 120.0
+    config_path: Optional[str] = None
     reasoning_mode: str = "off"
     fail_on_reasoning_only: bool = True
 
@@ -308,6 +315,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", "--vlm-temperature", dest="temperature", type=float, help="Chat temperature.")
     parser.add_argument("--max-tokens", "--vlm-max-tokens", dest="max_tokens", type=int, help="Maximum output tokens for each VLM response.")
     parser.add_argument(
+        "--image-tokens",
+        "--vlm-image-tokens",
+        dest="image_tokens",
+        type=int,
+        help=(
+            "llama-server launcher hint for --image-min-tokens/--image-max-tokens. "
+            "The running backend must be started with the same value."
+        ),
+    )
+    parser.add_argument(
+        "--auto-start-backend",
+        dest="auto_start_backend",
+        action="store_true",
+        default=None,
+        help="Start the selected local backend automatically if /v1/models is not reachable.",
+    )
+    parser.add_argument(
+        "--no-auto-start-backend",
+        dest="auto_start_backend",
+        action="store_false",
+        default=None,
+        help="Do not auto-start the selected local backend.",
+    )
+    parser.add_argument(
+        "--backend-startup-timeout-seconds",
+        "--vlm-backend-startup-timeout-seconds",
+        dest="backend_startup_timeout_seconds",
+        type=float,
+        help="How long to wait for an auto-started backend to expose /v1/models.",
+    )
+    parser.add_argument(
         "--reasoning-mode",
         "--thinking-mode",
         "--vlm-reasoning-mode",
@@ -344,6 +382,7 @@ def build_config_from_args(args: argparse.Namespace) -> StandaloneVlmConfig:
         raw_config = _apply_backend_profile(raw_config, getattr(args, "backend", None))
         yaml_values = normalize_config_keys(raw_config)
         values.update(yaml_values)
+        values["config_path"] = str(yaml_path.resolve(strict=False))
         yaml_fields = set(yaml_values)
         yaml_dir = yaml_path.resolve(strict=False).parent
 
@@ -524,6 +563,94 @@ def resolve_vlm_band_indexes(input_path: Path, band_spec: str) -> Optional[Tuple
     return parsed
 
 
+def _backend_name(config: StandaloneVlmConfig) -> str:
+    return str(config.backend or "openai-compatible").strip().lower()
+
+
+def _is_llama_backend(config: StandaloneVlmConfig) -> bool:
+    return _backend_name(config) in {"llama", "llama-server", "llama_server"}
+
+
+def _models_url(config: StandaloneVlmConfig) -> str:
+    return _normalize_openai_base_url(config.base_url).rstrip("/") + "/models"
+
+
+def _probe_models_endpoint(models_url: str, *, timeout: float = 3.0) -> Optional[Exception]:
+    try:
+        req = urllib.request.Request(models_url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout):
+            return None
+    except Exception as exc:
+        return exc
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _start_llama_backend_process(config: StandaloneVlmConfig) -> None:
+    script_path = _repo_root() / "scripts" / "use_vlm_backend.ps1"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Backend baslatma scripti bulunamadi: {script_path}")
+
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script_path),
+        "-Backend",
+        "llama",
+    ]
+    if config.config_path:
+        command.extend(["-ConfigPath", str(config.config_path)])
+    if config.image_tokens is not None:
+        command.extend(["-ImageTokens", str(int(config.image_tokens))])
+
+    creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    LOGGER.info("llama-server otomatik baslatiliyor: %s", script_path)
+    subprocess.Popen(command, cwd=str(_repo_root()), creationflags=creationflags)
+
+
+def _ensure_backend_ready(config: StandaloneVlmConfig) -> None:
+    models_url = _models_url(config)
+    first_error = _probe_models_endpoint(models_url)
+    if first_error is None:
+        return
+
+    if not (config.auto_start_backend and _is_llama_backend(config)):
+        backend_label = str(config.backend or "openai-compatible")
+        LOGGER.warning(
+            "%s VLM sunucusuna erisilemedi (%s): %s - sunucu hazir degil mi?",
+            backend_label,
+            models_url,
+            first_error,
+        )
+        return
+
+    LOGGER.warning(
+        "llama-server erisilemiyor (%s): %s. Otomatik baslatma deneniyor.",
+        models_url,
+        first_error,
+    )
+    _start_llama_backend_process(config)
+
+    deadline = time.monotonic() + max(float(config.backend_startup_timeout_seconds), 1.0)
+    last_error: Optional[Exception] = first_error
+    while time.monotonic() < deadline:
+        time.sleep(2.0)
+        last_error = _probe_models_endpoint(models_url)
+        if last_error is None:
+            LOGGER.info("llama-server hazir: %s", models_url)
+            return
+
+    raise RuntimeError(
+        f"llama-server otomatik baslatildi ama {models_url} "
+        f"{config.backend_startup_timeout_seconds} saniye icinde hazir olmadi: {last_error}"
+    )
+
+
 def _validate_startup_preconditions(input_path: Path, config: StandaloneVlmConfig) -> None:
     """Çalışma başlamadan önce kritik ön koşulları doğrula; manifest yazılmadan hata fırlat."""
     if not input_path.exists():
@@ -557,6 +684,9 @@ def _validate_startup_preconditions(input_path: Path, config: StandaloneVlmConfi
         raise ValueError(
             f"vlm_base_url gecerli bir HTTP/HTTPS URL olmali, alindi: {config.base_url!r}"
         )
+
+    _ensure_backend_ready(config)
+    return
 
     models_url = _normalize_openai_base_url(config.base_url).rstrip("/") + "/models"
     try:
@@ -716,6 +846,10 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                 timeout=config.timeout,
                 temperature=config.temperature,
                 max_tokens=config.max_tokens,
+                image_tokens=config.image_tokens,
+                auto_start_backend=config.auto_start_backend,
+                backend_startup_timeout_seconds=config.backend_startup_timeout_seconds,
+                config_path=config.config_path,
                 reasoning_mode=config.reasoning_mode,
                 fail_on_reasoning_only=config.fail_on_reasoning_only,
                 log_level=config.log_level,
