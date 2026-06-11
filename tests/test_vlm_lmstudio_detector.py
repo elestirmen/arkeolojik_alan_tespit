@@ -65,6 +65,35 @@ def test_lmstudio_native_api_base_url_is_derived_from_openai_base_url():
     assert vlm._lmstudio_native_api_base_url("http://127.0.0.1:8081/api/v1") == "http://127.0.0.1:8081/api/v1"
 
 
+def test_lmstudio_native_reload_request_uses_reload_timeout(monkeypatch):
+    timeouts = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        timeouts.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(vlm.urllib.request, "urlopen", fake_urlopen)
+
+    result = vlm._post_lmstudio_native_json(
+        vlm.VlmLmStudioConfig(timeout=240, reload_timeout_seconds=7.5),
+        "models/unload",
+        {"instance_id": "vision-model"},
+    )
+
+    assert result == {"ok": True}
+    assert timeouts == [7.5]
+
+
 def test_request_omits_max_tokens_when_configured_none():
     calls = []
 

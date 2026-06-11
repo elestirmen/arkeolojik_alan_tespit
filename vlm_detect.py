@@ -80,6 +80,7 @@ VLM_KEY_ALIASES = {
     "vlm_max_candidates_per_tile": "max_candidates_per_tile",
     "vlm_reload_every_tiles": "reload_every_tiles",
     "vlm_reload_pause_seconds": "reload_pause_seconds",
+    "vlm_reload_timeout_seconds": "reload_timeout_seconds",
     "vlm_timeout": "timeout",
     "vlm_temperature": "temperature",
     "vlm_featureless_std_threshold": "featureless_std_threshold",
@@ -117,6 +118,7 @@ class StandaloneVlmConfig:
     max_candidates_per_tile: int = 3
     reload_every_tiles: int = 250
     reload_pause_seconds: float = 5.0
+    reload_timeout_seconds: float = 15.0
     timeout: int = 120
     temperature: float = 0.0
     log_level: str = "INFO"
@@ -294,6 +296,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="reload_pause_seconds",
         type=float,
         help="Pause between LM Studio unload and load.",
+    )
+    parser.add_argument(
+        "--reload-timeout-seconds",
+        "--vlm-reload-timeout-seconds",
+        dest="reload_timeout_seconds",
+        type=float,
+        help="Timeout for each LM Studio native unload/load request.",
     )
     parser.add_argument("--timeout", "--vlm-timeout", dest="timeout", type=int, help="API timeout seconds.")
     parser.add_argument("--temperature", "--vlm-temperature", dest="temperature", type=float, help="Chat temperature.")
@@ -703,6 +712,7 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                 max_candidates_per_tile=config.max_candidates_per_tile,
                 reload_every_tiles=config.reload_every_tiles,
                 reload_pause_seconds=config.reload_pause_seconds,
+                reload_timeout_seconds=config.reload_timeout_seconds,
                 timeout=config.timeout,
                 temperature=config.temperature,
                 max_tokens=config.max_tokens,
@@ -749,6 +759,7 @@ def run_batch(config: StandaloneVlmConfig) -> int:
                     max_candidates_per_tile=tile_config.max_candidates_per_tile,
                     reload_every_tiles=tile_config.reload_every_tiles,
                     reload_pause_seconds=tile_config.reload_pause_seconds,
+                    reload_timeout_seconds=tile_config.reload_timeout_seconds,
                     featureless_std_threshold=tile_config.featureless_std_threshold,
                     cross_tile_iou_threshold=tile_config.cross_tile_iou_threshold,
                 ),
@@ -880,6 +891,7 @@ def run(config: StandaloneVlmConfig) -> int:
             max_candidates_per_tile=config.max_candidates_per_tile,
             reload_every_tiles=config.reload_every_tiles,
             reload_pause_seconds=config.reload_pause_seconds,
+            reload_timeout_seconds=config.reload_timeout_seconds,
             featureless_std_threshold=config.featureless_std_threshold,
             cross_tile_iou_threshold=config.cross_tile_iou_threshold,
         ),

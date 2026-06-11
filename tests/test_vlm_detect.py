@@ -102,6 +102,7 @@ def test_backend_profile_override_keeps_llama_values_isolated(tmp_path: Path):
                 '    model: "llama-model"',
                 "    tile: 768",
                 "    reload_every_tiles: 0",
+                "    reload_timeout_seconds: 9",
             ]
         ),
         encoding="utf-8",
@@ -116,6 +117,7 @@ def test_backend_profile_override_keeps_llama_values_isolated(tmp_path: Path):
     assert config.model == "llama-model"
     assert config.tile == 768
     assert config.reload_every_tiles == 0
+    assert config.reload_timeout_seconds == 9
 
 
 def test_cli_overrides_vlm_config_values(tmp_path: Path):

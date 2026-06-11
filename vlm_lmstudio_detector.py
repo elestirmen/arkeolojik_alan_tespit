@@ -188,6 +188,7 @@ class VlmLmStudioConfig:
     max_candidates_per_tile: int = DEFAULT_MAX_CANDIDATES_PER_TILE
     reload_every_tiles: int = 0
     reload_pause_seconds: float = 5.0
+    reload_timeout_seconds: float = 15.0
     featureless_std_threshold: float = 4.0
     cross_tile_iou_threshold: float = 0.5
     retry_max_attempts: int = 3
@@ -929,6 +930,8 @@ def _validate_config(config: VlmLmStudioConfig) -> None:
         raise ValueError("vlm_reload_every_tiles negatif olamaz.")
     if config.reload_pause_seconds < 0:
         raise ValueError("vlm_reload_pause_seconds negatif olamaz.")
+    if config.reload_timeout_seconds <= 0:
+        raise ValueError("vlm_reload_timeout_seconds pozitif olmali.")
     if not 0.0 <= config.confidence_threshold <= 1.0:
         raise ValueError("vlm_confidence_threshold 0-1 arasinda olmali.")
     if config.timeout <= 0:
@@ -2094,7 +2097,9 @@ def _post_lmstudio_native_json(
         headers["Authorization"] = f"Bearer {api_key}"
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=float(config.timeout)) as response:
+    reload_timeout = float(getattr(config, "reload_timeout_seconds", 15.0) or 15.0)
+    request_timeout = max(1.0, min(float(config.timeout), reload_timeout))
+    with urllib.request.urlopen(request, timeout=request_timeout) as response:
         body = response.read().decode("utf-8")
     if not body.strip():
         return {}
