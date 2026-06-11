@@ -2056,6 +2056,7 @@ def _make_openai_client(config: VlmLmStudioConfig) -> Any:
         base_url=_normalize_openai_base_url(config.base_url),
         api_key=str(config.api_key or "lm-studio"),
         timeout=float(config.timeout),
+        max_retries=0,
     )
 
 
@@ -2236,8 +2237,12 @@ def _request_vlm_json(
         if use_response_format and _looks_like_response_format_error(exc):
             logger.warning("%s response_format=json_object desteklemedi; prompt-only JSON ile tekrar deneniyor.", _backend_label(config))
             kwargs.pop("response_format", None)
-            response = client.chat.completions.create(**kwargs)
             use_response_format = False
+            try:
+                response = client.chat.completions.create(**kwargs)
+            except Exception as fallback_exc:
+                setattr(fallback_exc, "_vlm_use_response_format", False)
+                raise
         else:
             raise
 
@@ -2320,6 +2325,9 @@ def _request_vlm_json_with_retry(
                 logger=logger,
             )
         except Exception as exc:
+            response_format_hint = getattr(exc, "_vlm_use_response_format", None)
+            if response_format_hint is not None:
+                use_response_format = bool(response_format_hint)
             if not _is_retryable_api_exception(exc) or attempt >= max_attempts - 1:
                 raise
             last_exc = exc

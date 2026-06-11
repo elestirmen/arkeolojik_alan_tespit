@@ -1,4 +1,5 @@
 import json
+import sys
 from contextlib import ExitStack
 from pathlib import Path
 from zipfile import ZipFile
@@ -92,6 +93,70 @@ def test_lmstudio_native_reload_request_uses_reload_timeout(monkeypatch):
 
     assert result == {"ok": True}
     assert timeouts == [7.5]
+
+
+def test_openai_client_disables_sdk_retries(monkeypatch):
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class FakeOpenAiModule:
+        OpenAI = FakeOpenAI
+
+    monkeypatch.setitem(sys.modules, "openai", FakeOpenAiModule)
+
+    client = vlm._make_openai_client(vlm.VlmLmStudioConfig(base_url="http://127.0.0.1:1234", timeout=240))
+
+    assert isinstance(client, FakeOpenAI)
+    assert captured["base_url"] == "http://127.0.0.1:1234/v1"
+    assert captured["timeout"] == 240.0
+    assert captured["max_retries"] == 0
+
+
+def test_response_format_fallback_survives_timeout_retry():
+    calls = []
+
+    class Message:
+        content = '{"candidates":[]}'
+
+    class Choice:
+        message = Message()
+
+    class Response:
+        choices = [Choice()]
+
+    class Completions:
+        @staticmethod
+        def create(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("response_format json_object is not supported")
+            if len(calls) == 2:
+                raise TimeoutError("Request timed out.")
+            return Response()
+
+    class Chat:
+        completions = Completions()
+
+    class Client:
+        chat = Chat()
+
+    response_text, use_response_format = vlm._request_vlm_json_with_retry(
+        client=Client(),
+        config=vlm.VlmLmStudioConfig(),
+        prompt="Return JSON.",
+        rendered_views=[],
+        use_response_format=True,
+        logger=vlm.LOGGER,
+    )
+
+    assert response_text == '{"candidates":[]}'
+    assert use_response_format is False
+    assert "response_format" in calls[0]
+    assert "response_format" not in calls[1]
+    assert "response_format" not in calls[2]
 
 
 def test_request_omits_max_tokens_when_configured_none():
