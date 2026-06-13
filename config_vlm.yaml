@@ -13,13 +13,13 @@
 #
 # Iki backend'i ayni anda acik tutmak VRAM/performans sorunlarina yol acabilir.
 
-backend: llama
+backend: lmstudio
 
 backends:
   lmstudio:
     base_url: "http://127.0.0.1:1234"      # LM Studio: lms server start --port 1234
     api_key: "lm-studio"
-    model: "gemma-4-26b-a4b-it-uncensored-heretic"
+    model: "loaded"   # LM Studio'da su an yuklu olan VLM modelini kullan
     tile: 768
     overlap: 192
     timeout: 240
@@ -64,7 +64,7 @@ export_every: 150
 resume: true
 
 temperature: 0.0
-max_tokens: 512                  # LM Studio'da uzun dusunmeyi sinirlar; eski davranisi denemek icin null yazilabilir
+max_tokens: 2048                 # Yuklu LM Studio modeli reasoning yazsa bile final JSON'a gecsin
 reasoning_mode: "off"           # reasoning/thinking icin niyet: off | on | auto
 fail_on_reasoning_only: true     # content bos, reasoning dolu gelirse taramayi erken durdur
 log_level: "INFO"

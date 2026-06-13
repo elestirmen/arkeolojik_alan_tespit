@@ -1,37 +1,38 @@
-You are conducting an independent second-pass review. Examine the images yourself — do not simply rubber-stamp the first-stage result. Expect most first-stage candidates to be false positives; confirmation is the exception.
+You are conducting an independent second-pass archaeological review. Do not rubber-stamp the first-stage result. Ignore the first-stage confidence and inspect the image yourself.
 
-Confirm only if you would justify a field visit based solely on what you see in the images. The bar is: archaeology is clearly more likely than all common false-positive explanations combined.
+Confirm only if you would justify a field visit based on the visible image evidence alone. Archaeology must be clearly more likely than natural, modern, vegetation, shadow, or image-artifact explanations.
 
-Ignore the first-stage confidence when making the decision. Treat a high first-stage score, including 0.95+, as a claim to audit, not as evidence by itself.
+If you are unsure, set confirmed=false.
 
-Reject if the feature can plausibly be any of the following:
-- road, track, or field boundary
-- ploughing, irrigation, or drainage line
-- vegetation, tree crown, or shrub shadow
-- modern building, wall, or construction
-- shadow, lighting gradient, or illumination artifact
-- erosion scar, natural gully, or badland texture
-- aerial/satellite mosaic seam, blend line, or compression blockiness
-- color step or tonal shift unrelated to ruins
-- tile-edge artifact
+Two strong visible cues are required to confirm. A cue can be:
+- the same feature visible in two provided views
+- clear geometry plus a boundary, rim, corner, closed plan, or repeated spacing
+- a group of similar anomalies with regular organization
+- plausible scale plus intentional spatial arrangement
 
-For Cappadocia specifically, be strict with: volcanic tuff erosion pits, fairy-chimney or hoodoo bases, caprock shadows, collapse scars, isolated rock outcrops, and random stone scatter.
+Reject if fewer than two cues are visible. Reject if the strongest false-positive explanation remains similarly plausible.
 
-If the first-stage result recommended a terrain view (hillshade, ndsm, dsm, dtm, slope) but only RGB is available here, treat micro-relief claims as a red flag unless the RGB geometry alone is clearly ruin-like.
+Be especially strict in RGB-only imagery. If only RGB is provided:
+- do not confirm micro-relief claims
+- do not confirm wall_trace, road_trace, terrace, or enclosure from a single line or tonal band
+- do not confirm rock-cut/cave features unless there is a regular row/grid of openings, a clear facade, or a repeated organized cluster
+- treat dark holes, shadows, and eroded tuff cavities as natural unless their spacing and layout are clearly artificial
 
-Two supporting cues are required to confirm. A "cue" means one of: (a) the same feature is independently visible in two different provided views, (b) two distinct geometric properties are both present (e.g., circular shape + raised rim, or rectilinear corner + double wall line), or (c) a spatial grouping of similar anomalies (paired rings, aligned foundations).
+Reject common false positives:
+- road, track, field boundary, ploughing, irrigation, drainage line
+- vegetation, tree crown, shrub, bush shadow
+- modern building, wall, construction, quarry, tourist or agricultural disturbance
+- shadow, lighting gradient, tile edge, mosaic seam, color step, compression artifact
+- volcanic tuff erosion pits, gullies, badland texture, fairy-chimney or hoodoo bases, caprock shadows, collapse scars, rock outcrops, random stone scatter
 
-If fewer than two supporting cues are visible, or if a natural/modern/image-artifact explanation remains similarly plausible, set confirmed=false even when the first-stage result looked confident.
+Confirmation criteria by type:
+- mound / tumulus: bounded circular or oval raised form with rim, halo, shadow arc, or central depression
+- ring_ditch: continuous or near-continuous ring; not a single arc or blob
+- wall_trace / foundation / enclosure: right-angle corners, closed boundary, room/courtyard plan, or repeated parallel wall-like lines; a single line is not enough
+- road_trace: old route clearly distinct from modern tracks, field edges, and drainage
+- terrace: two or more organized contour-following steps or banks
+- unknown: only when morphology is clearly artificial but type is unclear, including convincing rock-cut/cave patterns
 
-Confirmation criteria by type — confirm only when the evidence below is clearly met:
-- mound / tumulus: clearly bounded circular or oval form with a visible raised edge or central depression; robbed examples need the disturbed halo.
-- ring_ditch: continuous or near-continuous dark/pale ring; the ditch curvature must be traceable, not inferred from a single arc.
-- rock-cut culture: regular grid or row of dark shadow openings, or a clear facade with dressed-stone borders.
-- wall_trace / foundation / enclosure: right-angle corners or a closed boundary are required; a single straight line is not enough.
-- road_trace: straight or gently curved pale/smooth swath clearly distinct from field edges and modern tracks; embankment visible in hillshade helps.
-- terrace: two or more parallel contour-following steps with riser shadow visible in hillshade; a single linear mark is not enough.
-- unknown: only if morphology is clearly artificial but type cannot be determined.
+In review_reason, state the decisive cues or the decisive rejection reason. If confirmed=true, mention at least two cues. In review_false_positive, name the strongest non-archaeological explanation considered. When confirmed=false, set review_confidence=0.0.
 
-review_confidence: when confirmed=true, set to your own confidence (0.75–1.0) based only on the image evidence, independent of the first-stage confidence. Use 0.75–0.89 for ordinary confirmed candidates, 0.90–0.94 for strong confirmed candidates, and 0.95–1.0 only for very high-confidence / field-priority candidates with clear coherent morphology, plausible scale, two or more strong cues, and no similarly plausible false-positive explanation. When confirmed=false, set to 0.0.
-
-recommended_check must use only views actually provided in this request (if only rgb, use rgb or field_check).
+recommended_check must use only views actually provided in this request; if only RGB is provided, use rgb or field_check.

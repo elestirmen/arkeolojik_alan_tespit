@@ -37,22 +37,45 @@ def test_auto_views_follow_available_bands():
     ) == ["rgb", "dsm"]
 
 
-def test_auto_model_uses_loaded_lmstudio_model():
-    class Model:
-        id = "loaded-vision-model"
-
-    class Models:
-        data = [Model()]
-
+def test_auto_model_uses_loaded_lmstudio_model(monkeypatch):
     class Client:
         class models:
             @staticmethod
             def list():
-                return Models()
+                raise AssertionError("/v1/models should not be needed when LM Studio reports a loaded model")
+
+    def fake_native_models(config, endpoint):
+        assert endpoint == "models"
+        return {
+            "models": [
+                {"key": "downloaded-vision-model", "type": "llm", "loaded_instances": [], "capabilities": {"vision": True}},
+                {
+                    "key": "loaded-vision-model",
+                    "type": "llm",
+                    "loaded_instances": [{"id": "loaded-vision-model"}],
+                    "capabilities": {"vision": True},
+                },
+            ]
+        }
+
+    monkeypatch.setattr(vlm, "_get_lmstudio_native_json", fake_native_models)
 
     config = vlm.VlmLmStudioConfig(model="auto")
 
     assert vlm._resolve_lmstudio_model(Client(), config, logger=vlm.LOGGER) == "loaded-vision-model"
+
+
+def test_loaded_model_token_requires_loaded_lmstudio_model(monkeypatch):
+    class Client:
+        class models:
+            @staticmethod
+            def list():
+                raise AssertionError("strict loaded model selection should not fall back to /v1/models")
+
+    monkeypatch.setattr(vlm, "_get_lmstudio_native_json", lambda config, endpoint: {"models": []})
+
+    with pytest.raises(RuntimeError, match="yuklu VLM model bulunamadi"):
+        vlm._resolve_lmstudio_model(Client(), vlm.VlmLmStudioConfig(model="loaded"), logger=vlm.LOGGER)
 
 
 def test_base_url_without_v1_is_normalized():

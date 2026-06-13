@@ -2108,6 +2108,90 @@ def _post_lmstudio_native_json(
     return parsed if isinstance(parsed, dict) else {"response": parsed}
 
 
+def _get_lmstudio_native_json(config: VlmLmStudioConfig, endpoint: str) -> Dict[str, Any]:
+    base_url = _lmstudio_native_api_base_url(config.base_url)
+    url = f"{base_url}/{endpoint.lstrip('/')}"
+    headers = {}
+    api_key = str(config.api_key or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    reload_timeout = float(getattr(config, "reload_timeout_seconds", 15.0) or 15.0)
+    request_timeout = max(1.0, min(float(config.timeout), reload_timeout))
+    with urllib.request.urlopen(request, timeout=request_timeout) as response:
+        body = response.read().decode("utf-8")
+    if not body.strip():
+        return {}
+    parsed = json.loads(body)
+    return parsed if isinstance(parsed, dict) else {"response": parsed}
+
+
+def _model_supports_vision(model: Dict[str, Any]) -> bool:
+    model_type = str(model.get("type") or "").strip().lower()
+    if model_type in {"embedding", "embeddings"}:
+        return False
+    if model_type == "vlm":
+        return True
+    capabilities = model.get("capabilities")
+    if isinstance(capabilities, dict) and "vision" in capabilities:
+        return bool(capabilities.get("vision"))
+    return True
+
+
+def _lmstudio_loaded_model_ids(native_models: Dict[str, Any]) -> List[str]:
+    raw_models = native_models.get("models")
+    if raw_models is None:
+        raw_models = native_models.get("data")
+    if not isinstance(raw_models, list):
+        return []
+
+    loaded: List[str] = []
+    for item in raw_models:
+        if not isinstance(item, dict) or not _model_supports_vision(item):
+            continue
+
+        loaded_instances = item.get("loaded_instances")
+        if isinstance(loaded_instances, list) and loaded_instances:
+            for instance in loaded_instances:
+                if isinstance(instance, dict):
+                    model_id = str(instance.get("id") or item.get("key") or item.get("id") or "").strip()
+                else:
+                    model_id = str(instance or item.get("key") or item.get("id") or "").strip()
+                if model_id and model_id not in loaded:
+                    loaded.append(model_id)
+            continue
+
+        if str(item.get("state") or "").strip().lower() == "loaded":
+            model_id = str(item.get("id") or item.get("key") or "").strip()
+            if model_id and model_id not in loaded:
+                loaded.append(model_id)
+
+    return loaded
+
+
+def _resolve_lmstudio_loaded_model(config: VlmLmStudioConfig, *, logger: logging.Logger) -> Optional[str]:
+    if not _is_lmstudio_backend(config):
+        return None
+    try:
+        native_models = _get_lmstudio_native_json(config, "models")
+    except Exception as exc:
+        logger.warning("LM Studio native model durumu okunamadi; /v1/models listesine dusulecek: %s", exc)
+        return None
+
+    loaded_model_ids = _lmstudio_loaded_model_ids(native_models)
+    if not loaded_model_ids:
+        return None
+    if len(loaded_model_ids) > 1:
+        logger.warning(
+            "LM Studio birden fazla yuklu model dondurdu; ilki kullanilacak: %s. Tum yuklu modeller: %s",
+            loaded_model_ids[0],
+            ", ".join(loaded_model_ids),
+        )
+    else:
+        logger.info("LM Studio yuklu modeli secildi: %s", loaded_model_ids[0])
+    return loaded_model_ids[0]
+
+
 def _reload_lmstudio_model(config: VlmLmStudioConfig, *, logger: logging.Logger) -> Optional[str]:
     """Best-effort LM Studio native unload/load cycle. Returns the active instance id if successful."""
     if not _is_lmstudio_backend(config):
@@ -2143,8 +2227,20 @@ def _reload_lmstudio_model(config: VlmLmStudioConfig, *, logger: logging.Logger)
 
 def _resolve_lmstudio_model(client: Any, config: VlmLmStudioConfig, *, logger: logging.Logger) -> str:
     requested_model = str(config.model or "").strip()
-    auto_model = requested_model.lower() in AUTO_MODEL_TOKENS
+    requested_model_token = requested_model.lower()
+    auto_model = requested_model_token in AUTO_MODEL_TOKENS
     backend_label = _backend_label(config)
+
+    if auto_model:
+        loaded_model = _resolve_lmstudio_loaded_model(config, logger=logger)
+        if loaded_model:
+            return loaded_model
+        if requested_model_token in {"active", "current", "loaded"}:
+            raise RuntimeError(
+                f"vlm_model={requested_model!r} icin {backend_label} tarafinda yuklu VLM model bulunamadi. "
+                "LM Studio'da vision modeli yukleyin veya config'te acik model adi kullanin."
+            )
+
     try:
         models = client.models.list()
     except Exception as exc:
