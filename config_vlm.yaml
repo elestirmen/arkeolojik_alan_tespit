@@ -42,7 +42,9 @@ backends:
 # ===================== ORTAK AYARLAR =====================
 
 #input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya"
-input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/urgup_cevresi.tif"
+#input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/urgup_cevresi.tif"
+input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya/kapadokya_bing_map_3-3.tif"
+
 batch: false                      # klasordeki tum GeoTIFF'leri ayri tarayip birlestirir
 
 out_prefix: null
@@ -64,9 +66,9 @@ export_every: 150
 resume: true
 
 temperature: 0.0
-max_tokens: 2048                 # Yuklu LM Studio modeli reasoning yazsa bile final JSON'a gecsin
-reasoning_mode: "off"           # reasoning/thinking icin niyet: off | on | auto
-fail_on_reasoning_only: true     # content bos, reasoning dolu gelirse taramayi erken durdur
+max_tokens: 4096                 # Yuklu LM Studio modeli uzun reasoning yazsa bile final JSON'a gecsin
+reasoning_mode: "off"            # reasoning/thinking icin niyet: off | on | auto
+fail_on_reasoning_only: true     # content bos, reasoning dolu gelirse tile'i needs_retry say ve devam et
 log_level: "INFO"
 
 featureless_std_threshold: 4.0

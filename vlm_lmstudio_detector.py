@@ -711,7 +711,7 @@ def run_vlm_lmstudio_detection(
                                 "visual_evidence": "",
                                 "possible_false_positive": "",
                                 "recommended_check": "field_check",
-                                "status": "error",
+                                "status": "needs_retry" if error_type == "reasoning_only" else "error",
                                 "error_type": error_type,
                                 "error_message": message,
                             }
@@ -720,7 +720,8 @@ def run_vlm_lmstudio_detection(
                         if response_text is not None:
                             raw_record["raw_response"] = response_text
                         _write_jsonl_line(raw_fh, raw_record)
-                        error_records.append(record)
+                        if record.get("status") == "error":
+                            error_records.append(record)
                         tile_records = [record]
                         if error_type == "vision_unsupported":
                             log.error(
@@ -736,7 +737,10 @@ def run_vlm_lmstudio_detection(
                                 message,
                             )
                             break_after_tile = True
-                        log.warning("VLM tile %s hata ile atlandi: %s", tile_index, message)
+                        if record.get("status") == "needs_retry":
+                            log.warning("VLM tile %s sonuc uretmeden tekrar denenecek olarak isaretlendi: %s", tile_index, message)
+                        else:
+                            log.warning("VLM tile %s hata ile atlandi: %s", tile_index, message)
 
                     for record in tile_records:
                         _write_jsonl_line(jsonl_fh, record)
@@ -821,13 +825,14 @@ def run_vlm_lmstudio_detection(
                         or len(processed_tile_indexes) == total_tiles
                     ):
                         log.info(
-                            "VLM ilerleme: %d/%d tile, model_aday=%d, ilk_asama=%d, ikinci_asama=%d, skipped=%d, hata=%d",
+                            "VLM ilerleme: %d/%d tile, model_aday=%d, ilk_asama=%d, ikinci_asama=%d, skipped=%d, tekrar=%d, hata=%d",
                             len(processed_tile_indexes),
                             total_tiles,
                             raw_candidate_count,
                             len(first_stage_records),
                             len(candidate_records),
                             skipped_count,
+                            _count_status(records, "needs_retry"),
                             len(error_records),
                         )
                     if break_after_tile:
@@ -1434,16 +1439,15 @@ def _resume_candidate_index(record: Dict[str, Any]) -> Optional[int]:
 
 
 def _is_retryable_resume_error(record: Dict[str, Any]) -> bool:
-    if str(record.get("status") or "").strip().lower() != "error":
+    status = str(record.get("status") or "").strip().lower()
+    if status not in {"error", "skipped", "needs_retry"}:
         return False
     return _is_retryable_error_record(record.get("error_type"), record.get("error_message"))
 
 
 def _is_retryable_error_record(error_type: Any, message: Any) -> bool:
     kind = str(error_type or "").strip().lower()
-    if kind == "reasoning_only":
-        return False
-    if kind in {"invalid_json", "connection_failed", "model_not_loaded"}:
+    if kind in {"invalid_json", "connection_failed", "model_not_loaded", "reasoning_only"}:
         return True
     if kind == "api_error" and _looks_like_transient_api_message(message):
         return True
@@ -1452,7 +1456,7 @@ def _is_retryable_error_record(error_type: Any, message: Any) -> bool:
 
 def _should_stop_scan_after_error(error_type: Any, message: Any) -> bool:
     kind = str(error_type or "").strip().lower()
-    if kind in {"connection_failed", "model_not_loaded", "reasoning_only"}:
+    if kind in {"connection_failed", "model_not_loaded"}:
         return True
     return kind == "api_error" and _looks_like_model_not_loaded_message(message)
 
@@ -3367,7 +3371,7 @@ def _friendly_exception_message(exc: Exception, config: VlmLmStudioConfig) -> st
     if error_type == "reasoning_only":
         return (
             f"{backend_label} final JSON yerine sadece reasoning/thinking icerigi dondurdu. "
-            "Reasoning/Thinking modunu kapatin veya config_vlm.yaml icinde reasoning_mode: \"off\" kullanin."
+            "Tile sonuc uretmeden atlanacak; resume acikken sonraki kosuda tekrar denenir."
         )
     if error_type == "invalid_json":
         return f"Model strict JSON dondurmedi: {str(exc)[:500]}"
@@ -3526,6 +3530,7 @@ def _log_run_summary_statistics(
     """Tarama bittikten sonra güven dağılımı, aday tipi ve hata özetini loglar."""
     candidate_records = [r for r in records if r.get("candidate")]
     skipped_records = [r for r in records if r.get("status") == "skipped"]
+    needs_retry_records = [r for r in records if r.get("status") == "needs_retry"]
     reviewed_records = [r for r in records if r.get("review_status") not in (None, "")]
 
     buckets = {"0.0-0.5": 0, "0.5-0.75": 0, "0.75-0.85": 0, "0.85-0.95": 0, "0.95-1.0": 0}
@@ -3546,12 +3551,19 @@ def _log_run_summary_statistics(
 
     type_counts = collections.Counter(r.get("candidate_type", "unknown") for r in candidate_records)
     skip_counts = collections.Counter(r.get("error_type", "unknown") for r in skipped_records)
+    needs_retry_counts = collections.Counter(r.get("error_type", "unknown") for r in needs_retry_records)
     review_confirmed = sum(1 for r in reviewed_records if r.get("review_confirmed") is True)
     review_rejected = sum(1 for r in reviewed_records if r.get("review_confirmed") is False)
     review_error = sum(1 for r in reviewed_records if r.get("review_status") == "error")
 
     logger.info("--- VLM tarama ozeti ---")
-    logger.info("Toplam kayit: %d | Aday: %d | Atlanan: %d", len(records), len(candidate_records), len(skipped_records))
+    logger.info(
+        "Toplam kayit: %d | Aday: %d | Atlanan: %d | Tekrar denenecek: %d",
+        len(records),
+        len(candidate_records),
+        len(skipped_records),
+        len(needs_retry_records),
+    )
     if confidences:
         median_conf = float(np.percentile(confidences, 50))
         p90_conf = float(np.percentile(confidences, 90))
@@ -3563,7 +3575,14 @@ def _log_run_summary_statistics(
         logger.info("2. asama inceleme: onaylandi=%d | reddedildi=%d | hata=%d", review_confirmed, review_rejected, review_error)
     if skip_counts:
         logger.info("Atlama nedenleri: %s", " | ".join(f"{k}:{v}" for k, v in skip_counts.most_common()))
+    if needs_retry_counts:
+        logger.info("Tekrar denenecek nedenleri: %s", " | ".join(f"{k}:{v}" for k, v in needs_retry_counts.most_common()))
     logger.info("--- ozet sonu ---")
+
+
+def _count_status(records: Sequence[Dict[str, Any]], status: str) -> int:
+    expected = str(status or "").strip().lower()
+    return sum(1 for record in records if str(record.get("status") or "").strip().lower() == expected)
 
 
 def _set_progress_postfix(
@@ -3576,9 +3595,11 @@ def _set_progress_postfix(
     candidate_records: Sequence[Dict[str, Any]],
     sec_per_tile: Optional[float] = None,
 ) -> None:
+    needs_retry_count = _count_status(records, "needs_retry")
     postfix: Dict[str, Any] = {
-        "ok": len(records) - len(error_records) - skipped_count,
+        "ok": len(records) - len(error_records) - skipped_count - needs_retry_count,
         "skip": skipped_count,
+        "retry": needs_retry_count,
         "err": len(error_records),
         "cand": raw_candidate_count,
         "out": len(candidate_records),
@@ -3699,7 +3720,7 @@ def _records_needing_review(records: Sequence[Dict[str, Any]], threshold: float)
 
 def _not_found_reason(record: Dict[str, Any], threshold: float) -> str:
     status = str(record.get("status") or "").strip().lower()
-    if status in {"skipped", "error", "warning"}:
+    if status in {"skipped", "needs_retry", "error", "warning"}:
         return status
     if bool(record.get("candidate")):
         if not record.get("geometry"):

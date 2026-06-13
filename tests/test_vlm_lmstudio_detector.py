@@ -303,12 +303,14 @@ def test_model_not_loaded_errors_stop_scan_and_resume_later():
     assert vlm._is_retryable_error_record("api_error", message) is True
 
 
-def test_reasoning_only_errors_stop_scan_without_resume_retry():
+def test_reasoning_only_errors_do_not_stop_scan_and_resume_later():
     exc = vlm.VlmReasoningOnlyError("reasoning only")
 
     assert vlm._classify_exception(exc) == "reasoning_only"
-    assert vlm._should_stop_scan_after_error("reasoning_only", str(exc)) is True
-    assert vlm._is_retryable_error_record("reasoning_only", str(exc)) is False
+    assert vlm._should_stop_scan_after_error("reasoning_only", str(exc)) is False
+    assert vlm._is_retryable_error_record("reasoning_only", str(exc)) is True
+    assert vlm._is_retryable_resume_error({"status": "needs_retry", "error_type": "reasoning_only"}) is True
+    assert vlm._is_retryable_resume_error({"status": "skipped", "error_type": "reasoning_only"}) is True
 
 
 def test_lmstudio_reload_unloads_then_loads_model(monkeypatch):

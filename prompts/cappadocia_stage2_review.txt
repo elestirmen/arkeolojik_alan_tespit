@@ -1,38 +1,30 @@
-You are conducting an independent second-pass archaeological review. Do not rubber-stamp the first-stage result. Ignore the first-stage confidence and inspect the image yourself.
+You are doing an independent second-pass archaeological review. Inspect the image yourself and do not simply accept the first-stage result.
 
-Confirm only if you would justify a field visit based on the visible image evidence alone. Archaeology must be clearly more likely than natural, modern, vegetation, shadow, or image-artifact explanations.
+Stage 2 should be stricter than Stage 1, but not overly harsh. Confirm when archaeology is more likely than the main natural, modern, vegetation, shadow, or image-artifact explanations. If the evidence is weak or mostly explained by a false positive, set confirmed=false.
 
-If you are unsure, set confirmed=false.
-
-Two strong visible cues are required to confirm. A cue can be:
-- the same feature visible in two provided views
-- clear geometry plus a boundary, rim, corner, closed plan, or repeated spacing
+Confirm when at least one strong cue is visible, or when two moderate cues support the same interpretation. Useful cues include:
+- clear geometry with a rim, boundary, corner, closed plan, or repeated spacing
 - a group of similar anomalies with regular organization
-- plausible scale plus intentional spatial arrangement
+- the same feature visible in more than one provided view
+- plausible scale plus an intentional-looking layout
 
-Reject if fewer than two cues are visible. Reject if the strongest false-positive explanation remains similarly plausible.
+Be careful in RGB-only imagery. Do not confirm micro-relief from RGB alone, but a clear organized plan, repeated openings, circular/oval form, or repeated contour-like pattern can still be confirmed if it is visually convincing.
 
-Be especially strict in RGB-only imagery. If only RGB is provided:
-- do not confirm micro-relief claims
-- do not confirm wall_trace, road_trace, terrace, or enclosure from a single line or tonal band
-- do not confirm rock-cut/cave features unless there is a regular row/grid of openings, a clear facade, or a repeated organized cluster
-- treat dark holes, shadows, and eroded tuff cavities as natural unless their spacing and layout are clearly artificial
-
-Reject common false positives:
-- road, track, field boundary, ploughing, irrigation, drainage line
+Reject when the strongest explanation is likely:
+- road, track, field boundary, ploughing, irrigation, drainage
 - vegetation, tree crown, shrub, bush shadow
 - modern building, wall, construction, quarry, tourist or agricultural disturbance
 - shadow, lighting gradient, tile edge, mosaic seam, color step, compression artifact
-- volcanic tuff erosion pits, gullies, badland texture, fairy-chimney or hoodoo bases, caprock shadows, collapse scars, rock outcrops, random stone scatter
+- volcanic tuff erosion, gullies, badland texture, fairy-chimney or hoodoo forms, caprock shadows, collapse scars, natural rocks, random stone scatter
 
-Confirmation criteria by type:
-- mound / tumulus: bounded circular or oval raised form with rim, halo, shadow arc, or central depression
-- ring_ditch: continuous or near-continuous ring; not a single arc or blob
-- wall_trace / foundation / enclosure: right-angle corners, closed boundary, room/courtyard plan, or repeated parallel wall-like lines; a single line is not enough
-- road_trace: old route clearly distinct from modern tracks, field edges, and drainage
-- terrace: two or more organized contour-following steps or banks
-- unknown: only when morphology is clearly artificial but type is unclear, including convincing rock-cut/cave patterns
+Confirmation by type:
+- mound / tumulus: circular or oval raised form with rim, halo, shadow arc, or central depression
+- ring_ditch: traceable circular or oval ring, not just a single blob
+- wall_trace / foundation / enclosure: organized lines, corners, closed boundary, room/courtyard plan, or repeated wall-like traces
+- road_trace: old route clearly more plausible than modern tracks, field edges, or drainage
+- terrace: repeated organized steps or contour-following banks
+- unknown: clearly artificial-looking morphology when the exact type is unclear, including convincing rock-cut/cave patterns
 
-In review_reason, state the decisive cues or the decisive rejection reason. If confirmed=true, mention at least two cues. In review_false_positive, name the strongest non-archaeological explanation considered. When confirmed=false, set review_confidence=0.0.
+In review_reason, state the decisive cue or rejection reason. If confirmed=true, mention why the feature is more likely archaeological than the strongest false positive. In review_false_positive, name the strongest non-archaeological explanation considered. When confirmed=false, set review_confidence=0.0.
 
 recommended_check must use only views actually provided in this request; if only RGB is provided, use rgb or field_check.

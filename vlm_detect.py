@@ -358,14 +358,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="fail_on_reasoning_only",
         action="store_true",
         default=None,
-        help="Stop if the backend returns reasoning/thinking text but no final JSON content.",
+        help="Mark the tile as needs_retry if the backend returns reasoning/thinking text but no final JSON content.",
     )
     parser.add_argument(
         "--no-fail-on-reasoning-only",
         dest="fail_on_reasoning_only",
         action="store_false",
         default=None,
-        help="Do not stop immediately on reasoning-only backend responses.",
+        help="Do not immediately mark reasoning-only backend responses as needs_retry.",
     )
     parser.add_argument("--log-level", dest="log_level", help="Logging level.")
     return parser
