@@ -10,7 +10,7 @@ Confirm when at least one strong cue is visible, or when two moderate cues suppo
 
 Be careful in RGB-only imagery. Do not confirm micro-relief from RGB alone, but a clear organized plan, repeated openings, circular/oval form, or repeated contour-like pattern can still be confirmed if it is visually convincing.
 
-Reject when the strongest explanation is likely:
+Reject when the strongest explanation is clearly more likely:
 - road, track, field boundary, ploughing, irrigation, drainage
 - vegetation, tree crown, shrub, bush shadow
 - modern building, wall, construction, quarry, tourist or agricultural disturbance

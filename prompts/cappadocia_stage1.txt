@@ -1,40 +1,36 @@
-You are screening an aerial or satellite tile from the Cappadocia cultural and volcanic landscape.
+You are doing a broad first-pass screen of an aerial or satellite tile from the Cappadocia cultural and volcanic landscape.
 
-Stage 1 should be moderately inclusive. Most tiles will have no archaeology, but do not suppress a reviewable candidate just because it is subtle. Return a candidate when the image shows either one strong archaeology-like cue or two weaker cues that together look intentional.
+Your goal is to catch reviewable archaeological possibilities, not to make the final decision. Be moderately inclusive. If a feature looks plausibly human-made and worth a second look, return it as a candidate even if it may later be rejected.
 
-Look for:
-- mounds or tumuli: circular or oval raised forms, rims, halos, or central depressions
-- ring_ditches: traceable circular or oval ditch or soil marks
-- wall_trace, foundation, enclosure: organized lines, corners, rooms, courtyard plans, closed boundaries, or stone alignments
-- road_trace: old route-like alignments that are not obvious modern roads, field edges, or drainage
-- terrace: repeated contour-following steps or banks
-- rock-cut or cave features: regular rows or clusters of openings, facades, niches, or courtyard-like cave groups
+Look mainly for positive visual evidence:
+- circular or oval mounds, tumuli, halos, rims, or central depressions
+- circular or oval ditch or soil-mark patterns
+- organized lines, corners, rooms, courtyard plans, enclosures, foundations, or stone alignments
+- old route-like alignments that look intentional
+- repeated contour-following steps or banks
+- regular rows, clusters, facades, niches, or cave/rock-cut groups
 
-Use candidate=true when the feature is coherent, plausible in scale, and more organized than the surrounding terrain. A single strong cue is enough for Stage 1 if it is clearly reviewable. Two weaker cues are also enough, such as shape plus context, repeated similar marks, or a line plus a corner/parallel trace.
+Use candidate=true when there is a clear reviewable cue, such as a coherent shape, repeated pattern, organized layout, boundary, corner, ring, rim, or unusual cluster that looks more intentional than nearby terrain. One strong cue is enough for Stage 1. Two weaker cues are also enough.
 
-Use candidate=false when the tile only shows random texture, one isolated weak anomaly, or an obvious false positive.
+Do not over-filter in Stage 1. If uncertain but the feature is coherent and reviewable, include it with lower confidence and explain the doubt in possible_false_positive.
 
-Common false positives to reject:
-- volcanic tuff erosion, gullies, badland texture, collapse scars, fairy-chimney or hoodoo forms, natural rocks, random stone scatter
-- vegetation, tree crowns, shrubs, bush shadows, fuzzy organic patches
-- modern roads, tracks, field boundaries, ploughing, irrigation, buildings, recent disturbance
-- satellite mosaic seams, tile edges, color steps, compression blocks, lighting gradients, shadow-only patterns
+Use candidate=false only when there is no coherent feature, or when the tile is clearly just modern infrastructure, vegetation, image artifact, or random natural texture with no organized pattern.
 
-RGB-only caution: be careful with micro-relief claims, but do not reject every subtle feature. In RGB-only tiles, a clear shape, repeated pattern, or organized layout can still be a Stage 1 candidate.
+RGB-only caution: avoid claiming hidden micro-relief from RGB alone, but clear visible geometry or repeated organization in RGB can still be a candidate.
 
 Candidate type rules:
 - Use "mound" or "tumulus" for circular or oval raised features.
 - Use "ring_ditch" for circular or oval ditch or soil-mark patterns.
 - Use "wall_trace", "foundation", or "enclosure" for organized lines, corners, rooms, or boundaries.
-- Use "road_trace" only when an old route is more likely than a modern track, field edge, or drainage.
+- Use "road_trace" for plausible old route-like alignments.
 - Use "terrace" for repeated contour-following steps or banks.
 - Use "unknown" for plausible archaeology when the exact type is unclear, including rock-cut or cave-like features.
 
 Confidence calibration:
 - Confidence < 0.75: do not include the candidate.
 - 0.75-0.82: weak but reviewable Stage 1 candidate.
-- 0.83-0.89: plausible candidate with coherent morphology.
+- 0.83-0.89: plausible candidate.
 - 0.90+: strong candidate with clear geometry or repeated organization.
 - Use 0.95+ only for unmistakable field-priority features.
 
-Keep visual_evidence short and concrete. Mention the strongest cue or cues. In possible_false_positive, name the most likely non-archaeological explanation even when candidate=true. Pick recommended_check only from views actually provided in this request.
+Keep visual_evidence short and concrete. In possible_false_positive, name the strongest alternative explanation if there is one. Pick recommended_check only from views actually provided in this request.
