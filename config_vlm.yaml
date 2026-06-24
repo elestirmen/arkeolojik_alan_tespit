@@ -20,8 +20,8 @@ backends:
     base_url: "http://127.0.0.1:1234"      # LM Studio: lms server start --port 1234
     api_key: "lm-studio"
     model: "loaded"   # LM Studio'da su an yuklu olan VLM modelini kullan
-    tile: 768
-    overlap: 192
+    tile: 1024
+    overlap: 256
     timeout: 240
     reload_every_tiles: 100                # sadece LM Studio native unload/load icin
     reload_pause_seconds: 5
@@ -42,8 +42,8 @@ backends:
 # ===================== ORTAK AYARLAR =====================
 
 #input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya"
-#input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/urgup_cevresi.tif"
-input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya/kapadokya_bing_map_3-3.tif"
+input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/urgup_cevresi.tif"
+#input: "E:/SASPlanet_250505_[sasplanet.geojamal.com]/haritalarim/kapadokya/kapadokya_bing_map_3-3.tif"
 
 batch: false                      # klasordeki tum GeoTIFF'leri ayri tarayip birlestirir
 
